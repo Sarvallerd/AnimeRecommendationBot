@@ -1,0 +1,9 @@
+*.csv
+glove.6B.300d.txt
+*.gz
+*.npz
+conversationbot
+
+.ipynb_checkpoints
+.idea
+__pycache__
