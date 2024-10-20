@@ -22,7 +22,6 @@ pub enum State {
     ReceiveAnimeName,
     ReceiveUserChoice,
     ReceiveUserFeedback,
-    SuccessRecommendation,
 }
 
 /// These commands are supported:
@@ -73,7 +72,6 @@ fn schema(db: Arc<Db>) -> UpdateHandler<Box<dyn std::error::Error + Send + Sync 
 
     let message_handler = Update::filter_message()
         .branch(command_handler)
-        .branch(case![State::SuccessRecommendation].endpoint(success_recommendation))
         .branch(
             case![State::ReceiveAnimeName].endpoint(move |bot, dialogue, msg| {
                 let db_name = Arc::clone(&db_name);
