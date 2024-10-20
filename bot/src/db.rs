@@ -1,5 +1,3 @@
-use std::fmt::format;
-
 use postgres::{Client, NoTls};
 
 pub trait DBActions {
