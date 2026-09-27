@@ -1,0 +1,10 @@
+services:
+  builder:
+    network_mode: none
+    volumes:
+      - ./deploy/tests/build-fixture.py:/fixture/build-fixture.py:ro
+  bot:
+    command: ["--prepare"]
+    restart: "no"
+    environment:
+      TELOXIDE_TOKEN: 0:ci

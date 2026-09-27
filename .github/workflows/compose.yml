@@ -1,0 +1,24 @@
+name: Compose acceptance
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  compose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Record checked-out commit and Docker tools
+        run: |
+          git log -1 --format='%H %s'
+          docker version
+          docker compose version
+      - name: Run isolated synthetic Docker acceptance
+        run: bash deploy/tests/compose-acceptance.sh

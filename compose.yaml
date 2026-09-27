@@ -1,0 +1,94 @@
+services:
+  postgres:
+    image: postgres:16.15-bookworm@sha256:efedf3595f1d6f415c08568ba171029bf54052e754cc9f030e3f2412b21f3d67
+    environment:
+      POSTGRES_USER: anime_bot
+      POSTGRES_DB: anime_bot
+    env_file:
+      - path: ${ARB_POSTGRES_ENV:-./deploy/.env.postgres}
+        required: false
+        format: raw
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+  prepare:
+    image: ${COMPOSE_PROJECT_NAME:-animebot}-bot:local
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.bot
+    command: ["--prepare"]
+    restart: "no"
+    env_file:
+      - path: ${ARB_BOT_ENV:-./deploy/.env.bot}
+        required: false
+        format: raw
+    environment:
+      TELOXIDE_TOKEN: 0:prepare
+      ARTIFACTS_DIR: /artifacts
+      RUST_LOG: ${ARB_LOG:-info}
+    volumes:
+      - type: bind
+        source: ${ARB_BUNDLE_DIR:-./.arb/bundle-not-selected}
+        target: /artifacts
+        read_only: true
+        bind:
+          create_host_path: false
+    depends_on:
+      postgres:
+        condition: service_healthy
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 30s
+  bot:
+    image: ${COMPOSE_PROJECT_NAME:-animebot}-bot:local
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.bot
+    container_name: ${COMPOSE_PROJECT_NAME:-animebot}-bot
+    restart: unless-stopped
+    env_file:
+      - path: ${ARB_BOT_ENV:-./deploy/.env.bot}
+        required: false
+        format: raw
+    environment:
+      ARTIFACTS_DIR: /artifacts
+      RUST_LOG: ${ARB_LOG:-info}
+    volumes:
+      - type: bind
+        source: ${ARB_BUNDLE_DIR:-./.arb/bundle-not-selected}
+        target: /artifacts
+        read_only: true
+        bind:
+          create_host_path: false
+    depends_on:
+      postgres:
+        condition: service_healthy
+      prepare:
+        condition: service_completed_successfully
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 30s
+  builder:
+    profiles: [tools]
+    image: ${COMPOSE_PROJECT_NAME:-animebot}-builder:local
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.builder
+    user: ${ARB_UID:-1000}:${ARB_GID:-1000}
+    volumes:
+      - type: bind
+        source: ${ARB_DATA_DIR:-./.arb/data}
+        target: /data
+        bind:
+          create_host_path: false
+volumes:
+  postgres_data:

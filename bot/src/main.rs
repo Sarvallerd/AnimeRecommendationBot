@@ -19,13 +19,14 @@ async fn main() {
 
 async fn run() -> Result<(), String> {
     let mut args = std::env::args_os().skip(1);
-    let check_config = match (args.next(), args.next()) {
-        (None, None) => false,
-        (Some(arg), None) if arg == "--check-config" => true,
-        _ => return Err("Usage: bot [--check-config]".to_owned()),
+    let mode = match (args.next(), args.next()) {
+        (None, None) => None,
+        (Some(arg), None) if arg == "--check-config" => Some("check"),
+        (Some(arg), None) if arg == "--prepare" => Some("prepare"),
+        _ => return Err("Usage: bot [--check-config|--prepare]".to_owned()),
     };
     let config = Config::from_env().map_err(|error| error.to_string())?;
-    if check_config {
+    if mode == Some("check") {
         println!("Configuration is valid.");
         return Ok(());
     }
@@ -40,13 +41,17 @@ async fn run() -> Result<(), String> {
         bundle.identity(),
         bundle.catalog().len()
     );
-    let bot = Bot::new(config.token());
     let db = Db::new(config.database())
         .await
         .map_err(|_| "Database connection failed.".to_owned())?;
     db.migrate()
         .await
         .map_err(|_| "Database setup failed.".to_owned())?;
+    if mode == Some("prepare") {
+        println!("Recommendation bundle and database are ready.");
+        return Ok(());
+    }
+    let bot = Bot::new(config.token());
     let context = Arc::new(AppContext::new(
         bundle,
         Arc::new(db),
