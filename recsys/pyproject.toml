@@ -1,0 +1,20 @@
+[build-system]
+requires = ["uv_build==0.11.12"]
+build-backend = "uv_build"
+
+[project]
+name = "anime-recommendation-recsys"
+version = "0.1.0"
+description = "Offline recommendation artifact preparation for AnimeRecommendationBot"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "numpy==2.5.3",
+    "pandas==3.0.6",
+]
+
+[project.scripts]
+recsys = "recsys.cli:main"
+
+[tool.uv.build-backend]
+module-name = "recsys"
