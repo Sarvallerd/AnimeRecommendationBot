@@ -23,6 +23,12 @@ def build_parser() -> argparse.ArgumentParser:
     normalize_parser.add_argument("--anime-csv", required=True, help="path to anime.csv")
     normalize_parser.add_argument("--synopsis-csv", required=True, help="path to anime_with_synopsis.csv")
     normalize_parser.add_argument("--output-dir", required=True, help="directory for normalization artifacts")
+    build_parser = commands.add_parser("build", help="build pinned GloVe cosine neighbors")
+    build_parser.add_argument("--catalog", required=True, help="path to normalized catalog.json")
+    build_parser.add_argument("--normalization-report", required=True, help="path to normalization-report.json")
+    build_parser.add_argument("--glove", required=True, help="path to glove.6B.300d.txt")
+    build_parser.add_argument("--output-dir", required=True, help="directory for build artifacts")
+    build_parser.add_argument("--block-size", type=int, default=256, help="similarity rows per block (1..256)")
     quality_parser = commands.add_parser("quality", help="run offline recommendation quality diagnostics")
     quality_commands = quality_parser.add_subparsers(dest="quality_command", required=True)
     baseline_parser = quality_commands.add_parser("baseline", help="run the pinned genre baseline")
@@ -59,6 +65,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             normalize(Path(parsed.anime_csv), Path(parsed.synopsis_csv), Path(parsed.output_dir))
         except (SourceError, OSError, ValueError) as exc:
             print(f"recsys normalize: {exc}", file=sys.stderr)
+            return 1
+    elif parsed.command == "build":
+        from pathlib import Path
+
+        from .build import BuildError, build
+        from .sources import SourceError
+
+        try:
+            build(Path(parsed.catalog), Path(parsed.normalization_report), Path(parsed.glove),
+                  Path(parsed.output_dir), block_size=parsed.block_size)
+        except (BuildError, SourceError, OSError, ValueError) as exc:
+            print(f"recsys build: {exc}", file=sys.stderr)
             return 1
     elif parsed.command == "quality" and parsed.quality_command == "baseline":
         from pathlib import Path

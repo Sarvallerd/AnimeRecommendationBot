@@ -69,6 +69,18 @@ class CliTests(unittest.TestCase):
         self.assertIn("catalog SHA256 mismatch", loaded.stderr)
         self.assertNotIn("Traceback", loaded.stderr)
 
+    def test_build_help_and_input_error_outside_cwd(self) -> None:
+        help_result = self.run_cli("build", "--help", console=True)
+        self.assertEqual(help_result.returncode, 0, help_result.stderr)
+        self.assertIn("--normalization-report", help_result.stdout)
+        result = self.run_cli("build", "--catalog", "missing", "--normalization-report",
+                              "missing-report", "--glove", "missing-glove", "--output-dir", "out",
+                              console=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("recsys build:", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
     def test_unknown_arguments_and_commands_fail(self) -> None:
         for args in (("--unknown",), ("build",), ("--ver",)):
             with self.subTest(args=args):
