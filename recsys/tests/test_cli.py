@@ -1,6 +1,7 @@
 """Check the installed command-line interfaces from another directory."""
 
 import importlib.metadata
+import json
 import subprocess
 import sys
 import tempfile
@@ -68,6 +69,37 @@ class CliTests(unittest.TestCase):
         self.assertEqual(loaded.returncode, 1)
         self.assertIn("catalog SHA256 mismatch", loaded.stderr)
         self.assertNotIn("Traceback", loaded.stderr)
+
+    def test_build_help_and_input_error_outside_cwd(self) -> None:
+        help_result = self.run_cli("build", "--help", console=True)
+        self.assertEqual(help_result.returncode, 0, help_result.stderr)
+        self.assertIn("--normalization-report", help_result.stdout)
+        result = self.run_cli("build", "--catalog", "missing", "--normalization-report",
+                              "missing-report", "--glove", "missing-glove", "--output-dir", "out",
+                              console=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("recsys build:", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_build_oversized_integer_score_reports_clean_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            catalog = {"schema_version": 1, "anime": {"1": {
+                "title": "Example", "aliases": [], "genres": [], "score": 10 ** 1000,
+                "year": None, "type": None, "episodes": None, "synopsis": None}}}
+            path = root / "catalog.json"
+            path.write_text(json.dumps(catalog, ensure_ascii=False, sort_keys=True,
+                                       separators=(",", ":"), allow_nan=False) + "\n", encoding="utf-8")
+            result = self.run_cli("build", "--catalog", str(path),
+                                  "--normalization-report", str(root / "missing-report.json"),
+                                  "--glove", str(root / "missing-glove.txt"),
+                                  "--output-dir", str(root / "out"), console=True)
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(result.stdout, "")
+            self.assertIn("recsys build: invalid score: 1", result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertFalse((root / "out").exists())
 
     def test_unknown_arguments_and_commands_fail(self) -> None:
         for args in (("--unknown",), ("build",), ("--ver",)):
