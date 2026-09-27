@@ -1,5 +1,7 @@
 """Synthetic comparison behavior and measurement validation."""
+import hashlib
 import json
+import os
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -20,32 +22,42 @@ class EvaluationTests(unittest.TestCase):
                           for x in rows[0]["recommendations"]], genre_neighbors(anime, 1))
         self.assertEqual(rows[1]["status"], "empty_genres")
 
-    def test_selected_worker_calls_adapter_and_records_timing(self):
-        pins = {"catalog": {"anime": {"1": {"genres": ["Drama"]}}},
-                "queries": [{"mal_id": 1}],
-                "registry": {"sources": [{"id": "glove_300d", "size": 1, "sha256": "a" * 64}]}}
-        rows = [{"query_mal_id": 1, "status": "no_positive_candidates",
-                 "reasons": [], "recommendations": []}]
-        def selected(anime, queries, glove, descriptor):
-            self.assertEqual(anime, pins["catalog"]["anime"])
-            self.assertEqual(queries, pins["queries"])
-            self.assertEqual(descriptor["id"], "glove_300d")
-            return [1], rows, {"size": 1, "sha256": "a" * 64}, 5
+    def test_selected_worker_uses_real_vectors_and_records_timing(self):
+        def record(title):
+            return {"title": title, "aliases": [], "genres": [], "score": None,
+                    "year": None, "type": None, "episodes": None, "synopsis": None}
+        anime = {"1": record("Blue"), "2": record("Blue"), "3": record("Absent")}
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
+            glove = root / "glove.6B.300d.txt"
+            glove_raw = ("blue " + " ".join(["1"] + ["0"] * 299) + "\n").encode()
+            glove.write_bytes(glove_raw)
+            descriptor = {"id": "glove_300d", "size": len(glove_raw),
+                          "sha256": hashlib.sha256(glove_raw).hexdigest()}
+            pins = {"catalog": {"anime": anime}, "queries": [{"mal_id": 1}, {"mal_id": 3}],
+                    "registry": {"sources": [descriptor]}}
             request = root / "request.json"
             output = root / "output.json"
             request.write_text(json.dumps({"method": "glove-selected", "paths": {
-                name: str(root / name) for name in ("bundle_dir", "normalization_report",
-                                                     "build_report", "anime_csv", "synopsis_csv",
-                                                     "glove", "lockfile")}}))
-            with patch("recsys.evaluation._load_pins", return_value=pins), \
-                 patch("recsys.evaluation._selected_queries", side_effect=selected):
+                name: str(glove if name == "glove" else root / name)
+                for name in ("bundle_dir", "normalization_report", "build_report",
+                             "anime_csv", "synopsis_csv", "glove", "lockfile")}}))
+            thread_env = {name: "1" for name in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS",
+                                                 "MKL_NUM_THREADS", "VECLIB_MAXIMUM_THREADS",
+                                                 "NUMEXPR_NUM_THREADS")}
+            with patch.dict(os.environ, thread_env), patch("recsys.evaluation._load_pins", return_value=pins):
                 _worker(request, output)
             result = json.loads(output.read_text())
-        self.assertEqual(result["result"]["queries"], rows)
-        self.assertEqual(result["rank20_wall_ns"], 5)
+        rows = result["result"]["queries"]
+        self.assertEqual(result["result"]["universe_count"], 3)
+        self.assertEqual(rows[0], {"query_mal_id": 1, "status": "ok", "reasons": [],
+                                   "recommendations": [{"rank": 1, "mal_id": 2, "score": 1.0}]})
+        self.assertEqual(rows[1], {"query_mal_id": 3, "status": "oov_only",
+                                   "reasons": [], "recommendations": []})
+        self.assertEqual(result["result"]["extra"]["glove"]["sha256"], descriptor["sha256"])
+        self.assertGreater(result["rank20_wall_ns"], 0)
         self.assertGreater(result["prepare_wall_ns"], 0)
+        self.assertTrue(all(pool["num_threads"] == 1 for pool in result["effective_threadpools"]))
 
     def test_measurements_need_valid_units_and_complete_repetitions(self):
         comparison_raw = b"{}\n"
