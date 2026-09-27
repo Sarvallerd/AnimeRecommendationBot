@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://anime-recommendation-bot.local/contracts/neighbors.schema.json",
+  "title": "Anime neighbors v1",
+  "type": "object",
+  "required": ["schema_version", "neighbors"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": 1, "type": "integer"},
+    "neighbors": {
+      "type": "object",
+      "propertyNames": {"pattern": "^[1-9][0-9]*$"},
+      "additionalProperties": {
+        "type": "array",
+        "maxItems": 5,
+        "items": {
+          "type": "object",
+          "required": ["mal_id", "similarity"],
+          "additionalProperties": false,
+          "properties": {
+            "mal_id": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+            "similarity": {"type": "number", "exclusiveMinimum": 0, "maximum": 1}
+          }
+        }
+      }
+    }
+  }
+}

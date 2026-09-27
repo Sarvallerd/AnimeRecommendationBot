@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://anime-recommendation-bot.local/contracts/manifest.schema.json",
+  "title": "Anime recommendation bundle manifest v1",
+  "type": "object",
+  "required": ["schema_version", "algorithm", "sources", "files"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": 1, "type": "integer"},
+    "algorithm": {
+      "type": "object",
+      "required": ["name", "version", "max_neighbors", "similarity", "parameters"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"const": "glove-mean-cosine"},
+        "version": {"$ref": "#/$defs/nonblank"},
+        "max_neighbors": {"const": 5, "type": "integer"},
+        "similarity": {"const": "cosine"},
+        "parameters": {"type": "object"}
+      }
+    },
+    "sources": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["name", "version", "sha256", "metadata"],
+        "additionalProperties": false,
+        "properties": {
+          "name": {"$ref": "#/$defs/nonblank"},
+          "version": {"$ref": "#/$defs/nonblank"},
+          "sha256": {"$ref": "#/$defs/sha256"},
+          "metadata": {"type": "object"}
+        }
+      }
+    },
+    "files": {
+      "type": "object",
+      "required": ["catalog.json", "neighbors.json"],
+      "additionalProperties": false,
+      "properties": {
+        "catalog.json": {"$ref": "#/$defs/file"},
+        "neighbors.json": {"$ref": "#/$defs/file"}
+      }
+    }
+  },
+  "$defs": {
+    "nonblank": {"type": "string", "pattern": "\\S"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "file": {
+      "type": "object",
+      "required": ["sha256"],
+      "additionalProperties": false,
+      "properties": {"sha256": {"$ref": "#/$defs/sha256"}}
+    }
+  }
+}

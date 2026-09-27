@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://anime-recommendation-bot.local/contracts/catalog.schema.json",
+  "title": "Anime catalog v1",
+  "type": "object",
+  "required": ["schema_version", "anime"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": 1, "type": "integer"},
+    "anime": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {"pattern": "^[1-9][0-9]*$"},
+      "additionalProperties": {
+        "type": "object",
+        "required": ["title", "aliases", "genres", "score", "year", "type", "episodes", "synopsis"],
+        "additionalProperties": false,
+        "properties": {
+          "title": {"$ref": "#/$defs/nonblank"},
+          "aliases": {"$ref": "#/$defs/strings"},
+          "genres": {"$ref": "#/$defs/strings"},
+          "score": {"type": ["number", "null"], "minimum": 1, "maximum": 10},
+          "year": {"type": ["integer", "null"], "minimum": 1, "maximum": 9999},
+          "type": {"anyOf": [{"$ref": "#/$defs/nonblank"}, {"type": "null"}]},
+          "episodes": {"type": ["integer", "null"], "minimum": 1},
+          "synopsis": {"anyOf": [{"$ref": "#/$defs/nonblank"}, {"type": "null"}]}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "nonblank": {"type": "string", "pattern": "\\S"},
+    "strings": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/nonblank"}}
+  }
+}
