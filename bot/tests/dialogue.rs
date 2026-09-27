@@ -808,7 +808,7 @@ async fn simultaneous_duplicate_callbacks_have_one_repository_effect() {
     assert_eq!(
         api.snapshot()
             .iter()
-            .filter(|(_, body)| body.contains("Оценка аниме пока недоступна"))
+            .filter(|(_, body)| body.contains("Оцените «Небесный поезд» · MAL ID 3 от 1 до 10."))
             .count(),
         1
     );
