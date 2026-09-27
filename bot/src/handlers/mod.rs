@@ -50,6 +50,17 @@ async fn handle_message(bot: Bot, msg: Message, ctx: Arc<AppContext>) -> Handler
     };
     let session = ctx.sessions.get(actor);
     let mut session = session.lock().await;
+    if let Some(pending) = session.pending_feedback.as_ref() {
+        let incoming_key = format!("msg:{}:{}", actor.chat_id, msg.id.0);
+        if pending.action_key == incoming_key {
+            if text != Some(pending.body.as_str()) {
+                return feedback::reject_changed(&bot, actor).await;
+            }
+            if !matches!(session.state, State::AwaitingFeedback) {
+                return Ok(());
+            }
+        }
+    }
     if let Some(command) = text.filter(|t| t.starts_with('/')) {
         return commands::route(&bot, &ctx, actor, user, &mut session, command).await;
     }
@@ -58,7 +69,7 @@ async fn handle_message(bot: Bot, msg: Message, ctx: Arc<AppContext>) -> Handler
             search::on_message(&bot, &ctx, actor, user, &mut session, text, msg.id.0).await
         }
         State::AwaitingFeedback => {
-            feedback::on_message(&bot, &ctx, actor, &mut session, text, msg.id.0).await
+            feedback::on_message(&bot, &ctx, actor, user, &mut session, text, msg.id.0).await
         }
         _ => {
             bot.send_message(
@@ -129,6 +140,7 @@ async fn handle_callback(bot: Bot, q: CallbackQuery, ctx: Arc<AppContext>) -> Ha
         Action::Feedback => feedback::begin(&bot, &ctx, actor, &mut session).await,
         Action::Cancel => commands::cancel(&bot, actor, &mut session).await,
         Action::RetryQuery { .. } => search::on_retry(&bot, &ctx, actor, &mut session).await,
+        Action::RetryFeedback { .. } => feedback::on_retry(&bot, &ctx, actor, &mut session).await,
         Action::Select {
             intent,
             request_id,

@@ -109,10 +109,18 @@ struct FakeRepo {
     fail_list: AtomicBool,
     write_failure: AtomicU8, // 1 before commit, 2 after commit
     fail_send_after_record: Mutex<Option<Arc<AtomicBool>>>,
+    feedback: Mutex<Vec<(i64, String, String)>>,
+    allow_feedback: AtomicBool,
 }
 impl Repository for FakeRepo {
     fn upsert_user<'a>(&'a self, _: &'a UserProfile) -> DbFuture<'a, ()> {
-        Box::pin(async { panic!("unexpected") })
+        Box::pin(async {
+            assert!(
+                self.allow_feedback.load(Ordering::SeqCst),
+                "unexpected profile upsert"
+            );
+            Ok(())
+        })
     }
     fn record_query<'a>(
         &'a self,
@@ -258,11 +266,30 @@ impl Repository for FakeRepo {
     }
     fn save_feedback<'a>(
         &'a self,
-        _: i64,
-        _: &'a str,
-        _: &'a str,
+        user: i64,
+        key: &'a str,
+        body: &'a str,
     ) -> DbFuture<'a, WriteOutcome<i64>> {
-        Box::pin(async { panic!("unexpected") })
+        Box::pin(async move {
+            assert!(
+                self.allow_feedback.load(Ordering::SeqCst),
+                "unexpected feedback"
+            );
+            let mut rows = self.feedback.lock().unwrap();
+            if let Some((index, (_, _, previous))) = rows
+                .iter()
+                .enumerate()
+                .find(|(_, (u, k, _))| *u == user && k == key)
+            {
+                return if previous == body {
+                    Ok(WriteOutcome::AlreadyRecorded(index as i64 + 1))
+                } else {
+                    Err(DbError::Conflict)
+                };
+            }
+            rows.push((user, key.to_owned(), body.to_owned()));
+            Ok(WriteOutcome::Created(rows.len() as i64))
+        })
     }
 }
 
@@ -496,6 +523,55 @@ async fn old_pending_keeps_its_request_when_navigation_starts_new_search() {
         .lock()
         .unwrap()
         .contains(&(1, 1, first.bundle_id)));
+}
+
+#[tokio::test]
+async fn feedback_navigation_preserves_confirmed_recommendation_coordinates() {
+    let (_dir, bundle) = bundle(2, false);
+    let repo = Arc::new(FakeRepo::default());
+    repo.allow_feedback.store(true, Ordering::SeqCst);
+    let ctx = Arc::new(context(bundle.clone(), repo.clone()));
+    let api = FakeTelegram::new();
+    let bot = api.bot();
+    let sel = selection(&bundle, 1, 1);
+    let session = ctx.sessions.get(ACTOR);
+    {
+        let mut guard = session.lock().await;
+        guard.state = State::Selected {
+            intent: AnimeIntent::Recommend,
+            selection: sel.clone(),
+        };
+        repo.write_failure.store(1, Ordering::SeqCst);
+        assert!(recommendations::begin(&bot, &ctx, ACTOR, &mut guard, &sel)
+            .await
+            .is_err());
+    }
+    dispatch(&bot, &ctx, message(10, 73, 42, "/feedback")).await;
+    dispatch(&bot, &ctx, message(11, 73, 42, "Отзыв после карточки")).await;
+    assert_eq!(
+        repo.feedback.lock().unwrap().as_slice(),
+        &[(42, "msg:73:11".into(), "Отзыв после карточки".into())]
+    );
+    {
+        let mut guard = session.lock().await;
+        guard.state = State::Selected {
+            intent: AnimeIntent::Recommend,
+            selection: sel.clone(),
+        };
+        recommendations::begin(&bot, &ctx, ACTOR, &mut guard, &sel)
+            .await
+            .unwrap();
+    }
+    let rows = repo.rows.lock().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].message_id, 101);
+    assert_eq!(
+        sent_texts(&api)
+            .iter()
+            .filter(|text| text.starts_with("Рекомендация 1/"))
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]

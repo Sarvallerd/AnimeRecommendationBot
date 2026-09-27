@@ -13,6 +13,9 @@ pub enum Action {
     RetryQuery {
         action_key: String,
     },
+    RetryFeedback {
+        action_key: String,
+    },
     Select {
         intent: AnimeIntent,
         request_id: RequestId,

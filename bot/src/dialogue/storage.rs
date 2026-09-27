@@ -8,7 +8,16 @@ use super::{
     callback::{self, Action, RandomTokenSource, TokenSource},
     state::{Actor, ResolvedSelection, State},
 };
-use crate::db::DeliveryInput;
+use crate::db::{DeliveryInput, UserProfile};
+
+#[derive(Clone, Debug)]
+pub(crate) struct PendingFeedback {
+    pub actor: Actor,
+    pub profile: UserProfile,
+    pub action_key: String,
+    pub body: String,
+    pub saved: bool,
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct PendingRecommendationDelivery {
@@ -40,6 +49,7 @@ pub struct Session {
     pub state: State,
     pub callbacks: HashMap<String, CallbackRecord>,
     pub(crate) pending_recommendation_delivery: Option<PendingRecommendationDelivery>,
+    pub(crate) pending_feedback: Option<PendingFeedback>,
 }
 
 impl Default for Session {
@@ -56,6 +66,7 @@ impl Session {
             state: State::Idle,
             callbacks: HashMap::new(),
             pending_recommendation_delivery: None,
+            pending_feedback: None,
         }
     }
     pub fn reset(&mut self) {
@@ -113,7 +124,7 @@ impl Session {
             || record.message_id != Some(message_id)
             || record.status != CallbackStatus::Active
             || !record.action.valid()
-            || !action_matches_state(&record.action, &self.state)
+            || !action_matches_state(&record.action, &self.state, self.pending_feedback.as_ref())
         {
             return None;
         }
@@ -133,11 +144,19 @@ impl Session {
     }
 }
 
-fn action_matches_state(action: &Action, state: &State) -> bool {
+fn action_matches_state(
+    action: &Action,
+    state: &State,
+    pending_feedback: Option<&PendingFeedback>,
+) -> bool {
     match action {
         Action::Recommend | Action::Rate | Action::Feedback | Action::Cancel => true,
         Action::RetryQuery { action_key } => matches!(state,
             State::PendingQuery { input, .. } if &input.action_key == action_key),
+        Action::RetryFeedback { action_key } => {
+            matches!(state, State::AwaitingFeedback)
+                && pending_feedback.is_some_and(|pending| &pending.action_key == action_key)
+        }
         Action::Select {
             intent,
             request_id,
