@@ -1,9 +1,11 @@
 """Synthetic comparison behavior and measurement validation."""
+import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
-from recsys.evaluation import (_baseline_queries, _performance, compare, EvaluationError)
+from recsys.evaluation import (_baseline_queries, _performance, _worker, compare, EvaluationError)
 from recsys.quality import genre_neighbors
 
 
@@ -17,6 +19,33 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual([{"mal_id": x["mal_id"], "score": x["score"]}
                           for x in rows[0]["recommendations"]], genre_neighbors(anime, 1))
         self.assertEqual(rows[1]["status"], "empty_genres")
+
+    def test_selected_worker_calls_adapter_and_records_timing(self):
+        pins = {"catalog": {"anime": {"1": {"genres": ["Drama"]}}},
+                "queries": [{"mal_id": 1}],
+                "registry": {"sources": [{"id": "glove_300d", "size": 1, "sha256": "a" * 64}]}}
+        rows = [{"query_mal_id": 1, "status": "no_positive_candidates",
+                 "reasons": [], "recommendations": []}]
+        def selected(anime, queries, glove, descriptor):
+            self.assertEqual(anime, pins["catalog"]["anime"])
+            self.assertEqual(queries, pins["queries"])
+            self.assertEqual(descriptor["id"], "glove_300d")
+            return [1], rows, {"size": 1, "sha256": "a" * 64}, 5
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            request = root / "request.json"
+            output = root / "output.json"
+            request.write_text(json.dumps({"method": "glove-selected", "paths": {
+                name: str(root / name) for name in ("bundle_dir", "normalization_report",
+                                                     "build_report", "anime_csv", "synopsis_csv",
+                                                     "glove", "lockfile")}}))
+            with patch("recsys.evaluation._load_pins", return_value=pins), \
+                 patch("recsys.evaluation._selected_queries", side_effect=selected):
+                _worker(request, output)
+            result = json.loads(output.read_text())
+        self.assertEqual(result["result"]["queries"], rows)
+        self.assertEqual(result["rank20_wall_ns"], 5)
+        self.assertGreater(result["prepare_wall_ns"], 0)
 
     def test_measurements_need_valid_units_and_complete_repetitions(self):
         comparison_raw = b"{}\n"

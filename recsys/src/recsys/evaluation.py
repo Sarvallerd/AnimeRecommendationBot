@@ -223,8 +223,8 @@ def _worker(input_path, output_path):
         # Loading vectors and features is preparation; query ranking starts after it.
         if method == "glove-selected":
             # The selected adapter is one pass to preserve the exact published reduction.
-            ids, rows, glove_info, rank_ns = _selected_queries(anime, pins["neighbors"]["neighbors"],
-                                                       queries, paths["glove"], descriptor)
+            ids, rows, glove_info, rank_ns = _selected_queries(anime, queries, paths["glove"],
+                                                                descriptor)
             prepared = time.perf_counter_ns()
             extra = {"glove": glove_info}
         elif method == "genre-jaccard":
