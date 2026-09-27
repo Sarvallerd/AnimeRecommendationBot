@@ -88,6 +88,7 @@ dependencies = [
 name = "bot"
 version = "0.1.0"
 dependencies = [
+ "getrandom",
  "log",
  "pretty_env_logger",
  "serde",
