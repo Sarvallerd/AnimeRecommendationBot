@@ -54,7 +54,11 @@ pub async fn start(
 pub async fn cancel(bot: &Bot, actor: Actor, session: &mut Session) -> HandlerResult {
     bot.send_message(
         ChatId(actor.chat_id),
-        "Действие отменено. Начните заново: /start",
+        if session.pending_feedback.is_some() {
+            "Диалог закрыт. Откройте /feedback, чтобы завершить прежний отзыв."
+        } else {
+            "Действие отменено. Начните заново: /start"
+        },
     )
     .await?;
     session.reset();

@@ -23,6 +23,7 @@ pub struct FakeTelegram {
     url: String,
     requests: Arc<Mutex<Vec<(String, String)>>>,
     pub fail_send: Arc<AtomicBool>,
+    pub fail_send_count: Arc<AtomicUsize>,
     pub fail_edit: Arc<AtomicBool>,
     pub fail_ack: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
@@ -34,6 +35,7 @@ impl FakeTelegram {
         let url = format!("http://{}/", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
         let fail_send = Arc::new(AtomicBool::new(false));
+        let fail_send_count = Arc::new(AtomicUsize::new(0));
         let fail_edit = Arc::new(AtomicBool::new(false));
         let fail_ack = Arc::new(AtomicBool::new(false));
         listener.set_nonblocking(true).unwrap();
@@ -41,6 +43,7 @@ impl FakeTelegram {
         let stopping = stop.clone();
         let seen = requests.clone();
         let failure = fail_send.clone();
+        let counted_failures = fail_send_count.clone();
         let edit_failure = fail_edit.clone();
         let ack_failure = fail_ack.clone();
         let thread = thread::spawn(move || {
@@ -108,7 +111,13 @@ impl FakeTelegram {
                         json!({"ok":true,"result":{"message_id":message_id,"date":1,"chat":{"id":chat_id,"type":"private","first_name":"Test"},"text":"ok"}})
                     }
                 } else if path.ends_with("/SendMessage") {
-                    if failure.swap(false, Ordering::SeqCst) {
+                    if failure.swap(false, Ordering::SeqCst)
+                        || counted_failures
+                            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                                left.checked_sub(1)
+                            })
+                            .is_ok()
+                    {
                         json!({"ok":false,"error_code":500,"description":"failed"})
                     } else {
                         next_id += 1;
@@ -126,6 +135,7 @@ impl FakeTelegram {
             url,
             requests,
             fail_send,
+            fail_send_count,
             fail_edit,
             fail_ack,
             stop,

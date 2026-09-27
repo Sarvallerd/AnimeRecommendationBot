@@ -713,6 +713,7 @@ async fn failed_flow_callback_send_can_retry_the_same_token_and_key() {
                 Action::Rate => State::AwaitingQuery {
                     intent: AnimeIntent::Rate,
                 },
+                Action::Feedback => State::AwaitingFeedback,
                 _ => State::Idle,
             };
             assert_eq!(guard.state, expected, "{action:?}");

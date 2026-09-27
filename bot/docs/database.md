@@ -7,9 +7,9 @@ recorded in `arb_schema_migrations`; an unknown version stops startup.
 
 The existing `test_users`, `test_request`, and `test_feedback` tables are
 unversioned legacy history. Migration 1 creates them if absent and widens
-their `tg_id` columns to `BIGINT` without rewriting their rows. The current
-handlers still call `insert_user` and `insert_msg`; these adapters write only
-to the legacy tables. They do not invent request or bundle provenance.
+their `tg_id` columns to `BIGINT` without rewriting their rows. The runtime handlers use the version 1 API. The `insert_user` and `insert_msg`
+adapters remain for legacy callers and write only to legacy tables. They do not
+invent request or bundle provenance.
 
 ## Version 1 records
 
@@ -49,7 +49,8 @@ seed, bundle, and timestamps used when the rating was made.
 
 `DbError` exposes only safe error categories. A lost connection fails the
 interrupted operation without replaying it. A later operation reconnects,
-and its stable action key makes an explicit retry safe.
+and its stable action key makes an explicit retry safe. See [feedback.md](feedback.md)
+for feedback-specific retry behavior.
 
 ## PostgreSQL tests
 
