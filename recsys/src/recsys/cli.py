@@ -43,6 +43,15 @@ def build_parser() -> argparse.ArgumentParser:
     baseline_parser = quality_commands.add_parser("baseline", help="run the pinned genre baseline")
     baseline_parser.add_argument("--catalog", required=True, help="path to pinned catalog.json")
     baseline_parser.add_argument("--output-dir", required=True, help="directory for diagnostic artifacts")
+    compare_parser = quality_commands.add_parser("compare", help="compare three pinned recommendation methods")
+    for option in ("bundle-dir", "normalization-report", "build-report", "anime-csv",
+                   "synopsis-csv", "glove", "lockfile", "code-revision", "output-dir"):
+        compare_parser.add_argument(f"--{option}", required=True)
+    compare_parser.add_argument("--repetitions", type=int, default=3)
+    summary_parser = quality_commands.add_parser("summarize", help="validate judgments and summarize comparison")
+    for option in ("comparison", "catalog", "measurements", "output-dir"):
+        summary_parser.add_argument(f"--{option}", required=True)
+    summary_parser.add_argument("--assessment", required=True, action="append")
     return parser
 
 
@@ -123,5 +132,25 @@ def main(argv: Sequence[str] | None = None) -> int:
             run_baseline(Path(parsed.catalog), Path(parsed.output_dir))
         except (QualityError, OSError) as exc:
             print(f"recsys quality baseline: {exc}", file=sys.stderr)
+            return 1
+    elif parsed.command == "quality" and parsed.quality_command == "compare":
+        from pathlib import Path
+        from .evaluation import EvaluationError, compare
+        try:
+            compare(Path(parsed.bundle_dir), Path(parsed.normalization_report),
+                    Path(parsed.build_report), Path(parsed.anime_csv), Path(parsed.synopsis_csv),
+                    Path(parsed.glove), Path(parsed.lockfile), parsed.code_revision,
+                    Path(parsed.output_dir), repetitions=parsed.repetitions)
+        except (EvaluationError, OSError, ValueError) as exc:
+            print(f"recsys quality compare: {exc}", file=sys.stderr)
+            return 1
+    elif parsed.command == "quality" and parsed.quality_command == "summarize":
+        from pathlib import Path
+        from .evaluation import EvaluationError, summarize
+        try:
+            summarize(Path(parsed.comparison), Path(parsed.catalog), Path(parsed.measurements),
+                      [Path(path) for path in parsed.assessment], Path(parsed.output_dir))
+        except (EvaluationError, OSError, ValueError) as exc:
+            print(f"recsys quality summarize: {exc}", file=sys.stderr)
             return 1
     return 0

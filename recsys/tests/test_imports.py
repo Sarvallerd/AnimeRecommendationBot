@@ -15,10 +15,12 @@ import sys
 
 sys.argv = ["recsys", "--invalid"]
 before = set(pathlib.Path.cwd().iterdir())
-for name in ("recsys", "recsys.cli", "recsys.__main__", "recsys.sources", "recsys.obtain", "recsys.normalize", "recsys.build", "recsys.bundle", "recsys.export"):
+for name in ("recsys", "recsys.cli", "recsys.__main__", "recsys.sources", "recsys.obtain", "recsys.normalize", "recsys.build", "recsys.bundle", "recsys.export", "recsys.legacy", "recsys.evaluation", "recsys.assessment"):
     importlib.import_module(name)
 assert set(pathlib.Path.cwd().iterdir()) == before
 assert not any(name == "numpy" or name.startswith("numpy.") for name in sys.modules)
+assert not any(name == "sklearn" or name.startswith("sklearn.") for name in sys.modules)
+assert not any(name == "threadpoolctl" for name in sys.modules)
 assert not any(name == "pandas" or name.startswith("pandas.") for name in sys.modules)
 assert not any(name == "app" or name.startswith("app.") for name in sys.modules)
 assert not any(name == "config" or name.startswith("config.") for name in sys.modules)
