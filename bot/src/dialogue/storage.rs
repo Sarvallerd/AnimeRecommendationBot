@@ -6,8 +6,16 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use super::{
     callback::{self, Action, RandomTokenSource, TokenSource},
-    state::{Actor, State},
+    state::{Actor, ResolvedSelection, State},
 };
+use crate::db::DeliveryInput;
+
+#[derive(Clone, Debug)]
+pub(crate) struct PendingRecommendationDelivery {
+    pub actor: Actor,
+    pub selection: ResolvedSelection,
+    pub input: DeliveryInput,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CallbackStatus {
@@ -31,6 +39,7 @@ pub struct Session {
     pub generation: u64,
     pub state: State,
     pub callbacks: HashMap<String, CallbackRecord>,
+    pub(crate) pending_recommendation_delivery: Option<PendingRecommendationDelivery>,
 }
 
 impl Default for Session {
@@ -46,6 +55,7 @@ impl Session {
             generation: 0,
             state: State::Idle,
             callbacks: HashMap::new(),
+            pending_recommendation_delivery: None,
         }
     }
     pub fn reset(&mut self) {
