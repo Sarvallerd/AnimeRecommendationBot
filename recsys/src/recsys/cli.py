@@ -23,6 +23,11 @@ def build_parser() -> argparse.ArgumentParser:
     normalize_parser.add_argument("--anime-csv", required=True, help="path to anime.csv")
     normalize_parser.add_argument("--synopsis-csv", required=True, help="path to anime_with_synopsis.csv")
     normalize_parser.add_argument("--output-dir", required=True, help="directory for normalization artifacts")
+    quality_parser = commands.add_parser("quality", help="run offline recommendation quality diagnostics")
+    quality_commands = quality_parser.add_subparsers(dest="quality_command", required=True)
+    baseline_parser = quality_commands.add_parser("baseline", help="run the pinned genre baseline")
+    baseline_parser.add_argument("--catalog", required=True, help="path to pinned catalog.json")
+    baseline_parser.add_argument("--output-dir", required=True, help="directory for diagnostic artifacts")
     return parser
 
 
@@ -54,5 +59,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             normalize(Path(parsed.anime_csv), Path(parsed.synopsis_csv), Path(parsed.output_dir))
         except (SourceError, OSError, ValueError) as exc:
             print(f"recsys normalize: {exc}", file=sys.stderr)
+            return 1
+    elif parsed.command == "quality" and parsed.quality_command == "baseline":
+        from pathlib import Path
+
+        from .quality import QualityError, run_baseline
+
+        try:
+            run_baseline(Path(parsed.catalog), Path(parsed.output_dir))
+        except (QualityError, OSError) as exc:
+            print(f"recsys quality baseline: {exc}", file=sys.stderr)
             return 1
     return 0
