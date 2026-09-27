@@ -262,7 +262,12 @@ fn at<'a>(map: &'a BTreeMap<String, Tree>, key: &str) -> &'a Tree {
 }
 fn string(value: &Tree, path: &str) -> Result<String> {
     match value {
-        Tree::String(s) if !s.trim().is_empty() => Ok(s.clone()),
+        Tree::String(s)
+            if s.chars()
+                .any(|c| !c.is_whitespace() && !('\u{001c}'..='\u{001f}').contains(&c)) =>
+        {
+            Ok(s.clone())
+        }
         _ => Err(BundleError::new(path, "expected nonblank string")),
     }
 }

@@ -274,6 +274,49 @@ fn catalog_field_rules_and_huge_episodes() {
     );
 }
 #[test]
+fn python_strip_whitespace_is_blank_without_changing_valid_text() {
+    for blank in [
+        "\u{001c}",
+        "\u{001d}",
+        "\u{001e}",
+        "\u{001f}",
+        " \u{001c}\u{2003}\u{001f} ",
+    ] {
+        let dir = fixture();
+        modify(dir.path(), "catalog.json", |v| {
+            v["anime"]["1"]["title"] = json!(blank)
+        });
+        fails(
+            dir.path(),
+            "catalog.json.anime.1.title: expected nonblank string",
+        );
+    }
+    let dir = fixture();
+    modify(dir.path(), "manifest.json", |v| {
+        v["algorithm"]["version"] = json!("\u{001d}")
+    });
+    fails(
+        dir.path(),
+        "manifest.json.algorithm.version: expected nonblank string",
+    );
+
+    let preserved = " \u{001c}Текст\u{001f} ";
+    let dir = fixture();
+    modify(dir.path(), "catalog.json", |v| {
+        v["anime"]["1"]["title"] = json!(preserved)
+    });
+    assert_eq!(
+        Bundle::load(dir.path())
+            .unwrap()
+            .catalog()
+            .get(1)
+            .unwrap()
+            .title,
+        preserved
+    );
+}
+
+#[test]
 fn neighbor_rules() {
     let cases: &[Mutation] = &[
         ("neighbors.1[0].mal_id", |v| {
