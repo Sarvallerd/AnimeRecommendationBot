@@ -29,6 +29,15 @@ def build_parser() -> argparse.ArgumentParser:
     build_parser.add_argument("--glove", required=True, help="path to glove.6B.300d.txt")
     build_parser.add_argument("--output-dir", required=True, help="directory for build artifacts")
     build_parser.add_argument("--block-size", type=int, default=256, help="similarity rows per block (1..256)")
+    export_parser = commands.add_parser("export", help="publish an immutable validated bundle")
+    export_parser.add_argument("--catalog", required=True, help="path to catalog.json")
+    export_parser.add_argument("--neighbors", required=True, help="path to neighbors.json")
+    export_parser.add_argument("--build-report", required=True, help="path to build-report.json")
+    export_parser.add_argument("--normalization-report", required=True,
+                               help="path to normalization-report.json")
+    export_parser.add_argument("--output-dir", required=True, help="bundle store directory")
+    validate_parser = commands.add_parser("validate", help="validate a published bundle")
+    validate_parser.add_argument("bundle_dir", help="bundle directory")
     quality_parser = commands.add_parser("quality", help="run offline recommendation quality diagnostics")
     quality_commands = quality_parser.add_subparsers(dest="quality_command", required=True)
     baseline_parser = quality_commands.add_parser("baseline", help="run the pinned genre baseline")
@@ -78,6 +87,33 @@ def main(argv: Sequence[str] | None = None) -> int:
         except (BuildError, SourceError, OSError, ValueError) as exc:
             print(f"recsys build: {exc}", file=sys.stderr)
             return 1
+    elif parsed.command == "export":
+        from pathlib import Path
+
+        from .bundle import ContractError, check_bundle
+        from .export import export_bundle
+        from .sources import SourceError
+
+        try:
+            path = export_bundle(Path(parsed.catalog), Path(parsed.neighbors),
+                                 Path(parsed.build_report), Path(parsed.normalization_report),
+                                 Path(parsed.output_dir))
+            identity, count = check_bundle(path)
+        except (ContractError, SourceError, OSError, ValueError) as exc:
+            print(f"recsys export: {exc}", file=sys.stderr)
+            return 1
+        print(f"{path} {identity} records={count}")
+    elif parsed.command == "validate":
+        from pathlib import Path
+
+        from .bundle import ContractError, check_bundle
+
+        try:
+            identity, count = check_bundle(Path(parsed.bundle_dir))
+        except (ContractError, OSError) as exc:
+            print(f"recsys validate: {exc}", file=sys.stderr)
+            return 1
+        print(f"{identity} records={count}")
     elif parsed.command == "quality" and parsed.quality_command == "baseline":
         from pathlib import Path
 

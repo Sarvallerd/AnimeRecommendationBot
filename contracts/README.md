@@ -1,6 +1,6 @@
 # Recommendation bundle contract (v1)
 
-The offline Python producer writes `catalog.json`, `neighbors.json`, and `manifest.json`. The Rust bot loads these three files as one bundle. `tests/fixtures/bundle/source.json` is a small synthetic input used only to demonstrate provenance; the runtime does not need it.
+The offline Python exporter writes `catalog.json`, `neighbors.json`, and `manifest.json`. See [the export guide](../recsys/EXPORT.md) for the pinned report checks and immutable publication command. The Rust bot loads these three files as one bundle. `tests/fixtures/bundle/source.json` is a small synthetic input used only to demonstrate provenance; the runtime does not need it.
 
 Validate a bundle with:
 
