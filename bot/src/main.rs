@@ -62,8 +62,15 @@ async fn run() -> Result<(), String> {
     config.init_logging().map_err(|error| error.to_string())?;
     log::info!("Starting anime recommendation bot");
 
-    // The artifact loader is added in ARB-011. Configuration validates its path now.
-    let _ = config.artifacts_dir();
+    let bundle = Arc::new(
+        bot::catalog::Bundle::load(config.artifacts_dir())
+            .map_err(|error| format!("Recommendation bundle failed to load: {error}"))?,
+    );
+    log::info!(
+        "Loaded recommendation bundle {} ({} records)",
+        bundle.identity(),
+        bundle.catalog().len()
+    );
     let bot = Bot::new(config.token());
     let db = Db::new(config.database())
         .await
@@ -74,7 +81,7 @@ async fn run() -> Result<(), String> {
     let arc_db = Arc::new(db);
 
     Dispatcher::builder(bot, schema(arc_db))
-        .dependencies(dptree::deps![InMemStorage::<State>::new()])
+        .dependencies(dptree::deps![InMemStorage::<State>::new(), bundle])
         .enable_ctrlc_handler()
         .build()
         .dispatch()
