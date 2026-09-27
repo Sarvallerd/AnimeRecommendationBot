@@ -141,7 +141,7 @@ fn parse_database(url: &str) -> Result<PgConfig, ConfigError> {
     let database = PgConfig::from_str(url)
         .map_err(|_| ConfigError::new("DATABASE_URL", "invalid PostgreSQL URI"))?;
     let has_empty_host = database.get_hosts().iter().any(|host| match host {
-        Host::Tcp(name) => name.is_empty(),
+        Host::Tcp(name) => name.trim().is_empty(),
         #[cfg(unix)]
         Host::Unix(path) => path.as_os_str().is_empty(),
     });
@@ -362,6 +362,7 @@ mod tests {
         for url in [
             "postgresql://user@/anime?host=",
             "postgresql://user@localhost/anime?host=",
+            "postgresql://user@localhost/anime?host=%20",
         ] {
             input.insert("DATABASE_URL", url.to_owned());
             let err = load(&input).err().unwrap();
