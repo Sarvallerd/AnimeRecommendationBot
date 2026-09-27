@@ -1,0 +1,21 @@
+model = "gpt-6-astra"
+model_reasoning_effort = "ultra"
+sandbox_mode = "workspace-write"
+
+[agents]
+enabled = true
+max_concurrent_threads_per_session = 3
+default_subagent_model = "gpt-6-sol"
+default_subagent_reasoning_effort = "high"
+
+[agents.architect]
+description = "Read-only architect for an exact task design and acceptance checks."
+config_file = "agents/architect.toml"
+
+[agents.implementer]
+description = "Scoped implementer for code, checks, and root-authorized commits."
+config_file = "agents/implementer.toml"
+
+[agents.reviewer]
+description = "Independent read-only reviewer of the exact task commit."
+config_file = "agents/reviewer.toml"
