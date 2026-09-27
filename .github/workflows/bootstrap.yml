@@ -1,21 +1,31 @@
-name: Bootstrap checks
+name: CI
 
 on:
   pull_request:
   push:
     branches: [master]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   agent-setup:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Record checked-out commit
+        run: git log -1 --format='%H %s'
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
       - name: Check agent setup
@@ -23,4 +33,89 @@ jobs:
       - name: Check patch whitespace
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
-        run: git diff --check "$BASE_SHA" HEAD
+        run: |
+          if [[ -n "$BASE_SHA" && "$BASE_SHA" != "0000000000000000000000000000000000000000" ]] && git cat-file -e "$BASE_SHA^{commit}"; then
+            git diff --check "$BASE_SHA" HEAD
+          else
+            git show --format= --check HEAD
+          fi
+
+  rust:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: arb_ci
+          POSTGRES_PASSWORD: arb_ci
+          POSTGRES_DB: arb_ci_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U arb_ci -d arb_ci_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Record checked-out commit
+        run: git log -1 --format='%H %s'
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.95.0 --profile minimal --component rustfmt --component clippy
+      - name: Show tool versions
+        run: |
+          rustc +1.95.0 --version
+          cargo +1.95.0 --version
+          openssl version
+          pkg-config --version
+      - name: Check Rust format
+        run: cargo +1.95.0 fmt --manifest-path bot/Cargo.toml --all -- --check
+      - name: Build Rust targets
+        run: cargo +1.95.0 build --locked --all-targets --manifest-path bot/Cargo.toml
+      - name: Lint Rust targets
+        run: cargo +1.95.0 clippy --locked --all-targets --manifest-path bot/Cargo.toml -- -D warnings
+      - name: Test Rust
+        run: cargo +1.95.0 test --locked --manifest-path bot/Cargo.toml
+      - name: Test PostgreSQL integration
+        env:
+          ARB_TEST_DATABASE_URL: postgresql://arb_ci:arb_ci@127.0.0.1:5432/arb_ci_test?sslmode=disable
+        run: cargo +1.95.0 test --locked --manifest-path bot/Cargo.toml db::tests -- --ignored
+      - name: Compare bundle contract checkers
+        run: |
+          python contracts/check_bundle.py tests/fixtures/bundle > "$RUNNER_TEMP/python-bundle.txt"
+          cargo +1.95.0 run --quiet --locked --manifest-path bot/Cargo.toml --bin check_bundle -- tests/fixtures/bundle > "$RUNNER_TEMP/rust-bundle.txt"
+          diff -u "$RUNNER_TEMP/python-bundle.txt" "$RUNNER_TEMP/rust-bundle.txt"
+          cat "$RUNNER_TEMP/python-bundle.txt"
+
+  python:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Record checked-out commit
+        run: git log -1 --format='%H %s'
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
+        with:
+          version: '0.11.12'
+      - name: Sync recommendation dependencies
+        working-directory: recsys
+        run: uv sync --locked --no-editable
+      - name: Test recommendation preparation
+        working-directory: recsys
+        run: uv run --locked --no-editable python -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Test bundle contract
+        run: |
+          python contracts/check_bundle.py tests/fixtures/bundle
+          python -m unittest discover -s contracts -p 'test_*.py' -v
+      - name: Check dependency lockfiles
+        run: git diff --exit-code -- recsys/uv.lock bot/Cargo.lock
