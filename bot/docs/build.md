@@ -24,4 +24,4 @@ To validate configuration without contacting PostgreSQL or Telegram, run:
 cargo run --locked --manifest-path bot/Cargo.toml -- --check-config
 ```
 
-The current PostgreSQL connection uses `NoTls`; `sslmode=require` is rejected. Database schema migrations arrive in ARB-005, and recommendation bundle loading arrives in ARB-011. The current runtime still uses its legacy tables and handlers.
+The current PostgreSQL connection uses `NoTls`; `sslmode=require` is rejected. Database schema migration 1 is available through `Db::create`; the current runtime still uses its legacy handlers and tables. Recommendation bundle loading arrives in ARB-011. See [database.md](database.md) for the schema and PostgreSQL tests.
