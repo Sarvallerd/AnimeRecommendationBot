@@ -6,6 +6,7 @@ import json
 import os
 import platform
 import resource
+import re
 import subprocess
 import sys
 import tempfile
@@ -39,6 +40,20 @@ ORIGINALS = ("dev/notebooks/EDA + data preprocessing.ipynb",
              "dev/notebooks/create embeddings.ipynb", "src/app/recsys/utils.py")
 CODE_FILES = ("legacy.py", "evaluation.py", "assessment.py", "assessment_prompt_v1.md",
               "cli.py", "quality.py", "build.py", "normalize.py", "sources.py", "bundle.py", "export.py")
+DISTRIBUTIONS = ("anime-recommendation-recsys", "numpy", "pandas", "scikit-learn",
+                 "scipy", "joblib", "threadpoolctl")
+THREAD_ENVIRONMENT = {name: "1" for name in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS",
+                                                 "MKL_NUM_THREADS", "VECLIB_MAXIMUM_THREADS",
+                                                 "NUMEXPR_NUM_THREADS")}
+ORIGINAL_HASHES = {
+    ORIGINALS[0]: "a08391a7161e23e65b9da87dbdefb25e2ccbdabb836b86e1f44ab864617ae9d0",
+    ORIGINALS[1]: "c032878aa33fd9a9db0fae69a01f25a919d0c001e6221cfb15c2e196c77a7a96",
+    ORIGINALS[2]: "2faf2555c00dfc67626ea00a2d926324686b501707a05177047cc3881f6dddc6",
+}
+
+
+def _hex(value, length=64):
+    return isinstance(value, str) and re.fullmatch(rf"[0-9a-f]{{{length}}}", value) is not None
 
 
 def _id_sha(ids):
@@ -94,16 +109,12 @@ def _load_pins(bundle_dir, normalization_report, build_report, anime_csv, synops
     if not glove.is_file() or glove.stat().st_size != descriptors["glove_300d"]["size"]:
         raise EvaluationError("GloVe missing or wrong size")
     lock_raw = lockfile.read_bytes()
-    versions = {name: importlib.metadata.version(name) for name in
-                ("anime-recommendation-recsys", "numpy", "pandas", "scikit-learn", "scipy", "joblib", "threadpoolctl")}
+    versions = {name: importlib.metadata.version(name) for name in DISTRIBUTIONS}
     if sys.version_info[:2] != (3, 12) or versions["numpy"] != "2.5.3" or versions["pandas"] != "3.0.6" or versions["scikit-learn"] != "1.9.1":
         raise EvaluationError("Python or pinned dependency version mismatch")
     repository_root = lockfile.resolve().parent.parent
     originals = {p: sha((repository_root / p).read_bytes()) for p in ORIGINALS}
-    expected_originals = {ORIGINALS[0]: "a08391a7161e23e65b9da87dbdefb25e2ccbdabb836b86e1f44ab864617ae9d0",
-                          ORIGINALS[1]: "c032878aa33fd9a9db0fae69a01f25a919d0c001e6221cfb15c2e196c77a7a96",
-                          ORIGINALS[2]: "2faf2555c00dfc67626ea00a2d926324686b501707a05177047cc3881f6dddc6"}
-    if originals != expected_originals:
+    if originals != ORIGINAL_HASHES:
         raise EvaluationError("original notebook or ranker SHA256 mismatch")
     code_dir = Path(__file__).parent
     return {"catalog": catalog, "neighbors": neighbors, "queries": queries,
@@ -282,8 +293,7 @@ def compare(bundle_dir, normalization_report, build_report, anime_csv, synopsis_
                 with tempfile.NamedTemporaryFile(mode="wb", dir=output_dir, prefix=".worker-output-", delete=False) as stream:
                     output_path = Path(stream.name)
                 env = os.environ.copy()
-                for key in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "VECLIB_MAXIMUM_THREADS", "NUMEXPR_NUM_THREADS"):
-                    env[key] = "1"
+                env.update(THREAD_ENVIRONMENT)
                 start = time.perf_counter_ns()
                 process = subprocess.run([sys.executable, "-m", "recsys.evaluation", "worker",
                                           str(input_path), str(output_path)], env=env,
@@ -329,9 +339,13 @@ def compare(bundle_dir, normalization_report, build_report, anime_csv, synopsis_
         measurements = {"schema_version": 1, "protocol_version": "arb018-v1",
                         "comparison_sha256": comparison_sha,
                         "scope": "fresh-process-prepare-and-rank20-v1",
-                        "runtime": {"python": platform.python_version(), "platform": platform.platform(),
+                        "runtime": {"python": platform.python_version(), "implementation": platform.python_implementation(),
                                     "executable": sys.executable},
-                        "thread_environment": {k: "1" for k in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "VECLIB_MAXIMUM_THREADS", "NUMEXPR_NUM_THREADS")},
+                        "machine": {"platform": platform.platform(), "machine": platform.machine(),
+                                    "processor": platform.processor(), "cpu_count": os.cpu_count()},
+                        "thread_environment": THREAD_ENVIRONMENT,
+                        "workload": {"query_count": 20, "universe_counts":
+                                     {method: first[method]["universe_count"] for method in METHODS}},
                         "schedule": schedule, "workers": workers}
         packet = make_packet(comparison, pins["catalog"])
         template = make_template(packet)
@@ -356,7 +370,129 @@ if __name__ == "__main__":
         raise SystemExit("internal worker invocation only")
 
 
-def _validate_comparison(comparison, catalog, comparison_raw):
+def _validate_provenance(value, catalog_sha):
+    from .sources import load_registry
+    fields = {"registry_sha256", "raw_sources", "bundle_identity", "manifest_sha256",
+              "neighbors_sha256", "normalization_report_sha256", "build_report_sha256",
+              "code_revision", "code_files", "lockfile_sha256", "versions", "legacy_originals"}
+    if not isinstance(value, dict) or set(value) != fields:
+        raise EvaluationError("invalid comparison provenance fields")
+    registry, registry_sha = load_registry()
+    sources = {item["id"]: item for item in registry["sources"]}
+    expected_sources = [{"id": d["id"], "size": d["size"], "sha256": d["sha256"]}
+                        for d in (sources["mal_anime"], sources["mal_synopsis"],
+                                  sources["glove_300d"])]
+    if value["registry_sha256"] != registry_sha or value["raw_sources"] != expected_sources:
+        raise EvaluationError("comparison source provenance mismatch")
+    for name in ("manifest_sha256", "neighbors_sha256", "normalization_report_sha256",
+                 "build_report_sha256", "lockfile_sha256"):
+        if not _hex(value[name]):
+            raise EvaluationError(f"invalid comparison {name}")
+    if value["bundle_identity"] != "sha256:" + value["manifest_sha256"]:
+        raise EvaluationError("bundle identity does not match manifest SHA256")
+    if not _hex(value["code_revision"], 40):
+        raise EvaluationError("invalid comparison code revision")
+    if value["legacy_originals"] != ORIGINAL_HASHES:
+        raise EvaluationError("legacy source hashes mismatch")
+    code_dir = Path(__file__).parent
+    expected_code = {name: sha((code_dir / name).read_bytes()) for name in CODE_FILES}
+    if value["code_files"] != expected_code:
+        raise EvaluationError("comparison code file hashes mismatch")
+    expected_versions = {name: importlib.metadata.version(name) for name in DISTRIBUTIONS}
+    if value["versions"] != expected_versions:
+        raise EvaluationError("comparison dependency versions mismatch")
+    if not _hex(catalog_sha):
+        raise EvaluationError("invalid catalog SHA256")
+
+
+def _validate_bundle_links(provenance, catalog_path, catalog_raw):
+    from .bundle import check_bundle_bytes, read_canonical
+    bundle_dir = Path(catalog_path).parent
+    manifest, manifest_raw = read_canonical(bundle_dir / "manifest.json")
+    _, neighbors_raw = read_canonical(bundle_dir / "neighbors.json")
+    identity, _ = check_bundle_bytes(catalog_raw, neighbors_raw, manifest_raw)
+    if (identity != provenance["bundle_identity"]
+            or sha(manifest_raw) != provenance["manifest_sha256"]
+            or sha(neighbors_raw) != provenance["neighbors_sha256"]):
+        raise EvaluationError("comparison bundle file hashes mismatch")
+    sources = {item["name"]: item["sha256"] for item in manifest["sources"]}
+    for name, key in (("build_report", "build_report_sha256"),
+                      ("normalization_report", "normalization_report_sha256"),
+                      ("source_registry", "registry_sha256")):
+        if sources.get(name) != provenance[key]:
+            raise EvaluationError(f"comparison {name} manifest link mismatch")
+    raw_by_id = {item["id"]: item["sha256"] for item in provenance["raw_sources"]}
+    for name in ("mal_anime", "mal_synopsis", "glove_300d"):
+        if sources.get(name) != raw_by_id[name]:
+            raise EvaluationError(f"comparison {name} source link mismatch")
+
+
+def _validate_legacy_diagnostics(value, raw, expected_sha):
+    import math
+    from .sources import load_registry
+    if not _hex(expected_sha) or sha(raw) != expected_sha:
+        raise EvaluationError("legacy diagnostics SHA256 mismatch")
+    if not isinstance(value, dict) or set(value) != {"counts", "retained_ids_sha256",
+                                                      "query_exclusions", "clustering", "vectors",
+                                                      "glove", "repairs"}:
+        raise EvaluationError("invalid legacy diagnostics fields")
+    counts = value["counts"]
+    expected_missing = {"Aired": 309, "Duration": 555, "Episodes": 516,
+                        "Genres": 63, "Rating": 688, "Score": 5141, "Type": 37}
+    if (not isinstance(counts, dict) or set(counts) != {"anime_input", "metadata_retained",
+                                                      "synopsis_join_retained", "metadata_excluded",
+                                                      "synopsis_join_excluded", "metadata_missing_by_field"}
+            or counts["anime_input"] != 17562 or counts["metadata_retained"] != 12173
+            or counts["synopsis_join_retained"] != 10882
+            or counts["metadata_excluded"] != 5389
+            or counts["synopsis_join_excluded"] != 1291
+            or counts["metadata_missing_by_field"] != expected_missing
+            or value["retained_ids_sha256"] != RETAINED_SHA256
+            or value["query_exclusions"] != {"35102": ["Aired"]}):
+        raise EvaluationError("legacy diagnostics universe mismatch")
+    clustering = value["clustering"]
+    if (not isinstance(clustering, dict) or set(clustering) != {"feature_order", "kmeans_parameters",
+                                                             "cluster_histogram", "inertia", "n_iter",
+                                                             "assignment_sha256"}
+            or clustering["feature_order"] != list(FEATURES)
+            or clustering["kmeans_parameters"] != KMEANS
+            or not _hex(clustering["assignment_sha256"])
+            or type(clustering["n_iter"]) is not int or not 1 <= clustering["n_iter"] <= 300
+            or type(clustering["inertia"]) not in (int, float)
+            or not math.isfinite(clustering["inertia"]) or clustering["inertia"] < 0):
+        raise EvaluationError("legacy diagnostics clustering mismatch")
+    histogram = clustering["cluster_histogram"]
+    if (not isinstance(histogram, dict) or set(histogram) != {str(i) for i in range(20)}
+            or any(type(count) is not int or count < 1 for count in histogram.values())
+            or sum(histogram.values()) != 10882):
+        raise EvaluationError("legacy diagnostics cluster histogram mismatch")
+    vectors = value["vectors"]
+    if (not isinstance(vectors, dict) or set(vectors) != {"serialized_text_sha256", "vector_sha256",
+                                                    "status_counts", "nonready_ids"}
+            or not _hex(vectors["serialized_text_sha256"])
+            or not _hex(vectors["vector_sha256"])):
+        raise EvaluationError("legacy diagnostics vector hashes invalid")
+    statuses = vectors["status_counts"]
+    nonready = vectors["nonready_ids"]
+    if (not isinstance(statuses, dict) or set(statuses) != {"no_tokens", "oov_only", "zero_vector", "ready"}
+            or any(type(count) is not int or count < 0 for count in statuses.values())
+            or sum(statuses.values()) != 10882
+            or not isinstance(nonready, list) or len(nonready) != 10882 - statuses["ready"]
+            or any(type(i) is not int or i < 1 for i in nonready)
+            or nonready != sorted(set(nonready))):
+        raise EvaluationError("legacy diagnostics vector status mismatch")
+    registry, _ = load_registry()
+    glove = next(source for source in registry["sources"] if source["id"] == "glove_300d")
+    if value["glove"] != {"sha256": glove["sha256"], "size": glove["size"]}:
+        raise EvaluationError("legacy diagnostics GloVe hash mismatch")
+    repairs = ["stable_MAL_ID", "explicit_KMeans_profile", "fixed_feature_order",
+               "explicit_scalar_types", "self_excluded_by_ID", "numeric_ties",
+               "nonready_vectors_excluded", "cosine_clamp", "top99_before_cluster_no_refill"]
+    if value["repairs"] != repairs:
+        raise EvaluationError("legacy diagnostics repair profile mismatch")
+
+
+def _validate_comparison(comparison, catalog, comparison_raw, diagnostics, diagnostics_raw):
     import math
     from .quality import _load_json, _validate_catalog, _validate_query_set, _validate_spec_metadata
     from .bundle import check_catalog
@@ -374,6 +510,8 @@ def _validate_comparison(comparison, catalog, comparison_raw):
     queries = _validate_query_set(spec, anime)
     if comparison["catalog_sha256"] != spec["catalog_sha256"]:
         raise EvaluationError("comparison catalog pin mismatch")
+    _validate_provenance(comparison["provenance"], comparison["catalog_sha256"])
+    _validate_legacy_diagnostics(diagnostics, diagnostics_raw, comparison["legacy_diagnostics_sha256"])
     methods = comparison["methods"]
     if not isinstance(methods, list) or len(methods) != 3 or any(not isinstance(m, dict) for m in methods) or [m.get("id") for m in methods] != list(METHODS):
         raise EvaluationError("comparison method order mismatch")
@@ -418,45 +556,134 @@ def _validate_comparison(comparison, catalog, comparison_raw):
     return queries
 
 
-def _performance(measurements, comparison_raw):
+def _performance(measurements, comparison_raw, comparison, diagnostics):
     import statistics
-    if (not isinstance(measurements, dict) or measurements.get("schema_version") != 1
-            or measurements.get("protocol_version") != "arb018-v1"
-            or measurements.get("comparison_sha256") != sha(comparison_raw)
-            or measurements.get("scope") != "fresh-process-prepare-and-rank20-v1"):
+    fields = {"schema_version", "protocol_version", "comparison_sha256", "scope",
+              "runtime", "machine", "thread_environment", "workload", "schedule", "workers"}
+    if not isinstance(measurements, dict) or set(measurements) != fields:
+        raise EvaluationError("invalid measurements fields")
+    if (type(measurements["schema_version"]) is not int or measurements["schema_version"] != 1
+            or measurements["protocol_version"] != "arb018-v1"
+            or measurements["comparison_sha256"] != sha(comparison_raw)
+            or measurements["scope"] != "fresh-process-prepare-and-rank20-v1"):
         raise EvaluationError("measurements do not match comparison or scope")
-    workers = measurements.get("workers")
-    if not isinstance(workers, list) or len(workers) % 3 or not workers:
+    runtime = measurements["runtime"]
+    if (not isinstance(runtime, dict) or set(runtime) != {"python", "implementation", "executable"}
+            or not isinstance(runtime["python"], str)
+            or re.fullmatch(r"3\.12\.[0-9]+", runtime["python"]) is None
+            or runtime["implementation"] != "CPython"
+            or not isinstance(runtime["executable"], str)
+            or not Path(runtime["executable"]).is_absolute()):
+        raise EvaluationError("invalid measurement runtime metadata")
+    machine = measurements["machine"]
+    if (not isinstance(machine, dict) or set(machine) != {"platform", "machine", "processor", "cpu_count"}
+            or any(not isinstance(machine[key], str) for key in ("platform", "machine", "processor"))
+            or not machine["platform"] or not machine["machine"]
+            or type(machine["cpu_count"]) is not int or machine["cpu_count"] < 1):
+        raise EvaluationError("invalid measurement machine metadata")
+    if measurements["thread_environment"] != THREAD_ENVIRONMENT:
+        raise EvaluationError("measurement native thread environment mismatch")
+    expected_workload = {"query_count": 20,
+                         "universe_counts": {method["id"]: method["universe_count"]
+                                             for method in comparison["methods"]}}
+    if measurements["workload"] != expected_workload:
+        raise EvaluationError("measurement workload mismatch")
+    workers = measurements["workers"]
+    if not isinstance(workers, list) or not workers or len(workers) % 3:
         raise EvaluationError("invalid measurement worker count")
-    schedule = measurements.get("schedule")
     repetitions = len(workers) // 3
-    if (not isinstance(schedule, list) or len(schedule) != repetitions
-            or schedule != [{"repetition": i,
-                             "order": [METHODS[(j + i - 1) % 3] for j in range(3)]}
-                            for i in range(1, repetitions + 1)]
-            or [(w.get("repetition"), w.get("method")) for w in workers]
-            != [(entry["repetition"], method) for entry in schedule for method in entry["order"]]):
+    if not 1 <= repetitions <= 10:
+        raise EvaluationError("invalid measurement repetition count")
+    schedule = measurements["schedule"]
+    expected_schedule = [{"repetition": i,
+                          "order": [METHODS[(j + i - 1) % 3] for j in range(3)]}
+                         for i in range(1, repetitions + 1)]
+    if (schedule != expected_schedule
+            or any(not isinstance(worker, dict) for worker in workers)
+            or [(worker.get("repetition"), worker.get("method")) for worker in workers]
+            != [(entry["repetition"], method) for entry in expected_schedule
+                for method in entry["order"]]):
         raise EvaluationError("measurement schedule mismatch")
+    sources = {source["id"]: source for source in comparison["provenance"]["raw_sources"]}
+    selected_glove = {"sha256": sources["glove_300d"]["sha256"],
+                      "size": sources["glove_300d"]["size"]}
+    expected_digests = {}
+    for method in comparison["methods"]:
+        name = method["id"]
+        extra = ({"glove": selected_glove} if name == "glove-selected" else
+                 {"legacy_diagnostics": diagnostics} if name == "legacy-repaired" else {})
+        result = {"method": name, "universe_count": method["universe_count"],
+                  "universe_ids_sha256": method["universe_ids_sha256"],
+                  "queries": method["queries"], "extra": extra}
+        expected_digests[name] = sha(canonical(result))
     grouped = {}
+    worker_fields = {"method", "repetition", "exit_code", "output_sha256",
+                     "end_to_end_wall_ns", "prepare_wall_ns", "rank20_wall_ns",
+                     "peak_rss_bytes", "effective_threadpools"}
     for method in METHODS:
-        samples = [w for w in workers if w.get("method") == method]
-        if len(samples) * 3 != len(workers) or [w.get("repetition") for w in samples] != list(range(1, len(samples) + 1)):
+        samples = [worker for worker in workers if worker["method"] == method]
+        if [worker["repetition"] for worker in samples] != list(range(1, repetitions + 1)):
             raise EvaluationError("measurement repetitions incomplete")
-        digests = [row.get("output_sha256") for row in samples]
-        if any(not isinstance(d, str) or len(d) != 64 or any(c not in "0123456789abcdef" for c in d) for d in digests) or len(set(digests)) != 1:
-            raise EvaluationError("worker outputs differ across repetitions")
         for row in samples:
-            if not isinstance(row.get("effective_threadpools"), list):
+            if set(row) != worker_fields or type(row["exit_code"]) is not int or row["exit_code"] != 0:
+                raise EvaluationError("invalid measurement worker fields or exit code")
+            if row["output_sha256"] != expected_digests[method]:
+                raise EvaluationError("worker output digest does not match comparison")
+            for key in ("end_to_end_wall_ns", "prepare_wall_ns", "rank20_wall_ns", "peak_rss_bytes"):
+                if type(row[key]) is not int or row[key] <= 0:
+                    raise EvaluationError("invalid measurement units")
+            if row["end_to_end_wall_ns"] < row["prepare_wall_ns"] + row["rank20_wall_ns"]:
+                raise EvaluationError("worker timing exceeds parent elapsed time")
+            pools = row["effective_threadpools"]
+            if not isinstance(pools, list) or (method != "genre-jaccard" and not pools):
                 raise EvaluationError("worker threadpool metadata missing")
-            if row.get("exit_code") != 0 or any(type(row.get(key)) is not int or row[key] < 0 for key in
-                                                 ("end_to_end_wall_ns", "prepare_wall_ns", "rank20_wall_ns", "peak_rss_bytes")):
-                raise EvaluationError("invalid measurement units or worker result")
+            for pool in pools:
+                if (not isinstance(pool, dict) or type(pool.get("num_threads")) is not int
+                        or pool["num_threads"] != 1
+                        or not isinstance(pool.get("user_api"), str) or not pool["user_api"]
+                        or not isinstance(pool.get("internal_api"), str) or not pool["internal_api"]):
+                    raise EvaluationError("worker native threadpool limit mismatch")
         grouped[method] = {key: {"samples": [row[key] for row in samples],
                                  "median": statistics.median(row[key] for row in samples),
                                  "min": min(row[key] for row in samples),
                                  "max": max(row[key] for row in samples)}
                            for key in ("end_to_end_wall_ns", "prepare_wall_ns", "rank20_wall_ns", "peak_rss_bytes")}
     return grouped
+
+
+def _comparison_context(comparison):
+    methods = []
+    for method in comparison["methods"]:
+        statuses = {}
+        for row in method["queries"]:
+            statuses[row["status"]] = statuses.get(row["status"], 0) + 1
+        methods.append({"id": method["id"], "version": method["version"],
+                        "parameters": method["parameters"],
+                        "parameters_sha256": method["parameters_sha256"],
+                        "universe_count": method["universe_count"],
+                        "universe_ids_sha256": method["universe_ids_sha256"],
+                        "returned_slots": sum(len(row["recommendations"]) for row in method["queries"]),
+                        "unavailable_queries": sum(not row["recommendations"] for row in method["queries"]),
+                        "short_queries": sum(0 < len(row["recommendations"]) < 5 for row in method["queries"]),
+                        "status_counts": dict(sorted(statuses.items()))})
+    return {"query_set_version": comparison["query_set_version"],
+            "query_set_sha256": comparison["query_set_sha256"],
+            "catalog_sha256": comparison["catalog_sha256"],
+            "legacy_diagnostics_sha256": comparison["legacy_diagnostics_sha256"],
+            "provenance": comparison["provenance"], "methods": methods}
+
+
+def _measurement_context(measurements):
+    return {"scope": measurements["scope"], "runtime": measurements["runtime"],
+            "machine": measurements["machine"],
+            "thread_environment": measurements["thread_environment"],
+            "workload": measurements["workload"], "schedule": measurements["schedule"],
+            "verification_scope": {
+                "every_worker": "bundle, manifest, catalog, build and normalization reports, both MAL CSV byte hashes and parsed IDs, lock/dependency versions, original notebook hashes",
+                "glove_selected_and_legacy": "full GloVe stream size and SHA256",
+                "genre_jaccard_glove": "file size check only; GloVe contents are not read",
+                "interpretation": "shared input validation is included in preparation time; genre Jaccard repeats CSV and report checks beyond its ranking needs",
+            }}
 
 
 def summarize(comparison_path, catalog_path, measurements_path, assessment_paths, output_dir):
@@ -467,10 +694,12 @@ def summarize(comparison_path, catalog_path, measurements_path, assessment_paths
     comparison, comparison_raw = read_canonical(comparison_path)
     catalog, catalog_raw = read_canonical(catalog_path)
     measurements, measurements_raw = read_canonical(measurements_path)
+    diagnostics, diagnostics_raw = read_canonical(Path(comparison_path).with_name("legacy-diagnostics.json"))
     if sha(catalog_raw) != comparison.get("catalog_sha256"):
         raise EvaluationError("catalog SHA256 mismatch")
-    _validate_comparison(comparison, catalog, comparison_raw)
-    performance = _performance(measurements, comparison_raw)
+    _validate_comparison(comparison, catalog, comparison_raw, diagnostics, diagnostics_raw)
+    _validate_bundle_links(comparison["provenance"], catalog_path, catalog_raw)
+    performance = _performance(measurements, comparison_raw, comparison, diagnostics)
     packet = make_packet(comparison, catalog)
     assessments, seen = [], set()
     for path in assessment_paths:
@@ -485,28 +714,66 @@ def summarize(comparison_path, catalog_path, measurements_path, assessment_paths
     summary = {"schema_version": 1, "protocol_version": "arb018-v1",
                "comparison_sha256": sha(comparison_raw), "catalog_sha256": sha(catalog_raw),
                "measurements_sha256": sha(measurements_raw),
-               "packet_sha256": sha(canonical(packet)), "performance": performance,
-               "assessments": assessments}
+               "packet_sha256": sha(canonical(packet)),
+               "comparison_context": _comparison_context(comparison),
+               "measurement_context": _measurement_context(measurements),
+               "performance": performance, "assessments": assessments}
     out = Path(output_dir)
     if out.is_symlink() or (out.exists() and (not out.is_dir() or any(out.iterdir()))):
         raise EvaluationError("summary output directory must be new or empty")
     out.mkdir(parents=True, exist_ok=True)
     from .quality import _write_atomic
     _write_atomic(out / "summary.json", canonical(summary))
-    lines = ["# ARB-018 comparison", "", "The fixed, purposive set has 20 queries. Each method is ranked against its own stated universe.",
+    context = summary["comparison_context"]
+    measure_context = summary["measurement_context"]
+    provenance = context["provenance"]
+    lines = ["# ARB-018 comparison", "",
+             "The fixed, purposive set has 20 queries. Each method ranks against its stated universe.",
              "Returned results fill up to five slots per query; missing slots contribute zero. Unknown returned judgments stay unknown.",
              "Bounds are arithmetic uncertainty bounds, not confidence intervals. No general quality threshold was set.", "",
-             f"Comparison SHA-256: `{summary['comparison_sha256']}`. Packet SHA-256: `{summary['packet_sha256']}`.", "",
-             "## Performance", "", "Each sample starts a fresh process, prepares its method, and ranks the same 20 queries. The OS page cache was uncontrolled.", ""]
+             "## Methods and source provenance", "",
+             "| Method | Version | Universe | Universe ID SHA-256 | Parameter SHA-256 | Returned slots | Unavailable | Short | Status counts |",
+             "| --- | --- | ---: | --- | --- | ---: | ---: | ---: | --- |"]
+    for method in context["methods"]:
+        lines.append(f"| {method['id']} | {method['version']} | {method['universe_count']} | `{method['universe_ids_sha256']}` | `{method['parameters_sha256']}` | {method['returned_slots']}/100 | {method['unavailable_queries']} | {method['short_queries']} | `{json.dumps(method['status_counts'], sort_keys=True)}` |")
+    lines.append("")
+    for method in context["methods"]:
+        lines.append(f"- {method['id']} parameters: `{json.dumps(method['parameters'], sort_keys=True, separators=(',', ':'))}`.")
+    lines += ["", f"Query set `{context['query_set_version']}` SHA-256: `{context['query_set_sha256']}`.",
+              f"Catalog SHA-256: `{context['catalog_sha256']}`; legacy diagnostics SHA-256: `{context['legacy_diagnostics_sha256']}`.",
+              f"Code revision: `{provenance['code_revision']}`; lockfile SHA-256: `{provenance['lockfile_sha256']}`.",
+              f"Registry SHA-256: `{provenance['registry_sha256']}`; bundle identity: `{provenance['bundle_identity']}`.",
+              f"Manifest SHA-256: `{provenance['manifest_sha256']}`; neighbors SHA-256: `{provenance['neighbors_sha256']}`.",
+              f"Normalization report SHA-256: `{provenance['normalization_report_sha256']}`; build report SHA-256: `{provenance['build_report_sha256']}`.",
+              f"Comparison SHA-256: `{summary['comparison_sha256']}`; measurements SHA-256: `{summary['measurements_sha256']}`; packet SHA-256: `{summary['packet_sha256']}`.", "",
+              "Raw sources (size in bytes, SHA-256):", ""]
+    for source in provenance["raw_sources"]:
+        lines.append(f"- {source['id']}: {source['size']}; `{source['sha256']}`")
+    lines += ["", "Code file SHA-256 hashes:", ""]
+    for name, digest in sorted(provenance["code_files"].items()):
+        lines.append(f"- {name}: `{digest}`")
+    lines += ["", "## Measurement context", "",
+              f"Scope: `{measure_context['scope']}`; workload: {measure_context['workload']['query_count']} queries, universe counts `{json.dumps(measure_context['workload']['universe_counts'], sort_keys=True)}`.",
+              f"Machine: `{json.dumps(measure_context['machine'], sort_keys=True)}`.",
+              f"Runtime: `{json.dumps(measure_context['runtime'], sort_keys=True)}`.",
+              f"Native thread environment: `{json.dumps(measure_context['thread_environment'], sort_keys=True)}`.",
+              "Each worker rechecks the bundle, catalog, manifest, build and normalization reports, and both MAL CSV hashes, headers and IDs during measured preparation. This shared validation cost is included even for genre Jaccard.",
+              "Selected GloVe and repaired legacy workers stream and hash the complete GloVe file. Genre Jaccard checks only its file size; it does not read GloVe contents.",
+              "Each sample starts a fresh process, prepares its method, and ranks the same 20 queries. The OS page cache, background host activity, and CPU scheduling were uncontrolled on this shared development machine; full production neighbor generation was outside scope.", "",
+              "## Performance", ""]
     for method, metrics in performance.items():
         lines.append(f"- {method}:")
         for key, unit in (("end_to_end_wall_ns", "ns"), ("prepare_wall_ns", "ns"),
                           ("rank20_wall_ns", "ns"), ("peak_rss_bytes", "bytes")):
             item = metrics[key]
             lines.append(f"  - {key} ({unit}): samples {item['samples']}; median {item['median']}; min {item['min']}; max {item['max']}.")
+        pool_samples = [worker["effective_threadpools"] for worker in measurements["workers"]
+                        if worker["method"] == method]
+        pool_counts = [[pool["num_threads"] for pool in pools] for pools in pool_samples]
+        lines.append(f"  - Effective native threads per sample (each detected pool): {pool_counts}.")
     lines += ["", "## Provenance and limits", "",
               f"Catalog SHA-256: `{summary['catalog_sha256']}`; measurements SHA-256: `{summary['measurements_sha256']}`.",
-              "The raw MAL 2020 CSV and pinned GloVe bytes were verified. The original fitted clusters and vectors were unavailable, so the legacy method is a repaired comparator.",
+              "The raw MAL 2020 CSVs were verified by every worker; GloVe bytes were fully verified by selected and legacy workers. The original fitted clusters and vectors were unavailable, so the legacy method is a repaired comparator.",
               "MAL ID 35102 is excluded from the legacy universe because Aired is missing. MAL ID 39619 retains raw boilerplate synopsis text there, while its normalized catalog synopsis is null.",
               "Assessors use only supplied catalog evidence; missing synopsis text and LLM uncertainty can widen reported bounds. These data do not establish general recommendation quality.",
               "", "## Reproduction", "",
