@@ -1,6 +1,6 @@
 # Anime recommendation preparation
 
-This Python package prepares recommendation inputs offline for the Rust bot. It can acquire the pinned MAL 2020 CSV files and GloVe 6B 300-dimensional vectors. Normalization of the MAL CSV files is included. Artifact building, validation, and evaluation will be added in later tasks.
+This Python package prepares recommendation inputs offline for the Rust bot. It can acquire the pinned MAL 2020 CSV files and GloVe 6B 300-dimensional vectors. Normalization of the MAL CSV files and a pinned diagnostic genre baseline are included. Further artifact building and assessed evaluation will be added in later tasks.
 
 Requires Python 3.12. From this directory, install the locked environment with:
 
@@ -39,3 +39,13 @@ uv run --locked --no-editable recsys normalize \
 ```
 
 This command verifies both files against the packaged size and SHA-256 pins. It writes canonical UTF-8 `catalog.json`, `durations.json`, and `normalization-report.json`. The catalog uses the v1 contract in `contracts/`; durations contain seconds and a `per_episode` or `unspecified` scope for every retained ID. The report lists source provenance, output hashes, counts, row exclusions, field exceptions, unmatched IDs, and duplicate title groups. It contains no timestamp or machine-specific path. No GloVe data is read during normalization.
+
+Run the pinned 20-query genre baseline after normalization:
+
+```sh
+uv run --locked --no-editable recsys quality baseline \
+  --catalog data/normalized/catalog.json \
+  --output-dir data/quality
+```
+
+It writes a deterministic genre baseline and an unjudged relevance template. See [the quality protocol](QUALITY.md) for the query set, ranking rule, assessment rubric, and planned comparison.
