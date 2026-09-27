@@ -3,6 +3,7 @@
 import hashlib
 import io
 import json
+import stat
 import tempfile
 import threading
 import unittest
@@ -168,6 +169,19 @@ class ObtainTests(unittest.TestCase):
                     self.assert_no_temps()
                 for path in self.data.iterdir():
                     path.unlink()
+
+    def test_rejects_directory_mode_without_trailing_slash(self):
+        member = zipfile.ZipInfo("glove.6B.300d.txt")
+        member.create_system = 3
+        member.external_attr = (stat.S_IFDIR | 0o755) << 16
+        zip_bytes = make_zip([(member, self.txt)])
+        with LocalServer({"/anime.csv": (200, self.csv), "/glove.6B.zip": (200, zip_bytes)}) as server:
+            registry = self.registry(server, zip_bytes=zip_bytes)
+            with self.assertRaisesRegex(SourceError, "unsafe or incorrect member"):
+                obtain(self.data, registry=registry)
+        self.assertFalse((self.data / "glove.6B.300d.txt").exists())
+        self.assertFalse((self.data / "source-manifest.json").exists())
+        self.assert_no_temps()
 
     def test_rejects_symlink_target(self):
         self.data.mkdir()

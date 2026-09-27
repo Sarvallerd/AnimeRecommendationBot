@@ -96,7 +96,7 @@ def _extract(path: Path, source: dict, archive_path: Path) -> None:
                 )
             member = matches[0]
             mode = member.external_attr >> 16
-            if (member.is_dir() or stat.S_IFMT(mode) == stat.S_IFLNK
+            if (member.is_dir() or stat.S_IFMT(mode) in (stat.S_IFDIR, stat.S_IFLNK)
                     or member.file_size != source["size"]):
                 raise SourceError(f"unsafe or incorrect member {source['member']} in {archive_path}")
             with archive.open(member) as stream:
