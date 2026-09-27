@@ -1,4 +1,7 @@
-use crate::{catalog::MalId, db::RequestId};
+use crate::{
+    catalog::MalId,
+    db::{RequestId, UserProfile},
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AnimeIntent {
@@ -10,6 +13,14 @@ pub enum AnimeIntent {
 pub struct QueryContext {
     pub request_id: RequestId,
     pub raw_query: String,
+    pub action_key: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QueryInput {
+    pub raw_query: String,
+    pub action_key: String,
+    pub profile: UserProfile,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -26,10 +37,15 @@ pub enum State {
     AwaitingQuery {
         intent: AnimeIntent,
     },
+    PendingQuery {
+        intent: AnimeIntent,
+        input: QueryInput,
+    },
     ChoosingAnime {
         intent: AnimeIntent,
         query: QueryContext,
         candidates: Vec<MalId>,
+        selected_mal_id: Option<MalId>,
     },
     Selected {
         intent: AnimeIntent,

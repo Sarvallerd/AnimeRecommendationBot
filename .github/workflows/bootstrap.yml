@@ -83,7 +83,7 @@ jobs:
       - name: Test PostgreSQL integration
         env:
           ARB_TEST_DATABASE_URL: postgresql://arb_ci:arb_ci@127.0.0.1:5432/arb_ci_test?sslmode=disable
-        run: cargo +1.95.0 test --locked --manifest-path bot/Cargo.toml db::tests -- --ignored
+        run: cargo +1.95.0 test --locked --manifest-path bot/Cargo.toml -- --ignored
       - name: Compare bundle contract checkers
         run: |
           python contracts/check_bundle.py tests/fixtures/bundle > "$RUNNER_TEMP/python-bundle.txt"

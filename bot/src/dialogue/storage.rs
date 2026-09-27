@@ -126,13 +126,16 @@ impl Session {
 fn action_matches_state(action: &Action, state: &State) -> bool {
     match action {
         Action::Recommend | Action::Rate | Action::Feedback | Action::Cancel => true,
+        Action::RetryQuery { action_key } => matches!(state,
+            State::PendingQuery { input, .. } if &input.action_key == action_key),
         Action::Select {
             intent,
             request_id,
             mal_id,
         } => matches!(state,
-            State::ChoosingAnime { intent: current, query, candidates }
-            if intent == current && *request_id == query.request_id && candidates.contains(mal_id)),
+            State::ChoosingAnime { intent: current, query, candidates, selected_mal_id }
+            if intent == current && *request_id == query.request_id && candidates.contains(mal_id)
+                && selected_mal_id.is_none_or(|selected| selected == *mal_id)),
         Action::AnimeScore { request_id, .. } => matches!(state,
             State::Selected { intent: super::state::AnimeIntent::Rate, selection }
             if *request_id == selection.query.request_id),
@@ -259,8 +262,10 @@ mod tests {
                 query: super::super::state::QueryContext {
                     request_id: 7,
                     raw_query: "x".into(),
+                    action_key: "msg:1:1".into(),
                 },
                 candidates: vec![3],
+                selected_mal_id: None,
             },
             ..Session::default()
         };

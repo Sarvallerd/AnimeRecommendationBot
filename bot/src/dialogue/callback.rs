@@ -10,6 +10,9 @@ pub enum Action {
     Rate,
     Feedback,
     Cancel,
+    RetryQuery {
+        action_key: String,
+    },
     Select {
         intent: AnimeIntent,
         request_id: RequestId,

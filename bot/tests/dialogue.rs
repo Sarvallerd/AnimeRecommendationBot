@@ -1,11 +1,10 @@
+mod support;
 use bot::{
-    catalog::Bundle,
     db::{
         AnimeRatingEventId, DbError, DeliveredPosition, DeliveryInput, PositionId, RequestId,
         UserProfile, WriteOutcome,
     },
     dialogue::{
-        callback::TokenSource,
         context::AppContext,
         repository::{DbFuture, Repository},
         state::{Actor, AnimeIntent, QueryContext, State},
@@ -15,18 +14,16 @@ use bot::{
 };
 use serde_json::json;
 use std::{
-    io::{Read, Write},
-    net::TcpListener,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
     },
-    thread,
     time::Duration,
 };
+use support::{callback, dispatch, message, FakeTelegram, FixedTokens};
 use teloxide::{
     prelude::*,
-    types::{CallbackQuery, Message, Update, UpdateId, UpdateKind},
+    types::{CallbackQuery, Update, UpdateId, UpdateKind},
 };
 use tokio::sync::Notify;
 
@@ -123,149 +120,14 @@ impl Repository for FakeRepo {
     }
 }
 
-struct FakeTelegram {
-    url: String,
-    requests: Arc<Mutex<Vec<(String, String)>>>,
-    fail_send: Arc<AtomicBool>,
-    fail_ack: Arc<AtomicBool>,
-}
-impl FakeTelegram {
-    fn new() -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://{}/", listener.local_addr().unwrap());
-        let requests = Arc::new(Mutex::new(Vec::new()));
-        let fail_send = Arc::new(AtomicBool::new(false));
-        let fail_ack = Arc::new(AtomicBool::new(false));
-        let seen = requests.clone();
-        let failure = fail_send.clone();
-        let ack_failure = fail_ack.clone();
-        thread::spawn(move || {
-            let mut next_id = 100;
-            for incoming in listener.incoming() {
-                let Ok(mut stream) = incoming else {
-                    break;
-                };
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(3)))
-                    .unwrap();
-                let mut bytes = Vec::new();
-                let mut chunk = [0u8; 4096];
-                while let Ok(n) = stream.read(&mut chunk) {
-                    if n == 0 {
-                        break;
-                    }
-                    bytes.extend_from_slice(&chunk[..n]);
-                    if let Some(start) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
-                        let head = String::from_utf8_lossy(&bytes[..start]);
-                        let len = head
-                            .lines()
-                            .find_map(|line| {
-                                line.to_ascii_lowercase()
-                                    .strip_prefix("content-length:")
-                                    .and_then(|value| value.trim().parse::<usize>().ok())
-                            })
-                            .unwrap_or(0);
-                        if bytes.len() >= start + 4 + len {
-                            break;
-                        }
-                    }
-                }
-                let request = String::from_utf8_lossy(&bytes);
-                let path = request.split_whitespace().nth(1).unwrap_or("").to_owned();
-                let body = request
-                    .split_once("\r\n\r\n")
-                    .map(|(_, body)| body.to_owned())
-                    .unwrap_or_default();
-                seen.lock().unwrap().push((path.clone(), body));
-                let response = if path.ends_with("/AnswerCallbackQuery") {
-                    if ack_failure.swap(false, Ordering::SeqCst) {
-                        json!({"ok":false,"error_code":500,"description":"failed"})
-                    } else {
-                        json!({"ok":true,"result":true})
-                    }
-                } else if failure.swap(false, Ordering::SeqCst) {
-                    json!({"ok":false,"error_code":500,"description":"failed"})
-                } else {
-                    next_id += 1;
-                    json!({"ok":true,"result":{"message_id":next_id,"date":1,"chat":{"id":1,"type":"private","first_name":"Test"},"text":"ok"}})
-                };
-                let body = response.to_string();
-                let wire=format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body);
-                stream.write_all(wire.as_bytes()).unwrap();
-            }
-        });
-        Self {
-            url,
-            requests,
-            fail_send,
-            fail_ack,
-        }
-    }
-    fn bot(&self) -> Bot {
-        Bot::new("123:test").set_api_url(self.url.parse().unwrap())
-    }
-    fn snapshot(&self) -> Vec<(String, String)> {
-        self.requests.lock().unwrap().clone()
-    }
-}
-struct FixedTokens(AtomicUsize);
-impl TokenSource for FixedTokens {
-    fn token(&self) -> Result<String, getrandom::Error> {
-        Ok(format!(
-            "a1:{:032x}",
-            self.0.fetch_add(1, Ordering::SeqCst) + 1
-        ))
-    }
-}
-
 fn fixture(repo: Arc<FakeRepo>) -> Arc<AppContext> {
-    let bundle = Bundle::load(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../tests/fixtures/bundle"
-    ))
-    .unwrap();
-    Arc::new(AppContext {
-        bundle: Arc::new(bundle),
-        repository: repo,
-        sessions: Arc::new(SessionStore::with_token_source(Arc::new(FixedTokens(
+    support::fixture(
+        repo,
+        Arc::new(SessionStore::with_token_source(Arc::new(FixedTokens(
             AtomicUsize::new(0),
         )))),
-    })
+    )
 }
-fn message(id: u32, chat: i64, user: u64, text: &str) -> Update {
-    let ty = if chat > 0 { "private" } else { "group" };
-    let value = json!({"update_id":id,"message":{"message_id":id,"date":1,
-        "chat":{"id":chat,"type":ty,"first_name":"Test","title":"Group"},
-        "from":{"id":user,"is_bot":false,"first_name":"Тест"},"text":text}});
-    Update {
-        id: UpdateId(id),
-        kind: UpdateKind::Message(
-            serde_json::from_value::<Message>(value["message"].clone()).unwrap(),
-        ),
-    }
-}
-fn callback(id: u32, chat: i64, user: u64, message_id: i32, data: Option<&str>) -> Update {
-    let value = json!({"update_id":id,"callback_query":{"id":format!("q{id}"),
-        "from":{"id":user,"is_bot":false,"first_name":"Тест"},"chat_instance":"x",
-        "message":{"message_id":message_id,"date":1,"chat":{"id":chat,"type":"private","first_name":"Test"}},
-        "data":data}});
-    Update {
-        id: UpdateId(id),
-        kind: UpdateKind::CallbackQuery(
-            serde_json::from_value::<CallbackQuery>(value["callback_query"].clone()).unwrap(),
-        ),
-    }
-}
-async fn dispatch(bot: &Bot, ctx: &Arc<AppContext>, update: Update) {
-    let result = handlers::schema()
-        .dispatch(dptree::deps![bot.clone(), update, ctx.clone()])
-        .await;
-    assert!(
-        matches!(result, std::ops::ControlFlow::Break(Ok(()))),
-        "{result:?}"
-    );
-}
-
 #[tokio::test]
 async fn public_router_commands_and_opaque_callbacks() {
     let api = FakeTelegram::new();
@@ -331,8 +193,10 @@ async fn public_router_commands_and_opaque_callbacks() {
             query: QueryContext {
                 request_id: 1,
                 raw_query: "a".into(),
+                action_key: "msg:1:1".into(),
             },
             candidates: vec![1],
+            selected_mal_id: None,
         },
         State::Selected {
             intent: AnimeIntent::Rate,
@@ -340,6 +204,7 @@ async fn public_router_commands_and_opaque_callbacks() {
                 query: QueryContext {
                     request_id: 1,
                     raw_query: "a".into(),
+                    action_key: "msg:1:1".into(),
                 },
                 seed_mal_id: 1,
                 bundle_id: ctx.bundle.identity().into(),
@@ -423,8 +288,10 @@ async fn failed_callback_notice_releases_claim_for_same_key_retry() {
             query: QueryContext {
                 request_id: 7,
                 raw_query: "anime".into(),
+                action_key: "msg:1:1".into(),
             },
             candidates: vec![3],
+            selected_mal_id: None,
         };
         let token = guard
             .issue(bot::dialogue::callback::Action::Select {
@@ -447,6 +314,13 @@ async fn failed_callback_notice_releases_claim_for_same_key_retry() {
             .await;
         assert!(matches!(result, std::ops::ControlFlow::Break(Err(_))));
         let guard = session.lock().await;
+        assert!(matches!(
+            guard.state,
+            State::ChoosingAnime {
+                selected_mal_id: Some(3),
+                ..
+            }
+        ));
         let record = guard.callbacks.get(&token).unwrap();
         assert_eq!(
             record.status,
@@ -586,8 +460,10 @@ async fn selection_send_failure_keeps_owned_query_for_retry() {
             query: QueryContext {
                 request_id: 7,
                 raw_query: "anime".into(),
+                action_key: "msg:1:1".into(),
             },
             candidates: vec![3],
+            selected_mal_id: None,
         };
         let token = guard
             .issue(bot::dialogue::callback::Action::Select {
@@ -648,6 +524,7 @@ async fn recommendation_score_reaches_owned_position_check_and_handler() {
                 query: QueryContext {
                     request_id: 7,
                     raw_query: "anime".into(),
+                    action_key: "msg:1:1".into(),
                 },
                 seed_mal_id: 3,
                 bundle_id: ctx.bundle.identity().into(),
@@ -868,8 +745,10 @@ async fn simultaneous_duplicate_callbacks_have_one_repository_effect() {
             query: QueryContext {
                 request_id: 7,
                 raw_query: "anime".into(),
+                action_key: "msg:1:1".into(),
             },
             candidates: vec![3],
+            selected_mal_id: None,
         };
         let token = guard
             .issue(Action::Select {
