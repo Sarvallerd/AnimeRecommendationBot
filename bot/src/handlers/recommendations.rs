@@ -3,13 +3,15 @@ use crate::{
     catalog::{Anime, MalId},
     db::{DbError, DeliveredPosition, DeliveryInput, WriteOutcome},
     dialogue::{
+        callback::Action,
         context::AppContext,
         state::{Actor, AnimeIntent, ResolvedSelection, State},
-        storage::{PendingRecommendationDelivery, Session},
+        storage::{CallbackStatus, PendingRecommendationDelivery, Session},
     },
 };
 use std::collections::HashSet;
 use teloxide::prelude::*;
+use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, MessageId};
 
 const RETRY_NOTICE: &str = "Не удалось завершить выдачу. Нажмите выбранное аниме ещё раз.";
 const EMPTY_NOTICE: &str = "Для этого аниме пока нет рекомендаций. Попробуйте другое: /recommend.";
@@ -101,7 +103,8 @@ async fn deliver(
     }
     for (index, neighbor) in neighbors.iter().enumerate() {
         let rank = i16::try_from(index + 1).map_err(|_| DbError::Conflict)?;
-        if seen_ranks.contains(&rank) {
+        if let Some(row) = recorded.iter().find(|row| row.rank == rank) {
+            attach_scores(bot, actor, session, row).await?;
             continue;
         }
         let anime = ctx
@@ -128,9 +131,68 @@ async fn deliver(
                 message_id: sent.id.0,
             },
         });
-        persist_pending(ctx, session).await?;
+        let row = persist_pending(ctx, session).await?;
+        attach_scores(bot, actor, session, &row).await?;
     }
     Ok(())
+}
+
+async fn attach_scores(
+    bot: &Bot,
+    actor: Actor,
+    session: &mut Session,
+    position: &DeliveredPosition,
+) -> HandlerResult {
+    if position.chat_id != actor.chat_id || position.id <= 0 || position.message_id <= 0 {
+        return Err(DbError::Conflict.into());
+    }
+    if session.callbacks.values().any(|record| {
+        record.generation == session.generation
+            && record.message_id == Some(position.message_id)
+            && matches!(record.status, CallbackStatus::Active | CallbackStatus::Processing | CallbackStatus::Consumed)
+            && matches!(record.action, Action::RecommendationScore { position_id, .. } if position_id == position.id)
+    }) {
+        return Ok(());
+    }
+    let mut tokens = Vec::new();
+    let mut buttons = Vec::new();
+    for score in 0..=5 {
+        let token = match session.issue(Action::RecommendationScore {
+            position_id: position.id,
+            score,
+        }) {
+            Ok(token) => token,
+            Err(error) => {
+                session.discard(&tokens);
+                return Err(error.into());
+            }
+        };
+        buttons.push(InlineKeyboardButton::callback(
+            score.to_string(),
+            token.clone(),
+        ));
+        tokens.push(token);
+    }
+    let edited = bot
+        .edit_message_reply_markup(ChatId(position.chat_id), MessageId(position.message_id))
+        .reply_markup(InlineKeyboardMarkup::new(vec![buttons]))
+        .await;
+    match edited {
+        Ok(message)
+            if message.chat.id.0 == position.chat_id && message.id.0 == position.message_id =>
+        {
+            session.activate(&tokens, position.message_id);
+            Ok(())
+        }
+        Ok(_) => {
+            session.discard(&tokens);
+            Err(DbError::Conflict.into())
+        }
+        Err(error) => {
+            session.discard(&tokens);
+            Err(error.into())
+        }
+    }
 }
 
 async fn persist_pending(
@@ -185,7 +247,7 @@ fn render_card(seed: &Anime, rank: i16, total: usize, mal_id: MalId, anime: &Ani
         ui::bounded(&anime.genres.join(", "), 256)
     };
     let mut card = format!(
-        "Рекомендация {rank}/{total}\nПо запросу: {seed_title}\nНазвание: {title}\nMAL ID: {mal_id}\nОценка MAL: {score}\nГод: {year}\nТип: {kind}\nЭпизоды: {episodes}\nЖанры: {genres}\nОписание: "
+        "Рекомендация {rank}/{total}\nПо запросу: {seed_title}\nНазвание: {title}\nMAL ID: {mal_id}\nОценка MAL: {score}\nГод: {year}\nТип: {kind}\nЭпизоды: {episodes}\nЖанры: {genres}\nПолезность рекомендации: 0 — не полезна, 5 — очень полезна.\nОписание: "
     );
     let remaining = CARD_LIMIT.saturating_sub(card.encode_utf16().count());
     card.push_str(&ui::bounded(
@@ -196,23 +258,62 @@ fn render_card(seed: &Anime, rank: i16, total: usize, mal_id: MalId, anime: &Ani
 }
 
 pub struct ScoreAction<'a> {
-    pub position_id: crate::db::PositionId,
+    pub position: &'a DeliveredPosition,
     pub score: i16,
     pub action_key: &'a str,
 }
 
 pub async fn on_score(
     bot: &Bot,
-    _ctx: &AppContext,
+    ctx: &AppContext,
     actor: Actor,
-    _session: &mut Session,
+    session: &mut Session,
     _selection: &ResolvedSelection,
-    _action: ScoreAction<'_>,
+    action: ScoreAction<'_>,
 ) -> HandlerResult {
-    bot.send_message(
-        ChatId(actor.chat_id),
-        "Оценка рекомендации пока недоступна. Попробуйте позже.",
-    )
-    .await?;
-    Ok(())
+    session.callbacks.retain(|_, record| {
+        !matches!(record.action, Action::RecommendationScore { position_id, .. } if position_id == action.position.id)
+            || record.action_key == action.action_key
+                && matches!(record.action, Action::RecommendationScore { score, .. } if score == action.score)
+    });
+    match ctx
+        .repository
+        .rate_recommendation(actor.user_id, action.position.id, action.score)
+        .await
+    {
+        Ok(WriteOutcome::Created(()) | WriteOutcome::AlreadyRecorded(())) => {
+            let title = ctx
+                .bundle
+                .catalog()
+                .get(action.position.mal_id)
+                .map(|anime| ui::bounded(&anime.title, 240))
+                .unwrap_or_else(|| "Аниме".to_owned());
+            bot.send_message(
+                ChatId(actor.chat_id),
+                format!(
+                "Оценка полезности рекомендации «{title}» · MAL ID {}: {}/5 сохранена. Спасибо!",
+                action.position.mal_id, action.score
+            ),
+            )
+            .await?;
+            Ok(())
+        }
+        Err(DbError::DatabaseFailure) => {
+            bot.send_message(
+                ChatId(actor.chat_id),
+                format!(
+                    "Не удалось подтвердить сохранение оценки. Повторите ту же кнопку «{}».",
+                    action.score
+                ),
+            )
+            .await?;
+            Err(DbError::DatabaseFailure.into())
+        }
+        Err(DbError::Conflict | DbError::NotFound | DbError::InvalidInput(_)) => {
+            bot.send_message(ChatId(actor.chat_id),
+                "Не удалось подтвердить эту оценку. Выберите другую рекомендацию или начните новый поиск: /recommend.")
+                .await?;
+            Ok(())
+        }
+    }
 }

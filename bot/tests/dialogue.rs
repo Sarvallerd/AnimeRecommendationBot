@@ -35,6 +35,8 @@ struct FakeRepo {
     fail_upsert: AtomicBool,
     listings: AtomicUsize,
     positions: Mutex<Vec<DeliveredPosition>>,
+    recommendation_scores: Mutex<Vec<(i64, PositionId, i16)>>,
+    score_calls: AtomicUsize,
     block_resolve: AtomicBool,
     resolve_entered: Notify,
     resolve_release: Notify,
@@ -104,11 +106,22 @@ impl Repository for FakeRepo {
     }
     fn rate_recommendation<'a>(
         &'a self,
-        _: i64,
-        _: PositionId,
-        _: i16,
+        user_id: i64,
+        position_id: PositionId,
+        score: i16,
     ) -> DbFuture<'a, WriteOutcome<()>> {
-        Box::pin(async { panic!("unexpected rating") })
+        self.score_calls.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async move {
+            let mut rows = self.recommendation_scores.lock().unwrap();
+            if let Some((user, _, existing)) = rows.iter().find(|(_, id, _)| *id == position_id) {
+                if *user != user_id || *existing != score {
+                    return Err(DbError::Conflict);
+                }
+                return Ok(WriteOutcome::AlreadyRecorded(()));
+            }
+            rows.push((user_id, position_id, score));
+            Ok(WriteOutcome::Created(()))
+        })
     }
     fn save_feedback<'a>(
         &'a self,
@@ -549,10 +562,11 @@ async fn recommendation_score_reaches_owned_position_check_and_handler() {
     });
     dispatch(&bot, &ctx, callback(1, 1, 1, 111, Some(&token))).await;
     assert_eq!(repo.listings.load(Ordering::SeqCst), 1);
+    assert_eq!(*repo.recommendation_scores.lock().unwrap(), vec![(1, 9, 0)]);
     assert!(api
         .snapshot()
         .iter()
-        .any(|(_, body)| body.contains("Оценка рекомендации пока недоступна")));
+        .any(|(_, body)| body.contains("Оценка полезности рекомендации")));
     assert_eq!(
         session.lock().await.callbacks[&token].status,
         CallbackStatus::Consumed
@@ -601,10 +615,32 @@ async fn recommendation_score_reaches_owned_position_check_and_handler() {
     });
     dispatch(&bot, &ctx, callback(3, 1, 1, 113, Some(&wrong_request))).await;
     assert_eq!(repo.listings.load(Ordering::SeqCst), 3);
+    let wrong_message = {
+        let mut guard = session.lock().await;
+        let token = guard
+            .issue(Action::RecommendationScore {
+                position_id: 12,
+                score: 5,
+            })
+            .unwrap();
+        guard.activate(std::slice::from_ref(&token), 114);
+        token
+    };
+    repo.positions.lock().unwrap().push(DeliveredPosition {
+        id: 12,
+        request_id: 7,
+        rank: 4,
+        mal_id: 3,
+        chat_id: 1,
+        message_id: 115,
+    });
+    dispatch(&bot, &ctx, callback(4, 1, 1, 114, Some(&wrong_message))).await;
+    assert_eq!(repo.listings.load(Ordering::SeqCst), 4);
+    assert_eq!(repo.score_calls.load(Ordering::SeqCst), 1);
     assert_eq!(
         api.snapshot()
             .iter()
-            .filter(|(_, body)| body.contains("Оценка рекомендации пока недоступна"))
+            .filter(|(_, body)| body.contains("Оценка полезности рекомендации"))
             .count(),
         1
     );

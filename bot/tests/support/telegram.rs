@@ -23,6 +23,7 @@ pub struct FakeTelegram {
     url: String,
     requests: Arc<Mutex<Vec<(String, String)>>>,
     pub fail_send: Arc<AtomicBool>,
+    pub fail_edit: Arc<AtomicBool>,
     pub fail_ack: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
@@ -33,12 +34,14 @@ impl FakeTelegram {
         let url = format!("http://{}/", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
         let fail_send = Arc::new(AtomicBool::new(false));
+        let fail_edit = Arc::new(AtomicBool::new(false));
         let fail_ack = Arc::new(AtomicBool::new(false));
         listener.set_nonblocking(true).unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = stop.clone();
         let seen = requests.clone();
         let failure = fail_send.clone();
+        let edit_failure = fail_edit.clone();
         let ack_failure = fail_ack.clone();
         let thread = thread::spawn(move || {
             let mut next_id = 100;
@@ -94,11 +97,25 @@ impl FakeTelegram {
                     } else {
                         json!({"ok":true,"result":true})
                     }
-                } else if failure.swap(false, Ordering::SeqCst) {
-                    json!({"ok":false,"error_code":500,"description":"failed"})
+                } else if path.ends_with("/EditMessageReplyMarkup") {
+                    if edit_failure.swap(false, Ordering::SeqCst) {
+                        json!({"ok":false,"error_code":500,"description":"failed"})
+                    } else {
+                        let message_id = fields
+                            .get("message_id")
+                            .and_then(|v| v.parse::<i32>().ok())
+                            .unwrap_or(0);
+                        json!({"ok":true,"result":{"message_id":message_id,"date":1,"chat":{"id":chat_id,"type":"private","first_name":"Test"},"text":"ok"}})
+                    }
+                } else if path.ends_with("/SendMessage") {
+                    if failure.swap(false, Ordering::SeqCst) {
+                        json!({"ok":false,"error_code":500,"description":"failed"})
+                    } else {
+                        next_id += 1;
+                        json!({"ok":true,"result":{"message_id":next_id,"date":1,"chat":{"id":chat_id,"type":"private","first_name":"Test"},"text":"ok"}})
+                    }
                 } else {
-                    next_id += 1;
-                    json!({"ok":true,"result":{"message_id":next_id,"date":1,"chat":{"id":chat_id,"type":"private","first_name":"Test"},"text":"ok"}})
+                    json!({"ok":false,"error_code":404,"description":"unexpected method"})
                 };
                 let body = response.to_string();
                 let wire=format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body);
@@ -109,6 +126,7 @@ impl FakeTelegram {
             url,
             requests,
             fail_send,
+            fail_edit,
             fail_ack,
             stop,
             thread: Some(thread),
