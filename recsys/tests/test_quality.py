@@ -124,6 +124,10 @@ class QualityTests(unittest.TestCase):
         wrong_band = copy.deepcopy(self.spec)
         wrong_band["queries"][0]["popularity_band"] = "5001+"
         cases.append(wrong_band)
+        for invalid_band in ([], {}):
+            wrong_band_type = copy.deepcopy(self.spec)
+            wrong_band_type["queries"][0]["popularity_band"] = invalid_band
+            cases.append(wrong_band_type)
         wrong_title = copy.deepcopy(self.spec)
         wrong_title["queries"][0]["title"] = "Another title"
         cases.append(wrong_title)

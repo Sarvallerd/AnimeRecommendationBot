@@ -108,7 +108,8 @@ def _validate_query_set(spec: dict, anime: dict[str, dict]) -> list[dict]:
         if (not isinstance(title, str) or not title.strip()
                 or not isinstance(rationale, str) or not rationale.strip()
                 or type(rank) is not int or rank <= 0
-                or type(members) is not int or members < 0 or band not in BANDS):
+                or type(members) is not int or members < 0
+                or not isinstance(band, str) or band not in BANDS):
             raise QualityError(f"invalid query metadata for MAL_ID {mal_id}")
         lower, upper = BANDS[band]
         if rank < lower or (upper is not None and rank > upper):
