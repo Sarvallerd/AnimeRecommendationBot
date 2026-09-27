@@ -1,4 +1,3 @@
-use std::env;
 use tokio_postgres::{Client, Error, NoTls};
 
 #[derive(Debug)]
@@ -7,24 +6,13 @@ pub struct Db {
 }
 
 impl Db {
-    pub async fn new() -> Result<Self, Error> {
-        let (client, connection) = tokio_postgres::connect(
-            &format!(
-                "postgresql://{0}:{1}@{2}:{3}/{4}",
-                env::var("db_user").expect("$db_user is not set!"),
-                env::var("db_password").expect("$db_password is not set!"),
-                "localhost",
-                env::var("db_port").expect("$db_port is not set!"),
-                env::var("db_name").expect("$db_name is not set!")
-            ),
-            NoTls,
-        )
-        .await?;
+    pub async fn new(config: &tokio_postgres::Config) -> Result<Self, Error> {
+        let (client, connection) = config.connect(NoTls).await?;
 
-        // Spawn a task to manage the connection.
+        // Keep driving the connection while requests use the client.
         tokio::spawn(async move {
-            if let Err(e) = connection.await {
-                eprintln!("Connection error: {}", e);
+            if connection.await.is_err() {
+                eprintln!("Database connection was interrupted.");
             }
         });
 

@@ -1,5 +1,7 @@
+mod config;
 mod db;
 
+use config::Config;
 use db::Db;
 use std::{str::FromStr, sync::Arc};
 use teloxide::{
@@ -38,12 +40,37 @@ enum Command {
 
 #[tokio::main]
 async fn main() {
-    pretty_env_logger::init();
-    log::info!("Starting purchase bot...");
+    if let Err(message) = run().await {
+        eprintln!("{message}");
+        std::process::exit(1);
+    }
+}
 
-    let bot = Bot::from_env();
-    let db = Db::new().await.expect("Failed to initialize database");
-    db.create().await.unwrap();
+async fn run() -> Result<(), String> {
+    let mut args = std::env::args_os().skip(1);
+    let check_config = match (args.next(), args.next()) {
+        (None, None) => false,
+        (Some(arg), None) if arg == "--check-config" => true,
+        _ => return Err("Usage: bot [--check-config]".to_owned()),
+    };
+
+    let config = Config::from_env().map_err(|error| error.to_string())?;
+    if check_config {
+        println!("Configuration is valid.");
+        return Ok(());
+    }
+    config.init_logging().map_err(|error| error.to_string())?;
+    log::info!("Starting anime recommendation bot");
+
+    // The artifact loader is added in ARB-011. Configuration validates its path now.
+    let _ = config.artifacts_dir();
+    let bot = Bot::new(config.token());
+    let db = Db::new(config.database())
+        .await
+        .map_err(|_| "Database connection failed.".to_owned())?;
+    db.create()
+        .await
+        .map_err(|_| "Database setup failed.".to_owned())?;
     let arc_db = Arc::new(db);
 
     Dispatcher::builder(bot, schema(arc_db))
@@ -52,6 +79,7 @@ async fn main() {
         .build()
         .dispatch()
         .await;
+    Ok(())
 }
 
 fn schema(db: Arc<Db>) -> UpdateHandler<Box<dyn std::error::Error + Send + Sync + 'static>> {
