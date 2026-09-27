@@ -94,6 +94,7 @@ struct FakeRepo {
     profiles: Mutex<Vec<UserProfile>>,
     queries: Mutex<HashMap<(i64, String), (String, i64)>>,
     resolutions: Mutex<Vec<(i64, i64, i32, String)>>,
+    deliveries: Mutex<Vec<DeliveredPosition>>,
     fail_upsert: AtomicBool,
     fail_query_after_commit: AtomicBool,
     fail_resolve: AtomicBool,
@@ -166,17 +167,51 @@ impl Repository for FakeRepo {
     fn record_delivery<'a>(
         &'a self,
         _: i64,
-        _: RequestId,
-        _: &'a DeliveryInput,
+        request: RequestId,
+        input: &'a DeliveryInput,
     ) -> DbFuture<'a, WriteOutcome<PositionId>> {
-        Box::pin(async { panic!("unexpected delivery") })
+        Box::pin(async move {
+            let mut rows = self.deliveries.lock().unwrap();
+            if let Some(row) = rows
+                .iter()
+                .find(|row| row.request_id == request && row.rank == input.rank)
+            {
+                return if row.mal_id == input.mal_id
+                    && row.chat_id == input.chat_id
+                    && row.message_id == input.message_id
+                {
+                    Ok(WriteOutcome::AlreadyRecorded(row.id))
+                } else {
+                    Err(DbError::Conflict)
+                };
+            }
+            let id = self.next_id.fetch_add(1, Ordering::SeqCst) as i64 + 1;
+            rows.push(DeliveredPosition {
+                id,
+                request_id: request,
+                rank: input.rank,
+                mal_id: input.mal_id,
+                chat_id: input.chat_id,
+                message_id: input.message_id,
+            });
+            Ok(WriteOutcome::Created(id))
+        })
     }
     fn list_delivered_positions<'a>(
         &'a self,
         _: i64,
-        _: RequestId,
+        request: RequestId,
     ) -> DbFuture<'a, Vec<DeliveredPosition>> {
-        Box::pin(async { panic!("unexpected listing") })
+        Box::pin(async move {
+            Ok(self
+                .deliveries
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|row| row.request_id == request)
+                .cloned()
+                .collect())
+        })
     }
     fn rate_anime<'a>(
         &'a self,
@@ -267,6 +302,20 @@ async fn public_router_registers_actual_profile_and_requires_confirmation() {
         assert_eq!(repo.resolutions.lock().unwrap()[0].3, ctx.bundle.identity());
         dispatch(&bot, &ctx, callback(4, 7, 42, msg_id, Some(&token))).await;
         assert_eq!(repo.resolutions.lock().unwrap().len(), 1);
+        if command == "/recommend" {
+            let rows = repo.deliveries.lock().unwrap().clone();
+            assert_eq!(
+                rows.iter().map(|row| row.mal_id).collect::<Vec<_>>(),
+                vec![10, 11, 12, 2, 3]
+            );
+            assert!(rows.iter().enumerate().all(|(index, row)| {
+                row.rank == (index + 1) as i16 && row.chat_id == 7 && row.message_id > 0
+            }));
+            dispatch(&bot, &ctx, callback(5, 7, 43, msg_id, Some(&token))).await;
+            dispatch(&bot, &ctx, message(6, 7, 42, "/cancel")).await;
+            dispatch(&bot, &ctx, callback(7, 7, 42, msg_id, Some(&token))).await;
+            assert_eq!(repo.deliveries.lock().unwrap().as_slice(), rows.as_slice());
+        }
     }
 }
 
