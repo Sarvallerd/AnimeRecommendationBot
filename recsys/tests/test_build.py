@@ -128,6 +128,19 @@ class BuildTests(unittest.TestCase):
             with self.assertRaises(BuildError):
                 build(bad, args[1], args[2], root / "bad-out", registry=registry, registry_sha256=registry_sha)
 
+    def test_oversized_canonical_integer_score_is_catalog_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry, registry_sha = self._fixture(root)
+            catalog = json.loads((root / "catalog.json").read_bytes())
+            catalog["anime"]["2"]["score"] = 10 ** 1000
+            (root / "catalog.json").write_bytes(_canonical(catalog))
+            with self.assertRaisesRegex(BuildError, "invalid score: 2"):
+                build(root / "catalog.json", root / "normalization-report.json",
+                      root / "glove.txt", root / "out", registry=registry,
+                      registry_sha256=registry_sha)
+            self.assertFalse((root / "out").exists())
+
     def test_report_and_raw_hash_mismatch_leave_no_output(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -82,7 +82,8 @@ def _catalog(value):
                     or len(entries) != len(set(entries))):
                 raise BuildError(f"invalid {field}: {key}")
         score = item["score"]
-        if score is not None and (type(score) not in (int, float) or not math.isfinite(score) or not 1 <= score <= 10):
+        if score is not None and (type(score) not in (int, float) or not 1 <= score <= 10
+                                  or (type(score) is float and not math.isfinite(score))):
             raise BuildError(f"invalid score: {key}")
         for field, maximum in (("year", 9999), ("episodes", None)):
             x = item[field]
