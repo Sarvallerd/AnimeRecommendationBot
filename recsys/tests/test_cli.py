@@ -41,6 +41,14 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(result.stdout, f"recsys {version}\n")
                 self.assertEqual(result.stderr, "")
 
+    def test_obtain_offline_uses_installed_registry_outside_cwd(self) -> None:
+        result = self.run_cli("obtain", "--offline", "--data-dir", "missing", console=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("missing source", result.stderr)
+        self.assertIn("anime.csv", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
     def test_unknown_arguments_and_commands_fail(self) -> None:
         for args in (("--unknown",), ("build",), ("--ver",)):
             with self.subTest(args=args):

@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "provenance": {
+    "mal": {
+      "repository": "https://github.com/Hernan4444/MyAnimeList-Database",
+      "commit": "9a1d7f56482accbde99e24cd7cfcad65e2d24b1f",
+      "author_listing": "https://www.kaggle.com/datasets/hernan4444/anime-recommendation-database-2020",
+      "author_api": "https://www.kaggle.com/api/v1/datasets/view/hernan4444/anime-recommendation-database-2020",
+      "author_listing_license": "CC0: Public Domain",
+      "author_listing_version_observed": 7,
+      "author_listing_last_updated_observed": "2021-07-13T19:26:08.217Z"
+    },
+    "glove": {
+      "project": "https://nlp.stanford.edu/projects/glove/",
+      "pretrained_vectors_license": "PDDL 1.0",
+      "code_license": "Apache 2.0",
+      "download_url": "https://nlp.stanford.edu/data/glove.6B.zip",
+      "observed_redirect": "https://downloads.cs.stanford.edu/nlp/data/glove.6B.zip"
+    }
+  },
+  "sources": [
+    {
+      "id": "mal_anime",
+      "filename": "anime.csv",
+      "size": 5662362,
+      "sha256": "6e6d723f3e021e084a281d1ec557a0a10dfb9721d256b87596e02c27eb1f77e9",
+      "url": "https://raw.githubusercontent.com/Hernan4444/MyAnimeList-Database/9a1d7f56482accbde99e24cd7cfcad65e2d24b1f/data/anime.csv"
+    },
+    {
+      "id": "mal_synopsis",
+      "filename": "anime_with_synopsis.csv",
+      "size": 7221844,
+      "sha256": "fc5065338f1d66063cc6b6ed328701c3e23118110689daa852d5876911674e33",
+      "url": "https://raw.githubusercontent.com/Hernan4444/MyAnimeList-Database/9a1d7f56482accbde99e24cd7cfcad65e2d24b1f/data/anime_with_synopsis.csv"
+    },
+    {
+      "id": "glove_zip",
+      "filename": "glove.6B.zip",
+      "size": 862182613,
+      "sha256": "617afb2fe6cbd085c235baf7a465b96f4112bd7f7ccb2b2cbd649fed9cbcf2fb",
+      "url": "https://nlp.stanford.edu/data/glove.6B.zip"
+    },
+    {
+      "id": "glove_300d",
+      "filename": "glove.6B.300d.txt",
+      "size": 1037962819,
+      "sha256": "91125602f730fea7ca768736c6f442e668b49db095682bf2aad375db061c21ed",
+      "archive_id": "glove_zip",
+      "member": "glove.6B.300d.txt"
+    }
+  ]
+}
