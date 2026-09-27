@@ -6,7 +6,23 @@ conversationbot
 
 .ipynb_checkpoints
 .idea
+.vscode/
+.pytest_cache/
+.ruff_cache/
 __pycache__
-*.lock
 target
-.*
+
+.env
+.env.*
+!.env.example
+.venv/
+.tools/
+.worktrees/
+
+.codex/*
+!.codex/config.toml
+!.codex/agents/
+.codex/agents/*
+!.codex/agents/architect.toml
+!.codex/agents/implementer.toml
+!.codex/agents/reviewer.toml
