@@ -13,9 +13,9 @@ pub async fn begin(
     session: &mut Session,
     intent: AnimeIntent,
 ) -> HandlerResult {
-    session.begin(State::AwaitingQuery { intent });
     bot.send_message(ChatId(actor.chat_id), "Напишите название аниме.")
         .await?;
+    session.begin(State::AwaitingQuery { intent });
     Ok(())
 }
 

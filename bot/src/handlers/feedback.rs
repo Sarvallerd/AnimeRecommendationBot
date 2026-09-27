@@ -12,12 +12,12 @@ pub async fn begin(
     actor: Actor,
     session: &mut Session,
 ) -> HandlerResult {
-    session.begin(State::Idle);
     bot.send_message(
         ChatId(actor.chat_id),
         "Отзывы пока недоступны. Попробуйте позже.",
     )
     .await?;
+    session.begin(State::Idle);
     Ok(())
 }
 pub async fn on_message(

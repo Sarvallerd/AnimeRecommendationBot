@@ -69,12 +69,12 @@ pub async fn start(
 }
 
 pub async fn cancel(bot: &Bot, actor: Actor, session: &mut Session) -> HandlerResult {
-    session.reset();
     bot.send_message(
         ChatId(actor.chat_id),
         "Действие отменено. Начните заново: /start",
     )
     .await?;
+    session.reset();
     Ok(())
 }
 

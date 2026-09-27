@@ -136,7 +136,13 @@ fn action_matches_state(action: &Action, state: &State) -> bool {
         Action::AnimeScore { request_id, .. } => matches!(state,
             State::Selected { intent: super::state::AnimeIntent::Rate, selection }
             if *request_id == selection.query.request_id),
-        Action::RecommendationScore { .. } => false,
+        Action::RecommendationScore { .. } => matches!(
+            state,
+            State::Selected {
+                intent: super::state::AnimeIntent::Recommend,
+                ..
+            }
+        ),
     }
 }
 

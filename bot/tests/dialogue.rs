@@ -28,6 +28,7 @@ use teloxide::{
     prelude::*,
     types::{CallbackQuery, Message, Update, UpdateId, UpdateKind},
 };
+use tokio::sync::Notify;
 
 #[derive(Default)]
 struct FakeRepo {
@@ -35,6 +36,11 @@ struct FakeRepo {
     resolves: AtomicUsize,
     resolve_ok: AtomicBool,
     fail_upsert: AtomicBool,
+    listings: AtomicUsize,
+    positions: Mutex<Vec<DeliveredPosition>>,
+    block_resolve: AtomicBool,
+    resolve_entered: Notify,
+    resolve_release: Notify,
 }
 impl Repository for FakeRepo {
     fn upsert_user<'a>(&'a self, _p: &'a UserProfile) -> DbFuture<'a, ()> {
@@ -64,6 +70,10 @@ impl Repository for FakeRepo {
     ) -> DbFuture<'a, WriteOutcome<()>> {
         self.resolves.fetch_add(1, Ordering::SeqCst);
         Box::pin(async move {
+            if self.block_resolve.load(Ordering::SeqCst) {
+                self.resolve_entered.notify_one();
+                self.resolve_release.notified().await;
+            }
             if self.resolve_ok.load(Ordering::SeqCst) {
                 Ok(WriteOutcome::Created(()))
             } else {
@@ -84,7 +94,8 @@ impl Repository for FakeRepo {
         _: i64,
         _: RequestId,
     ) -> DbFuture<'a, Vec<DeliveredPosition>> {
-        Box::pin(async { panic!("unexpected listing") })
+        self.listings.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async move { Ok(self.positions.lock().unwrap().clone()) })
     }
     fn rate_anime<'a>(
         &'a self,
@@ -614,4 +625,312 @@ async fn selection_send_failure_keeps_owned_query_for_retry() {
         }
     ));
     assert_eq!(repo.resolves.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn recommendation_score_reaches_owned_position_check_and_handler() {
+    use bot::dialogue::{callback::Action, state::ResolvedSelection, storage::CallbackStatus};
+
+    let api = FakeTelegram::new();
+    let repo = Arc::new(FakeRepo::default());
+    let ctx = fixture(repo.clone());
+    let bot = api.bot();
+    let actor = Actor {
+        chat_id: 1,
+        user_id: 1,
+    };
+    let session = ctx.sessions.get(actor);
+    let token = {
+        let mut guard = session.lock().await;
+        guard.state = State::Selected {
+            intent: AnimeIntent::Recommend,
+            selection: ResolvedSelection {
+                query: QueryContext {
+                    request_id: 7,
+                    raw_query: "anime".into(),
+                },
+                seed_mal_id: 3,
+                bundle_id: ctx.bundle.identity().into(),
+            },
+        };
+        let token = guard
+            .issue(Action::RecommendationScore {
+                position_id: 9,
+                score: 0,
+            })
+            .unwrap();
+        guard.activate(std::slice::from_ref(&token), 111);
+        token
+    };
+    repo.positions.lock().unwrap().push(DeliveredPosition {
+        id: 9,
+        request_id: 7,
+        rank: 1,
+        mal_id: 3,
+        chat_id: 1,
+        message_id: 111,
+    });
+    dispatch(&bot, &ctx, callback(1, 1, 1, 111, Some(&token))).await;
+    assert_eq!(repo.listings.load(Ordering::SeqCst), 1);
+    assert!(api
+        .snapshot()
+        .iter()
+        .any(|(_, body)| body.contains("Оценка рекомендации пока недоступна")));
+    assert_eq!(
+        session.lock().await.callbacks[&token].status,
+        CallbackStatus::Consumed
+    );
+
+    // A different chat or request cannot turn a server-issued score into an owned position.
+    let bad = {
+        let mut guard = session.lock().await;
+        let token = guard
+            .issue(Action::RecommendationScore {
+                position_id: 10,
+                score: 5,
+            })
+            .unwrap();
+        guard.activate(std::slice::from_ref(&token), 112);
+        token
+    };
+    repo.positions.lock().unwrap().push(DeliveredPosition {
+        id: 10,
+        request_id: 7,
+        rank: 2,
+        mal_id: 3,
+        chat_id: 2,
+        message_id: 112,
+    });
+    dispatch(&bot, &ctx, callback(2, 1, 1, 112, Some(&bad))).await;
+    assert_eq!(repo.listings.load(Ordering::SeqCst), 2);
+    let wrong_request = {
+        let mut guard = session.lock().await;
+        let token = guard
+            .issue(Action::RecommendationScore {
+                position_id: 11,
+                score: 5,
+            })
+            .unwrap();
+        guard.activate(std::slice::from_ref(&token), 113);
+        token
+    };
+    repo.positions.lock().unwrap().push(DeliveredPosition {
+        id: 11,
+        request_id: 8,
+        rank: 3,
+        mal_id: 3,
+        chat_id: 1,
+        message_id: 113,
+    });
+    dispatch(&bot, &ctx, callback(3, 1, 1, 113, Some(&wrong_request))).await;
+    assert_eq!(repo.listings.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        api.snapshot()
+            .iter()
+            .filter(|(_, body)| body.contains("Оценка рекомендации пока недоступна"))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn failed_flow_callback_send_can_retry_the_same_token_and_key() {
+    use bot::dialogue::{callback::Action, storage::CallbackStatus};
+
+    for action in [
+        Action::Recommend,
+        Action::Rate,
+        Action::Feedback,
+        Action::Cancel,
+    ] {
+        let api = FakeTelegram::new();
+        let repo = Arc::new(FakeRepo::default());
+        let ctx = fixture(repo);
+        let bot = api.bot();
+        let actor = Actor {
+            chat_id: 1,
+            user_id: 1,
+        };
+        let session = ctx.sessions.get(actor);
+        let previous = State::AwaitingQuery {
+            intent: AnimeIntent::Rate,
+        };
+        let (token, generation) = {
+            let mut guard = session.lock().await;
+            guard.state = previous.clone();
+            let token = guard.issue(action.clone()).unwrap();
+            guard.activate(std::slice::from_ref(&token), 111);
+            (token, guard.generation)
+        };
+        api.fail_send.store(true, Ordering::SeqCst);
+        let first = handlers::schema()
+            .dispatch(dptree::deps![
+                bot.clone(),
+                callback(1, 1, 1, 111, Some(&token)),
+                ctx.clone()
+            ])
+            .await;
+        assert!(
+            matches!(first, std::ops::ControlFlow::Break(Err(_))),
+            "{action:?}: {first:?}"
+        );
+        {
+            let guard = session.lock().await;
+            assert_eq!(guard.state, previous, "{action:?}");
+            assert_eq!(guard.generation, generation, "{action:?}");
+            assert_eq!(
+                guard.callbacks[&token].status,
+                CallbackStatus::Active,
+                "{action:?}"
+            );
+            assert_eq!(
+                guard.callbacks[&token].action_key,
+                format!("callback:{token}")
+            );
+        }
+        dispatch(&bot, &ctx, callback(2, 1, 1, 111, Some(&token))).await;
+        {
+            let guard = session.lock().await;
+            assert_eq!(guard.generation, generation + 1, "{action:?}");
+            assert!(!guard.callbacks.contains_key(&token), "{action:?}");
+            let expected = match action {
+                Action::Recommend => State::AwaitingQuery {
+                    intent: AnimeIntent::Recommend,
+                },
+                Action::Rate => State::AwaitingQuery {
+                    intent: AnimeIntent::Rate,
+                },
+                _ => State::Idle,
+            };
+            assert_eq!(guard.state, expected, "{action:?}");
+        }
+        let before = api.snapshot().len();
+        dispatch(&bot, &ctx, callback(3, 1, 1, 111, Some(&token))).await;
+        assert_eq!(api.snapshot().len(), before + 2, "{action:?}");
+    }
+}
+
+#[tokio::test]
+async fn valid_token_used_in_another_private_chat_has_no_effect() {
+    use bot::dialogue::callback::Action;
+
+    let api = FakeTelegram::new();
+    let repo = Arc::new(FakeRepo::default());
+    let ctx = fixture(repo.clone());
+    let bot = api.bot();
+    let owner = Actor {
+        chat_id: 1,
+        user_id: 1,
+    };
+    let other = Actor {
+        chat_id: 2,
+        user_id: 1,
+    };
+    let token = {
+        let session = ctx.sessions.get(owner);
+        let mut guard = session.lock().await;
+        let token = guard.issue(Action::Recommend).unwrap();
+        guard.activate(std::slice::from_ref(&token), 111);
+        token
+    };
+    ctx.sessions.get(other).lock().await.state = State::Idle;
+    dispatch(&bot, &ctx, callback(1, 2, 1, 111, Some(&token))).await;
+    assert_eq!(ctx.sessions.get(owner).lock().await.state, State::Idle);
+    assert_eq!(ctx.sessions.get(other).lock().await.state, State::Idle);
+    assert_eq!(repo.upserts.load(Ordering::SeqCst), 0);
+    assert_eq!(repo.resolves.load(Ordering::SeqCst), 0);
+    assert!(api
+        .snapshot()
+        .iter()
+        .any(|(_, body)| body.contains("Эта кнопка устарела")));
+}
+
+#[tokio::test]
+async fn simultaneous_duplicate_callbacks_have_one_repository_effect() {
+    use bot::dialogue::callback::Action;
+    use tokio::time::timeout;
+
+    let api = FakeTelegram::new();
+    let repo = Arc::new(FakeRepo::default());
+    repo.resolve_ok.store(true, Ordering::SeqCst);
+    repo.block_resolve.store(true, Ordering::SeqCst);
+    let ctx = fixture(repo.clone());
+    let bot = api.bot();
+    let actor = Actor {
+        chat_id: 1,
+        user_id: 1,
+    };
+    let session = ctx.sessions.get(actor);
+    let token = {
+        let mut guard = session.lock().await;
+        guard.state = State::ChoosingAnime {
+            intent: AnimeIntent::Rate,
+            query: QueryContext {
+                request_id: 7,
+                raw_query: "anime".into(),
+            },
+            candidates: vec![3],
+        };
+        let token = guard
+            .issue(Action::Select {
+                intent: AnimeIntent::Rate,
+                request_id: 7,
+                mal_id: 3,
+            })
+            .unwrap();
+        guard.activate(std::slice::from_ref(&token), 111);
+        token
+    };
+    let entered = repo.resolve_entered.notified();
+    let first = tokio::spawn({
+        let bot = bot.clone();
+        let ctx = ctx.clone();
+        let token = token.clone();
+        async move { dispatch(&bot, &ctx, callback(1, 1, 1, 111, Some(&token))).await }
+    });
+    timeout(Duration::from_secs(3), entered).await.unwrap();
+    let second = tokio::spawn({
+        let bot = bot.clone();
+        let ctx = ctx.clone();
+        let token = token.clone();
+        async move { dispatch(&bot, &ctx, callback(2, 1, 1, 111, Some(&token))).await }
+    });
+    timeout(Duration::from_secs(3), async {
+        while api
+            .snapshot()
+            .iter()
+            .filter(|(path, _)| path.ends_with("/AnswerCallbackQuery"))
+            .count()
+            < 2
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(repo.resolves.load(Ordering::SeqCst), 1);
+    repo.resolve_release.notify_one();
+    timeout(Duration::from_secs(3), first)
+        .await
+        .unwrap()
+        .unwrap();
+    timeout(Duration::from_secs(3), second)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(repo.resolves.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        session.lock().await.state,
+        State::Selected {
+            intent: AnimeIntent::Rate,
+            ..
+        }
+    ));
+    assert_eq!(
+        api.snapshot()
+            .iter()
+            .filter(|(_, body)| body.contains("Оценка аниме пока недоступна"))
+            .count(),
+        1
+    );
 }
