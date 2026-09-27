@@ -15,6 +15,7 @@ project="arb019-ci-$(date +%s)-$RANDOM"
 temp=$(mktemp -d)
 chmod 755 "$temp"
 export ARB_DATA_DIR="$temp/data" ARB_BOT_ENV="$temp/bot.env" ARB_POSTGRES_ENV="$temp/postgres.env"
+export ARB_UID="$(id -u)" ARB_GID="$(id -g)"
 mkdir -p "$ARB_DATA_DIR"
 cat > "$ARB_BOT_ENV" <<'ENV'
 TELOXIDE_TOKEN=0:ci
