@@ -101,6 +101,27 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("Traceback", result.stderr)
             self.assertFalse((root / "out").exists())
 
+    def test_export_validate_help_and_errors_outside_checkout(self) -> None:
+        for command in ("export", "validate"):
+            help_result = self.run_cli(command, "--help", console=True)
+            self.assertEqual(help_result.returncode, 0, help_result.stderr)
+            self.assertIn("usage: recsys", help_result.stdout)
+            self.assertEqual(help_result.stderr, "")
+        fixture = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "bundle"
+        for console in (False, True):
+            result = self.run_cli("validate", str(fixture), console=console)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("records=8", result.stdout)
+        invalid = self.run_cli("validate", "missing", console=True)
+        self.assertEqual(invalid.returncode, 1)
+        self.assertNotIn("Traceback", invalid.stderr)
+        invalid = self.run_cli("export", "--catalog", "missing", "--neighbors", "missing",
+                               "--build-report", "missing", "--normalization-report", "missing",
+                               "--output-dir", "out", console=True)
+        self.assertEqual(invalid.returncode, 1)
+        self.assertNotIn("Traceback", invalid.stderr)
+        self.assertIn("missing", invalid.stderr)
+
     def test_unknown_arguments_and_commands_fail(self) -> None:
         for args in (("--unknown",), ("build",), ("--ver",)):
             with self.subTest(args=args):

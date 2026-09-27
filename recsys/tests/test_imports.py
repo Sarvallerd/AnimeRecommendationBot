@@ -15,7 +15,7 @@ import sys
 
 sys.argv = ["recsys", "--invalid"]
 before = set(pathlib.Path.cwd().iterdir())
-for name in ("recsys", "recsys.cli", "recsys.__main__", "recsys.sources", "recsys.obtain", "recsys.normalize", "recsys.build"):
+for name in ("recsys", "recsys.cli", "recsys.__main__", "recsys.sources", "recsys.obtain", "recsys.normalize", "recsys.build", "recsys.bundle", "recsys.export"):
     importlib.import_module(name)
 assert set(pathlib.Path.cwd().iterdir()) == before
 assert not any(name == "numpy" or name.startswith("numpy.") for name in sys.modules)
