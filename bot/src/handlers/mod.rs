@@ -3,6 +3,7 @@ pub mod feedback;
 pub mod ratings;
 pub mod recommendations;
 pub mod search;
+pub mod ui;
 
 use crate::{
     db::DbError,
@@ -53,8 +54,8 @@ async fn handle_message(bot: Bot, msg: Message, ctx: Arc<AppContext>) -> Handler
         return commands::route(&bot, &ctx, actor, user, &mut session, command).await;
     }
     match session.state.clone() {
-        State::AwaitingQuery { .. } => {
-            search::on_message(&bot, &ctx, actor, &mut session, text, msg.id.0).await
+        State::AwaitingQuery { .. } | State::PendingQuery { .. } | State::ChoosingAnime { .. } => {
+            search::on_message(&bot, &ctx, actor, user, &mut session, text, msg.id.0).await
         }
         State::AwaitingFeedback => {
             feedback::on_message(&bot, &ctx, actor, &mut session, text, msg.id.0).await
@@ -101,6 +102,22 @@ async fn handle_callback(bot: Bot, q: CallbackQuery, ctx: Arc<AppContext>) -> Ha
     };
     let mut session = session.lock().await;
     let Some((action, action_key)) = session.claim(data, message.id.0) else {
+        if let (
+            Some(record),
+            State::ChoosingAnime {
+                selected_mal_id: Some(selected),
+                ..
+            },
+        ) = (session.callbacks.get(data), &session.state)
+        {
+            if record.generation == session.generation
+                && record.message_id == Some(message.id.0)
+                && matches!(record.action, Action::Select { mal_id, .. } if mal_id != *selected)
+            {
+                bot.send_message(message.chat.id, "Для этого запроса уже выбран вариант. Повторите выбранную кнопку или отправьте название новым сообщением.").await?;
+                return Ok(());
+            }
+        }
         stale(&bot, actor).await?;
         return Ok(());
     };
@@ -111,11 +128,35 @@ async fn handle_callback(bot: Bot, q: CallbackQuery, ctx: Arc<AppContext>) -> Ha
         Action::Rate => search::begin(&bot, &ctx, actor, &mut session, AnimeIntent::Rate).await,
         Action::Feedback => feedback::begin(&bot, &ctx, actor, &mut session).await,
         Action::Cancel => commands::cancel(&bot, actor, &mut session).await,
+        Action::RetryQuery { .. } => search::on_retry(&bot, &ctx, actor, &mut session).await,
         Action::Select {
             intent,
             request_id,
             mal_id,
         } => {
+            let valid = if let State::ChoosingAnime {
+                query,
+                candidates,
+                selected_mal_id,
+                ..
+            } = &mut session.state
+            {
+                if query.request_id == request_id
+                    && candidates.contains(&mal_id)
+                    && selected_mal_id.is_none_or(|selected| selected == mal_id)
+                {
+                    *selected_mal_id = Some(mal_id);
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            if !valid {
+                session.finish(data, false);
+                return stale(&bot, actor).await;
+            }
             match ctx
                 .repository
                 .resolve_request(actor.user_id, request_id, mal_id, ctx.bundle.identity())

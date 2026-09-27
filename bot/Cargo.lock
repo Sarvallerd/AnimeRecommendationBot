@@ -93,11 +93,13 @@ dependencies = [
  "pretty_env_logger",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "sha2 0.10.9",
  "teloxide",
  "tempfile",
  "tokio",
  "tokio-postgres",
+ "unicode-normalization",
 ]
 
 [[package]]

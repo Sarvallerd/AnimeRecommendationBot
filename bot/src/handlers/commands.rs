@@ -1,4 +1,4 @@
-use super::{feedback, search, HandlerResult};
+use super::{feedback, search, ui, HandlerResult};
 use crate::{
     db::UserProfile,
     dialogue::{
@@ -8,10 +8,7 @@ use crate::{
         storage::Session,
     },
 };
-use teloxide::{
-    prelude::*,
-    types::{InlineKeyboardButton, InlineKeyboardMarkup, User},
-};
+use teloxide::{prelude::*, types::User};
 
 pub const HELP: &str = "Команды: /start — начать; /help — помощь; /cancel — отменить; /recommend — рекомендации; /rate — оценить аниме; /feedback — отзыв.";
 pub const STALE: &str = "Эта кнопка устарела. Начните заново: /start";
@@ -39,32 +36,18 @@ pub async fn start(
         )
         .await?;
     }
-    let actions = [
-        ("Рекомендации", Action::Recommend),
-        ("Оценить аниме", Action::Rate),
-        ("Отзыв", Action::Feedback),
-    ];
-    let mut tokens = Vec::new();
-    let mut buttons = Vec::new();
-    for (label, action) in actions {
-        let token = session.issue(action)?;
-        buttons.push(InlineKeyboardButton::callback(label, token.clone()));
-        tokens.push(token);
-    }
-    let result = bot
-        .send_message(
-            ChatId(actor.chat_id),
-            "Привет! Я помогу найти похожее аниме. Выберите действие или используйте /help.",
-        )
-        .reply_markup(InlineKeyboardMarkup::new([buttons]))
-        .await;
-    match result {
-        Ok(message) => session.activate(&tokens, message.id.0),
-        Err(error) => {
-            session.discard(&tokens);
-            return Err(error.into());
-        }
-    }
+    ui::send_keyboard(
+        bot,
+        actor,
+        session,
+        "Привет! Я помогу найти похожее аниме. Выберите действие или используйте /help.".into(),
+        vec![vec![
+            ("Рекомендации".into(), Action::Recommend),
+            ("Оценить аниме".into(), Action::Rate),
+            ("Отзыв".into(), Action::Feedback),
+        ]],
+    )
+    .await?;
     Ok(())
 }
 

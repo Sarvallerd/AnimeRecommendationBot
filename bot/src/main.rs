@@ -47,11 +47,11 @@ async fn run() -> Result<(), String> {
     db.migrate()
         .await
         .map_err(|_| "Database setup failed.".to_owned())?;
-    let context = Arc::new(AppContext {
+    let context = Arc::new(AppContext::new(
         bundle,
-        repository: Arc::new(db),
-        sessions: Arc::new(SessionStore::new()),
-    });
+        Arc::new(db),
+        Arc::new(SessionStore::new()),
+    ));
     let webhook = bot
         .get_webhook_info()
         .await
