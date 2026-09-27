@@ -238,8 +238,18 @@ async fn handle_callback(bot: Bot, q: CallbackQuery, ctx: Arc<AppContext>) -> Ha
                         p.id == position_id
                             && p.request_id == selection.query.request_id
                             && p.chat_id == actor.chat_id
+                            && p.message_id == message.id.0
                     }) =>
                 {
+                    let position = positions
+                        .iter()
+                        .find(|p| {
+                            p.id == position_id
+                                && p.request_id == selection.query.request_id
+                                && p.chat_id == actor.chat_id
+                                && p.message_id == message.id.0
+                        })
+                        .unwrap();
                     recommendations::on_score(
                         &bot,
                         &ctx,
@@ -247,7 +257,7 @@ async fn handle_callback(bot: Bot, q: CallbackQuery, ctx: Arc<AppContext>) -> Ha
                         &mut session,
                         &selection,
                         recommendations::ScoreAction {
-                            position_id,
+                            position,
                             score,
                             action_key: &action_key,
                         },

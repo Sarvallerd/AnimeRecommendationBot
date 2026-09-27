@@ -103,6 +103,9 @@ struct FakeRepo {
     rows: Mutex<Vec<DeliveredPosition>>,
     resolves: Mutex<Vec<(i64, i32, String)>>,
     next: Mutex<i64>,
+    scores: Mutex<Vec<(i64, PositionId, i16)>>,
+    score_calls: Mutex<Vec<(i64, PositionId, i16)>>,
+    score_failure: AtomicU8, // 1 before commit, 2 after commit, 3 terminal
     fail_list: AtomicBool,
     write_failure: AtomicU8, // 1 before commit, 2 after commit
     fail_send_after_record: Mutex<Option<Arc<AtomicBool>>>,
@@ -215,11 +218,43 @@ impl Repository for FakeRepo {
     }
     fn rate_recommendation<'a>(
         &'a self,
-        _: i64,
-        _: PositionId,
-        _: i16,
+        user: i64,
+        position: PositionId,
+        score: i16,
     ) -> DbFuture<'a, WriteOutcome<()>> {
-        Box::pin(async { panic!("unexpected") })
+        Box::pin(async move {
+            self.score_calls
+                .lock()
+                .unwrap()
+                .push((user, position, score));
+            let failure = self.score_failure.swap(0, Ordering::SeqCst);
+            if failure == 1 {
+                return Err(DbError::DatabaseFailure);
+            }
+            if failure == 3 {
+                return Err(DbError::NotFound);
+            }
+            if !(0..=5).contains(&score) {
+                return Err(DbError::InvalidInput("score"));
+            }
+            let mut rows = self.scores.lock().unwrap();
+            let result = if let Some((old_user, _, old_score)) =
+                rows.iter().find(|(_, id, _)| *id == position)
+            {
+                if *old_user != user || *old_score != score {
+                    return Err(DbError::Conflict);
+                }
+                WriteOutcome::AlreadyRecorded(())
+            } else {
+                rows.push((user, position, score));
+                WriteOutcome::Created(())
+            };
+            if failure == 2 {
+                Err(DbError::DatabaseFailure)
+            } else {
+                Ok(result)
+            }
+        })
     }
     fn save_feedback<'a>(
         &'a self,
@@ -257,7 +292,34 @@ async fn canonical_five_two_and_empty_card_sets() {
                 rows.iter().map(|row| row.mal_id).collect::<Vec<_>>(),
                 [10, 11, 12, 2, 3][..count]
             );
+            let edits: Vec<_> = api
+                .decoded()
+                .into_iter()
+                .filter(|(path, _)| path.ends_with("/EditMessageReplyMarkup"))
+                .collect();
+            assert_eq!(edits.len(), count);
+            assert!(repo.scores.lock().unwrap().is_empty());
             for (index, (row, text)) in rows.iter().zip(&texts).enumerate() {
+                let fields = &edits[index].1;
+                assert_eq!(fields.get("chat_id").unwrap(), &row.chat_id.to_string());
+                assert_eq!(
+                    fields.get("message_id").unwrap(),
+                    &row.message_id.to_string()
+                );
+                let markup: Value =
+                    serde_json::from_str(fields.get("reply_markup").unwrap()).unwrap();
+                let buttons = markup["inline_keyboard"][0].as_array().unwrap();
+                assert_eq!(buttons.len(), 6);
+                for (score, button) in buttons.iter().enumerate() {
+                    assert_eq!(button["text"], score.to_string());
+                    let token = button["callback_data"].as_str().unwrap();
+                    assert!(token.starts_with("a1:") && token.len() == 35);
+                    let record = session.callbacks.get(token).unwrap();
+                    assert_eq!(record.message_id, Some(row.message_id));
+                    assert!(
+                        matches!(record.action, Action::RecommendationScore { position_id, score: value } if position_id == row.id && value == score as i16)
+                    );
+                }
                 assert_eq!(row.rank, (index + 1) as i16);
                 assert_eq!(row.chat_id, ACTOR.chat_id);
                 assert_eq!(row.message_id, 101 + index as i32);
@@ -268,6 +330,13 @@ async fn canonical_five_two_and_empty_card_sets() {
                 .await
                 .unwrap();
             assert_eq!(sent_texts(&api).len(), count);
+            assert_eq!(
+                api.decoded()
+                    .iter()
+                    .filter(|(path, _)| path.ends_with("/EditMessageReplyMarkup"))
+                    .count(),
+                count
+            );
         }
     }
 }
@@ -293,6 +362,7 @@ async fn nulls_long_unicode_and_plain_text_stay_bounded() {
     assert!(api
         .decoded()
         .iter()
+        .filter(|(path, _)| path.ends_with("/SendMessage"))
         .all(|(_, fields)| !fields.contains_key("parse_mode")
             && !fields.contains_key("reply_markup")));
 }
@@ -345,6 +415,14 @@ async fn uncertain_writes_reuse_original_coordinates_after_reset() {
                 .await
                 .is_err()
         );
+        assert!(session
+            .callbacks
+            .values()
+            .all(|record| !matches!(record.action, Action::RecommendationScore { .. })));
+        assert!(api
+            .decoded()
+            .iter()
+            .all(|(path, _)| !path.ends_with("/EditMessageReplyMarkup")));
         session.reset();
         session.state = State::Selected {
             intent: AnimeIntent::Recommend,
@@ -400,6 +478,19 @@ async fn old_pending_keeps_its_request_when_navigation_starts_new_search() {
         101
     );
     assert_eq!(rows.iter().filter(|row| row.request_id == 2).count(), 5);
+    assert!(session
+        .callbacks
+        .values()
+        .filter_map(|record| {
+            if let Action::RecommendationScore { position_id, .. } = record.action {
+                Some(position_id)
+            } else {
+                None
+            }
+        })
+        .all(|position_id| rows
+            .iter()
+            .any(|row| row.id == position_id && row.request_id == 2)));
     assert!(repo
         .resolves
         .lock()
@@ -548,6 +639,417 @@ async fn postgres_records_real_coordinates_and_provenance() {
         );
         assert!(row.get::<_, std::time::SystemTime>(7) <= std::time::SystemTime::now());
     }
+    drop(ctx);
+    drop(db);
+    drop(direct);
+    admin
+        .batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+        .await
+        .unwrap();
+}
+
+fn score_token(session: &Session, position: PositionId, score: i16) -> String {
+    session
+        .callbacks
+        .iter()
+        .find_map(|(token, record)| {
+            matches!(record.action, Action::RecommendationScore { position_id, score: value }
+            if position_id == position && value == score)
+            .then(|| token.clone())
+        })
+        .unwrap()
+}
+
+#[tokio::test]
+async fn markup_failure_keeps_durable_card_and_retries_edit() {
+    let (_dir, bundle) = bundle(2, false);
+    let repo = Arc::new(FakeRepo::default());
+    let ctx = context(bundle.clone(), repo.clone());
+    let api = FakeTelegram::new();
+    let sel = selection(&bundle, 1, 1);
+    let mut session = session(&sel);
+    api.fail_edit.store(true, Ordering::SeqCst);
+    assert!(
+        recommendations::begin(&api.bot(), &ctx, ACTOR, &mut session, &sel)
+            .await
+            .is_err()
+    );
+    let first = repo.rows.lock().unwrap()[0].clone();
+    assert_eq!(first.message_id, 101);
+    assert!(session
+        .callbacks
+        .values()
+        .all(|record| !matches!(record.action, Action::RecommendationScore { .. })));
+    recommendations::begin(&api.bot(), &ctx, ACTOR, &mut session, &sel)
+        .await
+        .unwrap();
+    let rows = repo.rows.lock().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0], first);
+    assert_eq!(rows[1].message_id, 103); // Retry notice is 102.
+    assert_eq!(
+        sent_texts(&api)
+            .iter()
+            .filter(|text| text.starts_with("Рекомендация 1/"))
+            .count(),
+        1
+    );
+    let edits: Vec<_> = api
+        .decoded()
+        .into_iter()
+        .filter(|(path, _)| path.ends_with("/EditMessageReplyMarkup"))
+        .collect();
+    assert_eq!(edits.len(), 3);
+    assert_eq!(edits[0].1["message_id"], "101");
+    assert_eq!(edits[1].1["message_id"], "101");
+    assert_ne!(edits[0].1["reply_markup"], edits[1].1["reply_markup"]);
+}
+
+#[tokio::test]
+async fn later_delivery_failure_preserves_earlier_controls_and_scores_wait_for_selection() {
+    let (_dir, bundle) = bundle(2, false);
+    let repo = Arc::new(FakeRepo::default());
+    let ctx = context(bundle.clone(), repo.clone());
+    let api = FakeTelegram::new();
+    let sel = selection(&bundle, 1, 1);
+    let mut session = session(&sel);
+    *repo.fail_send_after_record.lock().unwrap() = Some(api.fail_send.clone());
+    assert!(
+        recommendations::begin(&api.bot(), &ctx, ACTOR, &mut session, &sel)
+            .await
+            .is_err()
+    );
+    let row = repo.rows.lock().unwrap()[0].clone();
+    let first_token = score_token(&session, row.id, 5);
+    let edit_count = api
+        .decoded()
+        .iter()
+        .filter(|(path, _)| path.ends_with("/EditMessageReplyMarkup"))
+        .count();
+    session.state = State::ChoosingAnime {
+        intent: AnimeIntent::Recommend,
+        query: sel.query.clone(),
+        candidates: vec![sel.seed_mal_id],
+        selected_mal_id: Some(sel.seed_mal_id),
+    };
+    assert!(session.claim(&first_token, row.message_id).is_none());
+    session.state = State::Selected {
+        intent: AnimeIntent::Recommend,
+        selection: sel.clone(),
+    };
+    recommendations::begin(&api.bot(), &ctx, ACTOR, &mut session, &sel)
+        .await
+        .unwrap();
+    assert_eq!(score_token(&session, row.id, 5), first_token);
+    assert_eq!(
+        api.decoded()
+            .iter()
+            .filter(|(path, _)| path.ends_with("/EditMessageReplyMarkup"))
+            .count(),
+        edit_count + 1
+    );
+    assert!(session.claim(&first_token, row.message_id).is_some());
+}
+
+#[tokio::test]
+async fn all_scores_and_independent_positions_are_immutable() {
+    for score in 0..=5 {
+        let (_dir, bundle) = bundle(2, false);
+        let repo = Arc::new(FakeRepo::default());
+        let ctx = context(bundle.clone(), repo.clone());
+        let api = FakeTelegram::new();
+        let sel = selection(&bundle, 1, 1);
+        let mut session = session(&sel);
+        recommendations::begin(&api.bot(), &ctx, ACTOR, &mut session, &sel)
+            .await
+            .unwrap();
+        let rows = repo.rows.lock().unwrap().clone();
+        let token = score_token(&session, rows[0].id, score);
+        let other = score_token(&session, rows[1].id, 5);
+        let action_key = session.claim(&token, rows[0].message_id).unwrap().1;
+        recommendations::on_score(
+            &api.bot(),
+            &ctx,
+            ACTOR,
+            &mut session,
+            &sel,
+            recommendations::ScoreAction {
+                position: &rows[0],
+                score,
+                action_key: &action_key,
+            },
+        )
+        .await
+        .unwrap();
+        session.finish(&token, true);
+        assert_eq!(
+            *repo.scores.lock().unwrap(),
+            vec![(ACTOR.user_id, rows[0].id, score)]
+        );
+        assert!(session
+            .claim(
+                &score_token(&session, rows[0].id, score),
+                rows[0].message_id
+            )
+            .is_none());
+        assert!(session.claim(&other, rows[1].message_id).is_some());
+        let second_key = session.callbacks[&other].action_key.clone();
+        recommendations::on_score(
+            &api.bot(),
+            &ctx,
+            ACTOR,
+            &mut session,
+            &sel,
+            recommendations::ScoreAction {
+                position: &rows[1],
+                score: 5,
+                action_key: &second_key,
+            },
+        )
+        .await
+        .unwrap();
+        session.finish(&other, true);
+        assert_eq!(repo.scores.lock().unwrap().len(), 2);
+    }
+}
+
+#[tokio::test]
+async fn database_and_notice_failures_pin_first_score_for_same_button_retry() {
+    for failure in [1, 2, 3] {
+        let (_dir, bundle) = bundle(2, false);
+        let repo = Arc::new(FakeRepo::default());
+        let ctx = context(bundle.clone(), repo.clone());
+        let api = FakeTelegram::new();
+        let sel = selection(&bundle, 1, 1);
+        let mut session = session(&sel);
+        recommendations::begin(&api.bot(), &ctx, ACTOR, &mut session, &sel)
+            .await
+            .unwrap();
+        let rows = repo.rows.lock().unwrap().clone();
+        let token = score_token(&session, rows[0].id, 4);
+        let other = score_token(&session, rows[1].id, 3);
+        let key = session.claim(&token, rows[0].message_id).unwrap().1;
+        repo.score_failure.store(failure, Ordering::SeqCst);
+        let result = recommendations::on_score(
+            &api.bot(),
+            &ctx,
+            ACTOR,
+            &mut session,
+            &sel,
+            recommendations::ScoreAction {
+                position: &rows[0],
+                score: 4,
+                action_key: &key,
+            },
+        )
+        .await;
+        assert_eq!(result.is_err(), failure != 3);
+        session.finish(&token, result.is_ok());
+        assert!(session.callbacks.values().all(|record| {
+            !matches!(record.action, Action::RecommendationScore { position_id, score }
+                if position_id == rows[0].id && score != 4)
+        }));
+        assert!(session.callbacks.contains_key(&other));
+        if failure == 3 {
+            assert!(session.claim(&token, rows[0].message_id).is_none());
+        } else {
+            assert!(session.claim(&token, rows[0].message_id).is_some());
+            let result = recommendations::on_score(
+                &api.bot(),
+                &ctx,
+                ACTOR,
+                &mut session,
+                &sel,
+                recommendations::ScoreAction {
+                    position: &rows[0],
+                    score: 4,
+                    action_key: &key,
+                },
+            )
+            .await;
+            assert!(result.is_ok());
+            session.finish(&token, true);
+            assert_eq!(
+                *repo.scores.lock().unwrap(),
+                vec![(ACTOR.user_id, rows[0].id, 4)]
+            );
+        }
+    }
+    for terminal in [false, true] {
+        let (_dir, bundle) = bundle(2, false);
+        let repo = Arc::new(FakeRepo::default());
+        let ctx = context(bundle.clone(), repo.clone());
+        let api = FakeTelegram::new();
+        let sel = selection(&bundle, 1, 1);
+        let mut session = session(&sel);
+        recommendations::begin(&api.bot(), &ctx, ACTOR, &mut session, &sel)
+            .await
+            .unwrap();
+        let row = repo.rows.lock().unwrap()[0].clone();
+        let token = score_token(&session, row.id, 2);
+        let key = session.claim(&token, row.message_id).unwrap().1;
+        if terminal {
+            repo.score_failure.store(3, Ordering::SeqCst);
+        }
+        api.fail_send.store(true, Ordering::SeqCst);
+        assert!(recommendations::on_score(
+            &api.bot(),
+            &ctx,
+            ACTOR,
+            &mut session,
+            &sel,
+            recommendations::ScoreAction {
+                position: &row,
+                score: 2,
+                action_key: &key
+            }
+        )
+        .await
+        .is_err());
+        session.finish(&token, false);
+        assert!(session.claim(&token, row.message_id).is_some());
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires explicit ARB_TEST_DATABASE_URL"]
+async fn arb016_postgres_public_router_persists_scores_with_provenance() {
+    use std::str::FromStr;
+    use tokio_postgres::{Config, NoTls};
+    let url = std::env::var("ARB_TEST_DATABASE_URL").expect("set ARB_TEST_DATABASE_URL");
+    let mut config = Config::from_str(&url).unwrap();
+    let name = config.get_dbname().unwrap();
+    assert!(
+        name == "arb_016_test" || name == "arb_ci_test",
+        "unsafe ARB016 test database name"
+    );
+    let (admin, connection) = config.connect(NoTls).await.unwrap();
+    tokio::spawn(async move {
+        connection.await.unwrap();
+    });
+    let schema = format!("arb016_{}", std::process::id());
+    admin
+        .batch_execute(&format!("CREATE SCHEMA {schema}"))
+        .await
+        .unwrap();
+    config.options(format!("-c search_path={schema}"));
+    let (direct, connection) = config.connect(NoTls).await.unwrap();
+    tokio::spawn(async move {
+        connection.await.unwrap();
+    });
+    let db = Arc::new(Db::new(&config).await.unwrap());
+    db.migrate().await.unwrap();
+    let (_dir, bundle) = bundle(2, false);
+    let ctx = Arc::new(context(bundle.clone(), db.clone()));
+    let api = FakeTelegram::new();
+    let bot = api.bot();
+    dispatch(&bot, &ctx, message(1, 73, 42, "/recommend")).await;
+    dispatch(&bot, &ctx, message(2, 73, 42, "Общее название")).await;
+    let (select, candidate_message) = {
+        let session = ctx.sessions.get(ACTOR);
+        let guard = session.lock().await;
+        guard
+            .callbacks
+            .iter()
+            .find_map(|(token, record)| {
+                matches!(record.action, Action::Select { mal_id: 1, .. })
+                    .then_some((token.clone(), record.message_id.unwrap()))
+            })
+            .unwrap()
+    };
+    dispatch(
+        &bot,
+        &ctx,
+        callback(3, 73, 42, candidate_message, Some(&select)),
+    )
+    .await;
+    let (positions, scores) = {
+        let rows = db.list_delivered_positions(42, 1).await.unwrap();
+        let session = ctx.sessions.get(ACTOR);
+        let guard = session.lock().await;
+        let scores = rows
+            .iter()
+            .zip([0, 5])
+            .map(|(row, score)| {
+                (
+                    score_token(&guard, row.id, score),
+                    row.message_id,
+                    row.id,
+                    score,
+                )
+            })
+            .collect::<Vec<_>>();
+        (rows, scores)
+    };
+    assert_eq!(positions.len(), 2);
+    dispatch(
+        &bot,
+        &ctx,
+        callback(4, 73, 42, scores[0].1, Some(&scores[0].0)),
+    )
+    .await;
+    dispatch(
+        &bot,
+        &ctx,
+        callback(5, 73, 42, scores[1].1, Some(&scores[1].0)),
+    )
+    .await;
+    dispatch(
+        &bot,
+        &ctx,
+        callback(6, 73, 42, scores[0].1, Some(&scores[0].0)),
+    )
+    .await;
+    dispatch(
+        &bot,
+        &ctx,
+        callback(7, 74, 43, scores[0].1, Some(&scores[0].0)),
+    )
+    .await;
+    let rows = direct.query(
+        "SELECT d.rank,d.mal_id,d.chat_id,d.message_id,d.tg_id,r.raw_query,r.seed_mal_id,r.bundle_id,s.score,d.delivered_at,s.created_at FROM arb_recommendation_ratings s JOIN arb_delivered_positions d ON d.id=s.position_id JOIN arb_requests r ON r.id=d.request_id ORDER BY d.rank",
+        &[]).await.unwrap();
+    assert_eq!(rows.len(), 2);
+    for (index, row) in rows.iter().enumerate() {
+        assert_eq!(row.get::<_, i16>(0), (index + 1) as i16);
+        assert_eq!(row.get::<_, i32>(1), [10, 11][index]);
+        assert_eq!(row.get::<_, i64>(2), 73);
+        assert_eq!(row.get::<_, i32>(3), positions[index].message_id);
+        assert_eq!(row.get::<_, i64>(4), 42);
+        assert_eq!(row.get::<_, String>(5), "Общее название");
+        assert_eq!(row.get::<_, Option<i32>>(6), Some(1));
+        assert_eq!(
+            row.get::<_, Option<String>>(7).as_deref(),
+            Some(bundle.identity())
+        );
+        assert_eq!(row.get::<_, i16>(8), [0, 5][index]);
+        assert!(row.get::<_, std::time::SystemTime>(9) <= std::time::SystemTime::now());
+        assert!(row.get::<_, std::time::SystemTime>(10) <= std::time::SystemTime::now());
+    }
+    assert_eq!(
+        db.rate_recommendation(42, scores[0].2, 0).await.unwrap(),
+        WriteOutcome::AlreadyRecorded(())
+    );
+    assert_eq!(
+        db.rate_recommendation(42, scores[0].2, 5).await,
+        Err(DbError::Conflict)
+    );
+    let restarted = Arc::new(context(bundle, db.clone()));
+    dispatch(
+        &bot,
+        &restarted,
+        callback(8, 73, 42, scores[0].1, Some(&scores[0].0)),
+    )
+    .await;
+    assert_eq!(
+        direct
+            .query_one("SELECT count(*) FROM arb_recommendation_ratings", &[])
+            .await
+            .unwrap()
+            .get::<_, i64>(0),
+        2
+    );
+    drop(restarted);
     drop(ctx);
     drop(db);
     drop(direct);
