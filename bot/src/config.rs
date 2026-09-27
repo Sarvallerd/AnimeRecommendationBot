@@ -5,7 +5,10 @@ use std::{
 };
 
 use log::LevelFilter;
-use tokio_postgres::{config::SslMode, Config as PgConfig};
+use tokio_postgres::{
+    config::{Host, SslMode},
+    Config as PgConfig,
+};
 
 pub(crate) struct Config {
     token: String,
@@ -137,9 +140,15 @@ fn parse_database(url: &str) -> Result<PgConfig, ConfigError> {
     }
     let database = PgConfig::from_str(url)
         .map_err(|_| ConfigError::new("DATABASE_URL", "invalid PostgreSQL URI"))?;
+    let has_empty_host = database.get_hosts().iter().any(|host| match host {
+        Host::Tcp(name) => name.is_empty(),
+        #[cfg(unix)]
+        Host::Unix(path) => path.as_os_str().is_empty(),
+    });
     if database.get_user().is_none_or(str::is_empty)
         || database.get_dbname().is_none_or(str::is_empty)
         || (database.get_hosts().is_empty() && database.get_hostaddrs().is_empty())
+        || has_empty_host
     {
         return Err(ConfigError::new(
             "DATABASE_URL",
@@ -343,6 +352,21 @@ mod tests {
                 "DATABASE_URL",
                 "{url}"
             );
+        }
+    }
+
+    #[test]
+    fn rejects_empty_parsed_database_hosts() {
+        let dir = TestDir::new();
+        let mut input = values(&dir);
+        for url in [
+            "postgresql://user@/anime?host=",
+            "postgresql://user@localhost/anime?host=",
+        ] {
+            input.insert("DATABASE_URL", url.to_owned());
+            let err = load(&input).err().unwrap();
+            assert_eq!(err.variable, "DATABASE_URL", "{url}");
+            assert_eq!(err.reason, "user, database, and host are required", "{url}");
         }
     }
 
