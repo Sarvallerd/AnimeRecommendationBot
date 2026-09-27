@@ -26,3 +26,7 @@ target
 !.codex/agents/architect.toml
 !.codex/agents/implementer.toml
 !.codex/agents/reviewer.toml
+
+.arb/
+deploy/.env.bot
+deploy/.env.postgres

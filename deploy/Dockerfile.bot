@@ -1,0 +1,14 @@
+FROM rust:1.95.0-slim-bookworm@sha256:d7482085ff5b415f84dba5647ae71606650bdef00db7aeb69f4b3d170c3e4082 AS build
+RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY bot/Cargo.toml bot/Cargo.lock bot/
+COPY bot/src/ bot/src/
+COPY bot/migrations/ bot/migrations/
+RUN cargo build --release --locked --manifest-path bot/Cargo.toml --bins
+
+FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libssl3 && rm -rf /var/lib/apt/lists/* && groupadd -g 10001 bot && useradd -u 10001 -g 10001 -M -s /usr/sbin/nologin bot
+COPY --from=build /src/bot/target/release/bot /usr/local/bin/bot
+COPY --from=build /src/bot/target/release/check_bundle /usr/local/bin/check_bundle
+USER 10001:10001
+ENTRYPOINT ["/usr/local/bin/bot"]
