@@ -1,6 +1,6 @@
 # Anime recommendation preparation
 
-This Python package prepares recommendation inputs offline for the Rust bot. It can acquire the pinned MAL 2020 CSV files and GloVe 6B 300-dimensional vectors. Normalization, artifact building, validation, and evaluation will be added in later tasks.
+This Python package prepares recommendation inputs offline for the Rust bot. It can acquire the pinned MAL 2020 CSV files and GloVe 6B 300-dimensional vectors. Normalization of the MAL CSV files is included. Artifact building, validation, and evaluation will be added in later tasks.
 
 Requires Python 3.12. From this directory, install the locked environment with:
 
@@ -28,3 +28,14 @@ The first command downloads about 875 MB and extracts a 1.04 GB text file, so al
 The MAL files are pinned to [repository commit `9a1d7f5`](https://github.com/Hernan4444/MyAnimeList-Database/tree/9a1d7f56482accbde99e24cd7cfcad65e2d24b1f). The [author's Kaggle listing](https://www.kaggle.com/datasets/hernan4444/anime-recommendation-database-2020) reports CC0: Public Domain and dataset version 7; the repository commit is a separate version pin. The [GloVe project](https://nlp.stanford.edu/projects/glove/) lists PDDL 1.0 for its pretrained vectors and Apache 2.0 for its code. The ZIP URL redirects to Stanford's downloads host. Exact URLs, sizes, hashes, and provenance are in the packaged source registry.
 
 The MAL source uses the column name `sypnopsis` in `anime_with_synopsis.csv`. Its author excluded Hentai genres from that synopsis file. These source facts matter for later normalization and joins by `MAL_ID`.
+
+Normalize the verified CSV files with:
+
+```sh
+uv run --locked --no-editable recsys normalize \
+  --anime-csv data/raw/anime.csv \
+  --synopsis-csv data/raw/anime_with_synopsis.csv \
+  --output-dir data/normalized
+```
+
+This command verifies both files against the packaged size and SHA-256 pins. It writes canonical UTF-8 `catalog.json`, `durations.json`, and `normalization-report.json`. The catalog uses the v1 contract in `contracts/`; durations contain seconds and a `per_episode` or `unspecified` scope for every retained ID. The report lists source provenance, output hashes, counts, row exclusions, field exceptions, unmatched IDs, and duplicate title groups. It contains no timestamp or machine-specific path. No GloVe data is read during normalization.
