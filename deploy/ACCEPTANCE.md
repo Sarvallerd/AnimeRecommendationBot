@@ -20,7 +20,7 @@ wsl.exe --user root --exec env DOCKER_CONFIG="$ROOT/.tools/docker/config" bash \
   --evidence-dir "$EVIDENCE/preparation-001" --offline
 ```
 
-The harness requires a fresh evidence directory and clean Git checkout. It builds actual images; verifies pinned inputs, normalization and both block sizes; exports A and B; checks Python/Rust bundle identity, 17,562 records, the 17,561 full neighbor lists and MAL 40089's empty list; then runs real `prepare` against A→B→A and compares all PostgreSQL rows and migration timestamps. It leaves bundle A selected, PostgreSQL healthy, `prepare` exited zero and no polling bot. The private `build-report.json`, report copies, logs and snapshots stay in the evidence directory. On failure, stop and inspect the private files; the harness retains data and the volume.
+The harness requires a fresh evidence directory and clean Git checkout. It pins the starting commit and checks for a changed HEAD or dirty worktree after each build phase and immediately before PASS. If source changes during a run, discard that preparation evidence and start again in a new directory. It builds actual images; verifies pinned inputs, normalization and both block sizes; exports A and B; checks Python/Rust bundle identity, 17,562 records, the 17,561 full neighbor lists and MAL 40089's empty list; then runs real `prepare` against A→B→A and compares all PostgreSQL rows and migration timestamps. It leaves bundle A selected, PostgreSQL healthy, `prepare` exited zero and no polling bot. The private `build-report.json`, report copies, logs and snapshots stay in the evidence directory. On failure, stop and inspect the private files; the harness retains data and the volume.
 
 ## 2. Bind one real private-chat actor
 
@@ -94,7 +94,7 @@ compose up -d --wait postgres
 # Capture full db-outage-after.json BEFORE pressing retry.
 ```
 
-For update/rollback, stop the bot, atomically change only `ARB_BUNDLE_DIR` in `SETTINGS`, run `compose up -d --no-deps --force-recreate prepare`, require its exit code zero and current loaded identity, then `compose up -d --no-deps --force-recreate bot`. Inspect current-start identity, UID, read-only mount and the same database volume before the new request. The verifier checks the selected identity again. Do not edit a published bundle in place.
+For update/rollback, take the full `before` snapshot while the previous A or B bot is still running. Then stop the bot, atomically change only `ARB_BUNDLE_DIR` in `SETTINGS`, run `compose up -d --no-deps --force-recreate prepare`, require its exit code zero and current loaded identity, then `compose up -d --no-deps --force-recreate bot`. Inspect current-start identity, UID, read-only mount and the same database volume before the new request. Take the full `after` snapshot only after the new bot starts and the new request is completed. The verifier requires a new bot container, a fresh successful `prepare` for the selected bundle, and the same PostgreSQL volume. Do not edit a published bundle in place.
 
 ## 4. UI observations and final status
 

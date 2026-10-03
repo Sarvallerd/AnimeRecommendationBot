@@ -321,10 +321,15 @@ def context_from_anchor(before: dict, after: dict, report: dict,
             "ANCHOR_ACTION")
     chat = int(request["action_key"].split(":")[1])
     require(chat == request["tg_id"], "ANCHOR_CHAT")
+    selected_bundle = load_bundle(Path(a["path"]))
+    require(selected_bundle["id"] == a["identity"], "ANCHOR_BUNDLE")
     positions = [r for r in after["database"]["delivered"] if r["request_id"] == request["id"]]
-    require(len(positions) == 5 and [r["rank"] for r in sorted(positions, key=lambda r: r["rank"])]
-            == [1, 2, 3, 4, 5] and all(r["tg_id"] == chat and r["chat_id"] == chat
-                                            and integer(r["message_id"], 1) for r in positions), "ANCHOR_DELIVERIES")
+    ordered = sorted(positions, key=lambda row: row["rank"])
+    expected_ids = [row["mal_id"] for row in selected_bundle["neighbors"]["1"]]
+    require(len(ordered) == 5 and [r["rank"] for r in ordered] == [1, 2, 3, 4, 5]
+            and [r["mal_id"] for r in ordered] == expected_ids
+            and all(r["tg_id"] == chat and r["chat_id"] == chat
+                    and integer(r["message_id"], 1) for r in ordered), "ANCHOR_DELIVERIES")
     require(not any(r["position_id"] in {p["id"] for p in positions}
                     for r in after["database"]["recommendation_ratings"]), "ANCHOR_SCORED")
     return {"schema_version": 1, "project": after["deployment"]["project"],
@@ -338,6 +343,17 @@ def context_from_anchor(before: dict, after: dict, report: dict,
 def new_rows(before: dict, after: dict, table: str) -> list[dict]:
     old = index_rows(before[table], KEYS[table])
     return [row for row in after[table] if tuple(row[key] for key in KEYS[table]) not in old]
+
+
+def require_bot_bundle(snapshot: dict, selected: dict) -> dict:
+    bot = snapshot["runtime"]["bot"]
+    require(bot is not None and bot["running"] and bot["bundle_id"] == selected["identity"]
+            and bot["bundle_count"] == 17562 and bot["user"] == "10001:10001"
+            and bot["read_only_root"] and bot["artifact_mount"] is not None
+            and not bot["artifact_mount"]["rw"]
+            and Path(bot["artifact_mount"]["source"]).resolve() == Path(selected["path"]).resolve(),
+            "RUNTIME_BUNDLE")
+    return bot
 
 
 def verify_transition(case: str, context: dict, before: dict, after: dict, bundle: dict,
@@ -482,14 +498,27 @@ def verify_transition(case: str, context: dict, before: dict, after: dict, bundl
                 and during["runtime"]["bot"]["id"] == before["runtime"]["bot"]["id"]
                 and during["runtime"]["bot"]["started_at"] == before["runtime"]["bot"]["started_at"],
                 "OUTAGE_NOT_OBSERVED")
-    bot = after["runtime"]["bot"]
-    require(bot is not None and bot["running"] and bot["bundle_id"] == expected
-            and bot["bundle_count"] == 17562 and bot["user"] == "10001:10001"
-            and bot["read_only_root"] and bot["artifact_mount"] is not None
-            and not bot["artifact_mount"]["rw"] and
-            Path(bot["artifact_mount"]["source"]).resolve() == Path(
-                context["bundles"]["B" if case == "update" else "A"]["path"]).resolve(),
-            "RUNTIME_BUNDLE")
+    selected = context["bundles"]["B" if case == "update" else "A"]
+    bot = require_bot_bundle(after, selected)
+    if case in ("update", "rollback"):
+        previous = context["bundles"]["A" if case == "update" else "B"]
+        old_bot = require_bot_bundle(before, previous)
+        require(old_bot["id"] != bot["id"] and utc(old_bot["started_at"]) < utc(bot["started_at"]),
+                "BOT_NOT_RECREATED")
+        prepare = after["runtime"]["prepare"]
+        previous_prepare = before["runtime"]["prepare"]
+        require(prepare is not None and prepare["id"] != bot["id"]
+                and (previous_prepare is None or prepare["id"] != previous_prepare["id"])
+                and prepare["status"] == "exited"
+                and not prepare["running"] and prepare["exit_code"] == 0
+                and prepare["bundle_id"] == selected["identity"]
+                and prepare["bundle_count"] == 17562 and prepare["user"] == "10001:10001"
+                and prepare["read_only_root"] and prepare["artifact_mount"] is not None
+                and not prepare["artifact_mount"]["rw"]
+                and Path(prepare["artifact_mount"]["source"]).resolve() == Path(selected["path"]).resolve()
+                and prepare["image_id"] == bot["image_id"]
+                and utc(old_bot["started_at"]) < utc(prepare["started_at"]) <= utc(bot["started_at"])
+                and after["runtime"]["postgres"]["running"], "PREPARE_GATE")
     return {"schema_version": 1, "case": case, "phase": phase, "status": "PASS",
             "reason": "OK", "counts": changed, "bundle_id": bundle["id"]}
 

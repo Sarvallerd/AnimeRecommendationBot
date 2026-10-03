@@ -7,6 +7,8 @@ import json
 import os
 import pathlib
 import stat
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -103,8 +105,20 @@ class EvidenceTests(unittest.TestCase):
                   'source_commit': 'f' * 40, 'compose_sha256': 'c' * 64,
                   'settings_sha256': 'd' * 64, 'database_volume': 'arb020-test_postgres_data'}
         empty = shot({**database(), 'requests': [], 'delivered': []}, minute=0)
-        bound = e.context_from_anchor(empty, shot(minute=1), report, 'a' * 64, 'b' * 64, 'c' * 64)
+        with mock.patch.object(e, 'load_bundle', return_value=bundle()):
+            bound = e.context_from_anchor(empty, shot(minute=1), report, 'a' * 64, 'b' * 64, 'c' * 64)
         self.assertEqual(bound['actor']['anchor_request_id'], 1)
+        wrong = shot(minute=1)
+        wrong['database']['delivered'][0]['mal_id'] = 999
+        with mock.patch.object(e, 'load_bundle', return_value=bundle()):
+            self.assert_rejected('ANCHOR_DELIVERIES',
+                                 lambda: e.context_from_anchor(empty, wrong, report,
+                                                               'a' * 64, 'b' * 64, 'c' * 64))
+        wrong['database']['delivered'][0]['mal_id'] = TARGETS[1]
+        with mock.patch.object(e, 'load_bundle', return_value=bundle()):
+            self.assert_rejected('ANCHOR_DELIVERIES',
+                                 lambda: e.context_from_anchor(empty, wrong, report,
+                                                               'a' * 64, 'b' * 64, 'c' * 64))
         after['database']['requests'][-1]['tg_id'] = 43
         self.assert_rejected('INVALID_REQUEST', lambda: check('recommendations', before, after))
 
@@ -215,20 +229,56 @@ class EvidenceTests(unittest.TestCase):
         after['kind'] = 'runtime_only'
         self.assert_rejected('FULL_SNAPSHOT_REQUIRED', lambda: check('db-outage', before, after, during=during))
 
+    def switched(self, after, identity, suffix, minute):
+        after['runtime']['bot']['id'] = f'container-{suffix}'
+        after['runtime']['bot']['started_at'] = (dt.datetime.fromisoformat(TIME) +
+                                                dt.timedelta(minutes=minute)).isoformat()
+        prepare = copy.deepcopy(after['runtime']['bot'])
+        prepare.update(id=f'prepare-{suffix}', service='prepare', status='exited', running=False,
+                       exit_code=0, started_at=(dt.datetime.fromisoformat(TIME) +
+                                                dt.timedelta(minutes=minute, seconds=-10)).isoformat())
+        after['runtime']['prepare'] = prepare
+        return after
+
     def test_update_rollback_need_new_bundle_requests(self):
         before = shot(minute=0)
-        after = shot(minute=1, identity=B)
+        after = self.switched(shot(minute=1, identity=B), B, 2, 1)
         after['database']['requests'].append(request(2, bundle=B))
         after['database']['delivered'].extend(delivery(5 + rank, 2, rank, target)
                                                for rank, target in enumerate(TARGETS, 1))
         self.assertEqual(check('update', before, after, identity=B)['status'], 'PASS')
-        old_only = shot(minute=1, identity=B)
+        old_only = self.switched(shot(minute=1, identity=B), B, 2, 1)
         self.assert_rejected('EXPECTED_REQUEST_MISSING', lambda: check('update', before, old_only, identity=B))
-        rollback = shot(copy.deepcopy(after['database']), minute=2)
+        rollback = self.switched(shot(copy.deepcopy(after['database']), minute=2), A, 3, 2)
         rollback['database']['requests'].append(request(3, bundle=A))
         rollback['database']['delivered'].extend(delivery(10 + rank, 3, rank, target)
                                                   for rank, target in enumerate(TARGETS, 1))
         self.assertEqual(check('rollback', after, rollback)['status'], 'PASS')
+        for case, left, right, expected_identity in (('update', before, after, B),
+                                                     ('rollback', after, rollback, A)):
+            same_target = copy.deepcopy(left)
+            same_target['runtime']['bot']['bundle_id'] = expected_identity
+            same_target['runtime']['bot']['artifact_mount']['source'] = (
+                '/tmp/arb020-B' if expected_identity == B else '/tmp/arb020-A')
+            self.assert_rejected('RUNTIME_BUNDLE', lambda: check(case, same_target, right,
+                                                                  identity=expected_identity))
+            no_recreate = copy.deepcopy(right)
+            no_recreate['runtime']['bot']['id'] = left['runtime']['bot']['id']
+            self.assert_rejected('BOT_NOT_RECREATED', lambda: check(case, left, no_recreate,
+                                                                     identity=expected_identity))
+            failed_prepare = copy.deepcopy(right)
+            failed_prepare['runtime']['prepare']['exit_code'] = 1
+            self.assert_rejected('PREPARE_GATE', lambda: check(case, left, failed_prepare,
+                                                                 identity=expected_identity))
+            stale_prepare = copy.deepcopy(right)
+            stale_prepare['runtime']['prepare']['started_at'] = left['runtime']['bot']['started_at']
+            self.assert_rejected('PREPARE_GATE', lambda: check(case, left, stale_prepare,
+                                                                 identity=expected_identity))
+            wrong_prepare = copy.deepcopy(right)
+            wrong_prepare['runtime']['prepare']['bundle_id'] = (
+                A if expected_identity == B else B)
+            self.assert_rejected('PREPARE_GATE', lambda: check(case, left, wrong_prepare,
+                                                                 identity=expected_identity))
 
     def test_missing_events_ranges_and_early_outage_save(self):
         before = shot(minute=0)
@@ -280,6 +330,89 @@ class EvidenceTests(unittest.TestCase):
                                            'observation': ''} for name in e.UI_IDS]}
             self.assert_rejected('DUPLICATE_RESULT',
                                  lambda: e.summarize(context(), results, observations))
+
+    def harness_python(self, index):
+        lines = SCRIPT.with_name('full-catalog-acceptance.sh').read_text().splitlines()
+        starts = [number for number, line in enumerate(lines) if "<<'PY'" in line]
+        end = next(number for number in range(starts[index] + 1, len(lines)) if lines[number] == 'PY')
+        return '\n'.join(lines[starts[index] + 1:end])
+
+    def test_optimized_python_still_rejects_provenance_and_runtime_mismatches(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            data = root/'data'; raw = data/'raw'; raw.mkdir(parents=True)
+            (raw/'source-manifest.json').write_text(json.dumps({'registry_sha256': 'wrong'}))
+            def optimized(index, *args):
+                return subprocess.run([sys.executable, '-O', '-', *(str(item) for item in args)],
+                                      cwd=SCRIPT.parents[2], input=self.harness_python(index),
+                                      text=True, capture_output=True)
+            invalid_source = optimized(1, data, root/'bundle-a', root/'bundle-b', root/'evidence')
+            self.assertNotEqual(invalid_source.returncode, 0)
+            self.assertIn('ARTIFACT_PROVENANCE', invalid_source.stderr)
+            settings = root/'compose.env'; settings.write_text('ARB_BUNDLE_DIR=/old\n')
+            unsafe_select = optimized(2, settings, root/'missing-bundle')
+            self.assertNotEqual(unsafe_select.returncode, 0)
+            self.assertIn('BUNDLE_SELECTION', unsafe_select.stderr)
+            folder = root/'evidence'; (folder/'snapshots').mkdir(parents=True)
+            def snap(commit='f'*40, volume='volume', database=None):
+                return {'source_commit': commit, 'database': {'migrations': [{'version': 1}],
+                        'users': [] if database is None else database},
+                        'runtime': {'postgres': {'database_volume': volume, 'running': True},
+                                    'bot': None, 'prepare': None}}
+            def write_shots(items):
+                for name, item in zip(('prepare-1-A.json','prepare-2-B.json','prepare-3-A.json'), items):
+                    (folder/'snapshots'/name).write_text(json.dumps(item))
+            args=(folder,data,'arb020-test',root/'bundle-a',root/'bundle-b',settings,
+                  SCRIPT.parents[2],'f'*40)
+            write_shots((snap(), snap(commit='e'*40), snap()))
+            wrong_commit = optimized(3, *args)
+            self.assertNotEqual(wrong_commit.returncode, 0)
+            self.assertIn('PREPARE_INVARIANTS', wrong_commit.stderr)
+            write_shots((snap(), snap(database=[{'tg_id': 9}]), snap()))
+            wrong_database = optimized(3, *args)
+            self.assertNotEqual(wrong_database.returncode, 0)
+            self.assertIn('PREPARE_INVARIANTS', wrong_database.stderr)
+            write_shots((snap(), snap(volume='other-volume'), snap()))
+            wrong_volume = optimized(3, *args)
+            self.assertNotEqual(wrong_volume.returncode, 0)
+            self.assertIn('PREPARE_INVARIANTS', wrong_volume.stderr)
+            bad_prepare = snap()
+            bad_prepare['runtime']['prepare'] = {'status': 'exited', 'exit_code': 1}
+            write_shots((bad_prepare, bad_prepare, bad_prepare))
+            failed_gate = optimized(3, *args)
+            self.assertNotEqual(failed_gate.returncode, 0)
+            self.assertIn('PREPARE_INVARIANTS', failed_gate.stderr)
+
+    def test_harness_source_state_rejects_dirty_and_changed_head(self):
+        lines = SCRIPT.with_name('full-catalog-acceptance.sh').read_text().splitlines()
+        start = lines.index('source_state() {')
+        end = next(number for number in range(start + 1, len(lines)) if lines[number] == '}')
+        function = '\n'.join(lines[start:end + 1])
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = pathlib.Path(temporary)
+            def git(*args):
+                return subprocess.run(['git', *args], cwd=repo, capture_output=True,
+                                      text=True, check=True).stdout.strip()
+            git('init', '-q')
+            git('config', 'user.name', 'Test')
+            git('config', 'user.email', 'test@example.invalid')
+            source = repo/'source.txt'; source.write_text('original')
+            git('add', 'source.txt'); git('commit', '-qm', 'baseline')
+            baseline = git('rev-parse', 'HEAD')
+            script = 'set -euo pipefail\nrepo=$1\nstarting_head=$2\nfail() { exit 1; }\n' + function + '\nsource_state\n'
+            def run():
+                return subprocess.run(['bash', '-c', script, '--', str(repo), baseline],
+                                      cwd=repo, capture_output=True, text=True).returncode
+            self.assertEqual(run(), 0)
+            source.write_text('dirty')
+            self.assertNotEqual(run(), 0)
+            git('restore', 'source.txt')
+            extra = repo/'new.txt'; extra.write_text('untracked')
+            self.assertNotEqual(run(), 0)
+            extra.unlink()
+            source.write_text('changed')
+            git('add', 'source.txt'); git('commit', '-qm', 'changed')
+            self.assertNotEqual(run(), 0)
 
     def test_embedded_harness_python_compiles(self):
         lines = SCRIPT.with_name('full-catalog-acceptance.sh').read_text().splitlines()
