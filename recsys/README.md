@@ -1,6 +1,6 @@
 # Anime recommendation preparation
 
-This Python package prepares recommendation inputs offline for the Rust bot. It can acquire the pinned MAL 2020 CSV files and GloVe 6B 300-dimensional vectors. Normalization of the MAL CSV files, pinned GloVe cosine neighbor building, and a diagnostic genre baseline are included. Immutable bundle export is available; assessed evaluation will be added in a later task.
+This Python package prepares recommendation inputs offline for the Rust bot. It can acquire the pinned MAL 2020 CSV files and GloVe 6B 300-dimensional vectors. Normalization of the MAL CSV files, pinned GloVe cosine neighbor building, and a diagnostic genre baseline are included. Immutable bundle export and the fixed 20-query quality comparison are complete. The [ARB-018 report](reports/arb018-v1/README.md) documents methods, ratings, timings, and limits.
 
 Requires Python 3.12, Rust 1.95.0, a C compiler, pkg-config, and OpenSSL development headers. From the repository root, install the locked environment with:
 
@@ -13,7 +13,7 @@ uv run --locked --no-editable recsys --version
 Run the package checks with:
 
 ```sh
-uv run --locked --no-editable python -m unittest discover -s recsys/tests -v
+uv run --locked --no-editable --extra quality python -m unittest discover -s recsys/tests -p 'test_*.py' -v
 ```
 
 Acquire the inputs into `data/raw` relative to the current directory:
@@ -48,7 +48,7 @@ uv run --locked --no-editable recsys quality baseline \
   --output-dir data/quality
 ```
 
-It writes a deterministic genre baseline and an unjudged relevance template. See [the quality protocol](QUALITY.md) for the query set, ranking rule, assessment rubric, and planned comparison.
+It writes a deterministic genre baseline and an unjudged relevance template. See [the quality protocol](QUALITY.md) for the query set and rubric, and the [completed comparison](reports/arb018-v1/README.md) for assessor coverage, unknown grades, and measured scope. Install the `quality` extra for comparison tools; the base locked environment is enough to obtain, normalize, build, export, and validate.
 
 Build pinned GloVe cosine neighbors after normalization with `recsys build`; see [the build guide](BUILD.md) for the command, validation, algorithm, report, and output contract.
 

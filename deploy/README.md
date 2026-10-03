@@ -1,33 +1,63 @@
 # Docker Compose deployment
 
-Requires Docker Engine and Compose 2.30.0 or newer. The bot uses long polling, so run one active project and one bot process per Telegram token.
+Docker Engine and Compose 2.30.0 or newer are required. One project may poll a Telegram token at a time. The Rust image uses UID `10001:10001`, a read-only root filesystem and a read-only immutable bundle mount. PostgreSQL has a named volume and no published host port. The offline builder runs with the operator UID/GID configured in the settings file.
 
-Copy `bot.env.example` to `deploy/.env.bot` and `postgres.env.example` to `deploy/.env.postgres`. These files are ignored by Git. Set a real token and a PostgreSQL URL with user `anime_bot`, host `postgres`, port `5432`, and database `anime_bot`. Generate a password, for example with `openssl rand -hex 32`, and put the literal value in `POSTGRES_PASSWORD`. Percent encode reserved characters in the URL password (`$` becomes `%24`, `@` becomes `%40`, `/` becomes `%2F`). Raw Compose env files retain quotes and dollar signs literally; do not add shell quotes around values. The migration service uses the syntactically valid placeholder token `0:prepare`; it never contacts Telegram.
+Use an ignored deployment directory outside a task worktree, for example `.arb/my-bot/`, with `compose.env`, `secrets/bot.env`, `secrets/postgres.env`, `data/` and `evidence/`. Restrict secrets and evidence directories to mode `0700` and their files to `0600`; the published bundle directory/files need `0755`/`0644` for the runtime UID. Keep `.env` intact. Copy the examples in this directory and fill these literal raw values:
 
-Copy `compose.env.example` to a local deployment settings file if you need different paths. Every command below passes the settings file explicitly. Set `ARB_UID` and `ARB_GID` to the host operator's `id -u` and `id -g`, and create `.arb/data` owned by that user. Set `ARB_DATA_DIR` to its host path. Only that directory is writable by the offline builder. The Python image contains the locked root package and its installed commands, but no Rust compiler or full dataset. The bot runtime image remains Rust-only.
-
-```sh
-mkdir -p .arb/data
-id -u
-id -g
-docker compose --env-file deploy/compose.env.example -p animebot --profile tools build builder bot
-docker compose --env-file deploy/compose.env.example -p animebot --profile tools run --rm builder obtain --data-dir /data/raw
+```text
+bot.env:       TELOXIDE_TOKEN=<BotFather API token>
+               DATABASE_URL=postgresql://anime_bot:<URL-encoded-password>@postgres:5432/anime_bot?sslmode=disable
+postgres.env:  POSTGRES_PASSWORD=<literal password>
+compose.env:   ARB_DATA_DIR=/absolute/path/to/data
+               ARB_BUNDLE_DIR=/absolute/path/to/data/bundles/sha256-...
+               ARB_BOT_ENV=/absolute/path/to/secrets/bot.env
+               ARB_POSTGRES_ENV=/absolute/path/to/secrets/postgres.env
+               ARB_UID=<operator id -u>
+               ARB_GID=<operator id -g>
+               ARB_LOG=info
 ```
 
-The obtain command downloads pinned MAL CSV files and GloVe into the persistent data directory. Once present, bundle preparation verifies cached sources offline, normalizes, builds, exports, and validates in the same builder image:
+Raw Compose env files preserve dollar signs and quotes literally. Do not add shell quoting around their values. Percent encode reserved URL characters in the database password (`$` → `%24`, `@` → `%40`, `/` → `%2F`). The bot accepts `NoTls`; use `sslmode=disable` for this Compose network. The builder never receives the token or database credentials. Its build stage uses the root uv/maturin package and a Rust toolchain to compile the installed commands. The final Python builder image contains those commands, without a Rust compiler or the full dataset; the polling bot image is Rust-only. For normal operation, use the [root setup guide](../README.md); `prepare-artifacts` verifies cached sources, normalizes, builds, exports, validates, and publishes one bundle. `bot --prepare` checks the selected full bundle and applies migration 1 without contacting Telegram. `bot --check-config` checks only configuration and the artifact directory. Normal bot startup repeats the bundle/database checks before polling.
 
-```sh
-docker compose --env-file deploy/compose.env.example -p animebot --profile tools run --rm --entrypoint /usr/local/bin/prepare-artifacts builder
+Pass the settings file on **every** Compose command. From the checkout root, set `PROJECT`, `SETTINGS`, and `COMPOSE_FILE` to the chosen stable paths and use:
+
+```bash
+compose() { docker compose --env-file "$SETTINGS" -p "$PROJECT" -f "$COMPOSE_FILE" "$@"; }
+compose --profile tools build builder bot
+compose --profile tools run --rm builder obtain --data-dir /data/raw
+compose --profile tools run --rm --no-deps --entrypoint /usr/local/bin/prepare-artifacts builder
+# Copy the validated printed basename into ARB_BUNDLE_DIR in SETTINGS.
+compose up -d bot
+compose ps
 ```
 
-The last line gives the bundle basename. The wrapper opens traversal on that validated bundle directory and read access on its three JSON files so the separate nonroot runtime user can load it. It does not change cache or secret permissions. Set `ARB_BUNDLE_DIR` to the resulting host path, such as `./.arb/data/bundles/sha256-...`, in your deployment settings. The bind mount refuses a missing path. Start the stack:
+The `prepare` one-shot service waits for healthy PostgreSQL, loads the selected bundle with placeholder token `0:prepare`, and applies migrations. The bot starts only after `prepare` exits zero. PostgreSQL keeps all request, delivery, rating, feedback, and legacy history in its named volume. `compose down` keeps this volume; **do not use `down -v`** on a real project. A normal bot restart is `compose restart bot`; this clears in-memory dialogue/buttons and preserves committed rows.
 
-```sh
-docker compose --env-file deploy/compose.env.example -p animebot up -d bot
+## Immutable bundle update and rollback
+
+Build a new bundle alongside the old one. Stop the bot first. Change only `ARB_BUNDLE_DIR` in the settings file using an atomic same-directory replacement that preserves its owner and mode. Recreate `prepare`, require exit code zero and the expected loaded `sha256:` identity, then recreate the bot and confirm the same identity in its current startup logs. Keep the previous bundle directory for rollback.
+
+```bash
+compose stop bot
+# Atomically select the new ARB_BUNDLE_DIR in SETTINGS.
+compose up -d --no-deps --force-recreate prepare
+compose ps -a prepare
+compose logs --since 5m prepare
+compose up -d --no-deps --force-recreate bot
+compose ps bot
+compose logs --since 5m bot
 ```
 
-Compose waits for healthy PostgreSQL, then the one-shot `bot --prepare` command loads the full bundle and applies the database migration. Only after it succeeds does the polling bot start. Normal bot startup also applies migrations, so direct restarts remain safe. `bot --check-config` still checks only configuration and the artifact directory; it does not inspect bundle contents or contact PostgreSQL. `bot --prepare` checks token syntax, loads the full bundle, and applies migrations without Telegram access. Both services mount the selected bundle read-only; the runtime uses a nonroot UID and a read-only root filesystem. PostgreSQL uses its own named volume and has no published host port.
+Rollback repeats the same sequence with the old immutable path. Historical requests retain their original bundle identities. The full-data acceptance harness in [`tests/full-catalog-acceptance.sh`](tests/full-catalog-acceptance.sh) performs and checks an A→B→A prepare cycle, leaving PostgreSQL running and the bot stopped; the [live runbook](ACCEPTANCE.md) continues with genuine Telegram actions.
 
-For a bundle update, retain the old immutable directory, point `ARB_BUNDLE_DIR` to the new published directory, and recreate `prepare` and `bot`. To roll back, point it to the old directory and recreate those services. Never replace files in a mounted published bundle. `docker compose --env-file deploy/compose.env.example -p animebot down` preserves PostgreSQL data. `down -v` deletes it and is appropriate only for disposable test projects.
+If Docker is installed in WSL and only root can access its socket, use the authorized per-command form without changing host socket or group membership:
 
-The synthetic Docker acceptance runs with `bash deploy/tests/compose-acceptance.sh`. It builds both images, generates a tiny bundle with installed pipeline code, and tests actual Compose startup and database persistence under a unique disposable project. It does not use a real Telegram token or full data.
+```bash
+wsl.exe --user root --exec docker \
+  --config /home/wozata/projects/AnimeRecommendationBot/.tools/docker/config \
+  compose --env-file "$SETTINGS" -p "$PROJECT" -f "$COMPOSE_FILE" ps
+```
+
+For a script that calls `docker` internally, use `wsl.exe --user root --exec env DOCKER_CONFIG=/home/wozata/projects/AnimeRecommendationBot/.tools/docker/config bash ...`. Keep `SETTINGS` and `COMPOSE_FILE` as absolute paths in that invocation.
+
+The small synthetic `bash deploy/tests/compose-acceptance.sh` checks image build, migration/persistence, startup guards, and scale refusal without a real token or full dataset. It does not establish live acceptance.

@@ -1,4 +1,4 @@
-// The v1 API is ready for the later handler task; this binary still uses legacy adapters.
+// The v1 handlers use the versioned API; compatibility adapters preserve legacy history.
 #![allow(dead_code)]
 use std::{error::Error, fmt};
 use tokio::sync::{Mutex, MutexGuard};

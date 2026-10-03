@@ -7,7 +7,7 @@ Run these commands from the repository root:
 ```bash
 cargo build --locked
 cargo test --locked
-cargo run --locked
+cargo run --locked --bin bot
 ```
 
 The bot reads environment variables directly. It does not load `.env` automatically. Use `.env.example` as a reference; preserve any existing `.env` and load it in your shell or Compose environment. These variables are required:
@@ -21,7 +21,13 @@ The bot reads environment variables directly. It does not load `.env` automatica
 To validate configuration without contacting PostgreSQL or Telegram, run:
 
 ```bash
-cargo run --locked -- --check-config
+cargo run --locked --bin bot -- --check-config
 ```
 
-The current PostgreSQL connection uses `NoTls`; `sslmode=require` is rejected. Database schema migration 1 is available through `Db::create`; the current runtime still uses its legacy handlers and tables. Recommendation bundle loading arrives in ARB-011. See [database.md](database.md) for the schema and PostgreSQL tests.
+The current PostgreSQL connection uses `NoTls`; `sslmode=require` is rejected. Database migration 1 is applied at startup under a transaction lock and preserves old `test_*` rows. The active handlers use the versioned API, search the loaded bundle, and store user actions with stable IDs. Normal startup validates the entire bundle, connects and migrates PostgreSQL, then checks Telegram's webhook and starts polling. `--prepare` performs the same bundle/database gate and exits before creating a Telegram client:
+
+```bash
+cargo run --locked --bin bot -- --prepare
+```
+
+`--check-config` checks only environment values and the artifact directory; it does not parse the bundle or contact PostgreSQL. See [bundle.md](bundle.md), [dialogue.md](dialogue.md), and [database.md](database.md) for the active contracts. In-memory dialogue and buttons are lost on restart; committed history remains in PostgreSQL.
