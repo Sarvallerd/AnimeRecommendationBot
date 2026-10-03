@@ -228,7 +228,7 @@ for item, bundle in zip(items,(a,b,a)):
     assert prepare['artifact_mount']['source']==str(bundle) and not prepare['artifact_mount']['rw']
 assert items[0]['database']['migrations'][0]['version']==1 and len(items[0]['database']['migrations'])==1
 compose_cmd=['docker','compose','--env-file',str(settings),'-p',str(project),'-f',str(repo/'compose.yaml')]
-compose_config=json.loads(subprocess.run(compose_cmd+['config','--format','json'],
+compose_config=json.loads(subprocess.run(compose_cmd+['--profile','tools','config','--format','json'],
                                      capture_output=True,text=True,check=True).stdout)
 image_names={key:compose_config['services'][key]['image'] for key in ('builder','bot')}
 image_ids={key:subprocess.run(['docker','image','inspect','--format','{{.Id}}',image_names[key]],
