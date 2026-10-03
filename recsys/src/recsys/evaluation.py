@@ -60,6 +60,14 @@ def _id_sha(ids):
     return sha("".join(f"{i}\n" for i in ids).encode())
 
 
+def _verify_originals(lockfile: Path) -> dict[str, str]:
+    repository_root = lockfile.resolve().parent
+    originals = {p: sha((repository_root / p).read_bytes()) for p in ORIGINALS}
+    if originals != ORIGINAL_HASHES:
+        raise EvaluationError("original notebook or ranker SHA256 mismatch")
+    return originals
+
+
 def _load_pins(bundle_dir, normalization_report, build_report, anime_csv, synopsis_csv,
                glove, lockfile):
     """Validate every pinned public input before launching measured workers."""
@@ -112,10 +120,7 @@ def _load_pins(bundle_dir, normalization_report, build_report, anime_csv, synops
     versions = {name: importlib.metadata.version(name) for name in DISTRIBUTIONS}
     if sys.version_info[:2] != (3, 12) or versions["numpy"] != "2.5.3" or versions["pandas"] != "3.0.6" or versions["scikit-learn"] != "1.9.1":
         raise EvaluationError("Python or pinned dependency version mismatch")
-    repository_root = lockfile.resolve().parent.parent
-    originals = {p: sha((repository_root / p).read_bytes()) for p in ORIGINALS}
-    if originals != ORIGINAL_HASHES:
-        raise EvaluationError("original notebook or ranker SHA256 mismatch")
+    originals = _verify_originals(lockfile)
     code_dir = Path(__file__).parent
     return {"catalog": catalog, "neighbors": neighbors, "queries": queries,
             "spec": spec, "spec_sha": sha(spec_raw), "registry": registry,

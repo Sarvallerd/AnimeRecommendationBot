@@ -1,13 +1,13 @@
 # Building and checking the Rust bot
 
-The repository pins Rust 1.95.0 and commits `bot/Cargo.lock`. On Linux, install a C compiler, `pkg-config`, and the OpenSSL development package before building.
+The repository pins Rust 1.95.0 and commits `Cargo.lock`. On Linux, install a C compiler, `pkg-config`, and the OpenSSL development package before building.
 
 Run these commands from the repository root:
 
 ```bash
-cargo build --locked --manifest-path bot/Cargo.toml
-cargo test --locked --manifest-path bot/Cargo.toml
-cargo run --locked --manifest-path bot/Cargo.toml
+cargo build --locked
+cargo test --locked
+cargo run --locked
 ```
 
 The bot reads environment variables directly. It does not load `.env` automatically. Use `.env.example` as a reference; preserve any existing `.env` and load it in your shell or Compose environment. These variables are required:
@@ -21,7 +21,7 @@ The bot reads environment variables directly. It does not load `.env` automatica
 To validate configuration without contacting PostgreSQL or Telegram, run:
 
 ```bash
-cargo run --locked --manifest-path bot/Cargo.toml -- --check-config
+cargo run --locked -- --check-config
 ```
 
 The current PostgreSQL connection uses `NoTls`; `sslmode=require` is rejected. Database schema migration 1 is available through `Db::create`; the current runtime still uses its legacy handlers and tables. Recommendation bundle loading arrives in ARB-011. See [database.md](database.md) for the schema and PostgreSQL tests.

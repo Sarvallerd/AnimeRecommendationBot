@@ -31,7 +31,7 @@ fn small_bundle() -> Arc<Bundle> {
     Arc::new(
         Bundle::load(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../tests/fixtures/bundle"
+            "/tests/fixtures/bundle"
         ))
         .unwrap(),
     )
@@ -40,7 +40,7 @@ fn synthetic_bundle() -> (tempfile::TempDir, Arc<Bundle>) {
     let dir = tempfile::tempdir().unwrap();
     let base = std::path::Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../tests/fixtures/bundle"
+        "/tests/fixtures/bundle"
     ));
     let mut catalog: Value =
         serde_json::from_slice(&std::fs::read(base.join("catalog.json")).unwrap()).unwrap();

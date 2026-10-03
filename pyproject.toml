@@ -1,0 +1,45 @@
+[build-system]
+requires = ["maturin==1.15.0"]
+build-backend = "maturin"
+
+[project]
+name = "anime-recommendation-recsys"
+version = "0.1.0"
+description = "Anime recommendation bot and offline recommendation preparation"
+readme = "recsys/README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = ["numpy==2.5.3", "pandas==3.0.6"]
+
+[project.optional-dependencies]
+quality = ["scikit-learn==1.9.1"]
+
+[tool.maturin]
+bindings = "bin"
+manifest-path = "Cargo.toml"
+python-source = "recsys/src"
+module-name = "recsys"
+data = "packaging"
+targets = [{ name = "bot", kind = "bin" }, { name = "check_bundle", kind = "bin" }]
+profile = "dev"
+editable-profile = "dev"
+locked = true
+compatibility = "off"
+auditwheel = "skip"
+
+[tool.uv]
+required-version = "==0.11.12"
+cache-keys = [
+  { file = "pyproject.toml" }, { file = "Cargo.toml" }, { file = "Cargo.lock" },
+  { file = "packaging/scripts/recsys" },
+  { file = "rust-toolchain.toml" }, { file = "rust-toolchain" }, { file = "build.rs" },
+  { file = ".cargo/config*" }, { file = "bot/src/**/*.rs" }, { file = "bot/migrations/**/*.sql" },
+  { file = "recsys/src/recsys/**/*.py" }, { file = "recsys/src/recsys/**/*.json" },
+  { file = "recsys/src/recsys/**/*.md" }, { file = "recsys/README.md" },
+  { env = "RUSTUP_TOOLCHAIN" }, { env = "RUSTFLAGS" }, { env = "CARGO_ENCODED_RUSTFLAGS" },
+  { env = "CARGO_BUILD_TARGET" }, { env = "MATURIN_PEP517_ARGS" }, { env = "OPENSSL_DIR" },
+  { env = "OPENSSL_LIB_DIR" }, { env = "OPENSSL_INCLUDE_DIR" }, { env = "OPENSSL_STATIC" },
+  { env = "PKG_CONFIG_PATH" }, { env = "CC" }, { env = "CFLAGS" },
+]
+
+[tool.uv.extra-build-variables]
+anime-recommendation-recsys = { MATURIN_NO_INSTALL_RUST = "1" }

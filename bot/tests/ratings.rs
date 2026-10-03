@@ -168,7 +168,7 @@ fn bundle() -> Arc<Bundle> {
     Arc::new(
         Bundle::load(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../tests/fixtures/bundle"
+            "/tests/fixtures/bundle"
         ))
         .unwrap(),
     )
@@ -664,7 +664,7 @@ async fn long_unicode_title_is_bounded_and_controls_are_plain_text() {
     let dir = tempfile::tempdir().unwrap();
     let base = std::path::Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../tests/fixtures/bundle"
+        "/tests/fixtures/bundle"
     ));
     let mut catalog: Value =
         serde_json::from_slice(&std::fs::read(base.join("catalog.json")).unwrap()).unwrap();

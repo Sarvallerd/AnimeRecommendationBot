@@ -2,6 +2,8 @@
 
 Run the offline builder after normalization:
 
+Run from the repository root with the root locked environment:
+
 ```sh
 uv run --locked --no-editable recsys build \
   --catalog data/normalized/catalog.json \

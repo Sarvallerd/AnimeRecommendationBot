@@ -4,17 +4,37 @@ import hashlib
 import importlib.metadata
 import json
 import os
+import shutil
 import tempfile
 import unittest
 from unittest.mock import patch
 from pathlib import Path
 
-from recsys.evaluation import (CODE_FILES, DISTRIBUTIONS, ORIGINAL_HASHES, THREAD_ENVIRONMENT,
+from recsys.evaluation import (CODE_FILES, DISTRIBUTIONS, ORIGINALS, ORIGINAL_HASHES, THREAD_ENVIRONMENT,
+                               _verify_originals,
                                _baseline_queries, _performance, _validate_legacy_diagnostics,
                                _validate_provenance, _validate_bundle_links, _worker, compare, EvaluationError)
 from recsys.assessment import canonical, sha
 from recsys.sources import load_registry
 from recsys.quality import genre_neighbors
+
+
+class RootLockOriginalsTests(unittest.TestCase):
+    def test_root_lock_checks_pinned_original_bytes(self):
+        repository = Path(__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            lock = root / "uv.lock"
+            lock.write_bytes((repository / "uv.lock").read_bytes())
+            for name in ORIGINALS:
+                target = root / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(repository / name, target)
+            self.assertEqual(_verify_originals(lock), ORIGINAL_HASHES)
+            changed = root / ORIGINALS[0]
+            changed.write_bytes(changed.read_bytes() + b"changed")
+            with self.assertRaisesRegex(EvaluationError, "original notebook or ranker SHA256 mismatch"):
+                _verify_originals(lock)
 
 
 class EvaluationTests(unittest.TestCase):

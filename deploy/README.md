@@ -4,7 +4,7 @@ Requires Docker Engine and Compose 2.30.0 or newer. The bot uses long polling, s
 
 Copy `bot.env.example` to `deploy/.env.bot` and `postgres.env.example` to `deploy/.env.postgres`. These files are ignored by Git. Set a real token and a PostgreSQL URL with user `anime_bot`, host `postgres`, port `5432`, and database `anime_bot`. Generate a password, for example with `openssl rand -hex 32`, and put the literal value in `POSTGRES_PASSWORD`. Percent encode reserved characters in the URL password (`$` becomes `%24`, `@` becomes `%40`, `/` becomes `%2F`). Raw Compose env files retain quotes and dollar signs literally; do not add shell quotes around values. The migration service uses the syntactically valid placeholder token `0:prepare`; it never contacts Telegram.
 
-Copy `compose.env.example` to a local deployment settings file if you need different paths. Every command below passes the settings file explicitly. Set `ARB_UID` and `ARB_GID` to the host operator's `id -u` and `id -g`, and create `.arb/data` owned by that user. Set `ARB_DATA_DIR` to its host path. Only that directory is writable by the offline builder. The Python image contains the locked recommendation package and no full dataset.
+Copy `compose.env.example` to a local deployment settings file if you need different paths. Every command below passes the settings file explicitly. Set `ARB_UID` and `ARB_GID` to the host operator's `id -u` and `id -g`, and create `.arb/data` owned by that user. Set `ARB_DATA_DIR` to its host path. Only that directory is writable by the offline builder. The Python image contains the locked root package and its installed commands, but no Rust compiler or full dataset. The bot runtime image remains Rust-only.
 
 ```sh
 mkdir -p .arb/data

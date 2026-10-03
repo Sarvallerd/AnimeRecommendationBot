@@ -62,5 +62,5 @@ ARB-005 local test database:
 
 ```bash
 ARB_TEST_DATABASE_URL='postgresql://wozata@127.0.0.1:55432/arb_005_test?sslmode=disable' \
-  cargo test --locked --manifest-path bot/Cargo.toml db::tests -- --ignored
+  cargo test --locked db::tests -- --ignored
 ```

@@ -35,7 +35,7 @@ fn bundle(count: usize, long: bool) -> (tempfile::TempDir, Arc<Bundle>) {
     let dir = tempfile::tempdir().unwrap();
     let base = Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../tests/fixtures/bundle"
+        "/tests/fixtures/bundle"
     ));
     let mut catalog: Value =
         serde_json::from_slice(&std::fs::read(base.join("catalog.json")).unwrap()).unwrap();
