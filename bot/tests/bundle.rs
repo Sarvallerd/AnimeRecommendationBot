@@ -10,7 +10,11 @@ fn fixture() -> TempDir {
     let dir = tempfile::tempdir().unwrap();
     for name in ["manifest.json", "catalog.json", "neighbors.json"] {
         fs::copy(
-            Path::new("../tests/fixtures/bundle").join(name),
+            Path::new(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/bundle"
+            ))
+            .join(name),
             dir.path().join(name),
         )
         .unwrap();

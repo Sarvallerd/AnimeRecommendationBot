@@ -19,6 +19,6 @@ The comparison produces `comparison.json`, `legacy-diagnostics.json`, `measureme
 Example, with paths replaced by verified local inputs:
 
 ```sh
-recsys quality compare --bundle-dir BUNDLE --normalization-report NORMALIZATION_REPORT --build-report BUILD_REPORT --anime-csv ANIME_CSV --synopsis-csv SYNOPSIS_CSV --glove GLOVE --lockfile recsys/uv.lock --code-revision COMMIT_SHA --output-dir COMPARISON_DIR --repetitions 3
+recsys quality compare --bundle-dir BUNDLE --normalization-report NORMALIZATION_REPORT --build-report BUILD_REPORT --anime-csv ANIME_CSV --synopsis-csv SYNOPSIS_CSV --glove GLOVE --lockfile uv.lock --code-revision COMMIT_SHA --output-dir COMPARISON_DIR --repetitions 3
 recsys quality summarize --comparison COMPARISON_DIR/comparison.json --catalog BUNDLE/catalog.json --measurements COMPARISON_DIR/measurements.json --assessment ASSESSMENT.json --output-dir SUMMARY_DIR
 ```

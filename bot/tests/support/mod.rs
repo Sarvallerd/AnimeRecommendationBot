@@ -11,7 +11,7 @@ use std::sync::Arc;
 pub fn fixture(repo: Arc<dyn Repository>, sessions: Arc<SessionStore>) -> Arc<AppContext> {
     let bundle = Bundle::load(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../tests/fixtures/bundle"
+        "/tests/fixtures/bundle"
     ))
     .unwrap();
     Arc::new(AppContext::new(Arc::new(bundle), repo, sessions))

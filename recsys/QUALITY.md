@@ -10,6 +10,8 @@ The 20 queries were chosen deliberately: five each at popularity ranks 1–100, 
 
 ## Baseline and files
 
+Run from the repository root with the root locked environment:
+
 ```sh
 uv run --locked --no-editable recsys quality baseline \
   --catalog /path/to/catalog.json \

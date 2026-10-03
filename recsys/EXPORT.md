@@ -2,14 +2,16 @@
 
 After `recsys normalize` and `recsys build`, publish the verified catalog and neighbors:
 
+Run from the repository root with the root locked environment:
+
 ```sh
-recsys export \
+uv run --locked recsys export \
   --catalog data/normalized/catalog.json \
   --neighbors data/build/neighbors.json \
   --build-report data/build/build-report.json \
   --normalization-report data/normalized/normalization-report.json \
   --output-dir data/bundles
-recsys validate data/bundles/sha256-<manifest-digest>
+uv run --locked recsys validate data/bundles/sha256-<manifest-digest>
 ```
 
 Export prints the published path, full `sha256:` identity, and record count. Validate prints exactly `sha256:<digest> records=<count>`. Both commands work from any current directory with the installed package. For a checkout-only contract check, run `python3 contracts/check_bundle.py BUNDLE_DIR` from the repository root.

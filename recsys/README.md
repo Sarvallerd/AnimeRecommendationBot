@@ -2,7 +2,7 @@
 
 This Python package prepares recommendation inputs offline for the Rust bot. It can acquire the pinned MAL 2020 CSV files and GloVe 6B 300-dimensional vectors. Normalization of the MAL CSV files, pinned GloVe cosine neighbor building, and a diagnostic genre baseline are included. Immutable bundle export is available; assessed evaluation will be added in a later task.
 
-Requires Python 3.12. From this directory, install the locked environment with:
+Requires Python 3.12, Rust 1.95.0, a C compiler, pkg-config, and OpenSSL development headers. From the repository root, install the locked environment with:
 
 ```sh
 uv sync --locked --no-editable
@@ -13,7 +13,7 @@ uv run --locked --no-editable recsys --version
 Run the package checks with:
 
 ```sh
-uv run --locked --no-editable python -m unittest discover -s tests -v
+uv run --locked --no-editable python -m unittest discover -s recsys/tests -v
 ```
 
 Acquire the inputs into `data/raw` relative to the current directory:

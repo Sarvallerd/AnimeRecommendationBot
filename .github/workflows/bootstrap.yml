@@ -73,27 +73,27 @@ jobs:
           openssl version
           pkg-config --version
       - name: Check Rust format
-        run: cargo +1.95.0 fmt --manifest-path bot/Cargo.toml --all -- --check
+        run: cargo +1.95.0 fmt --all -- --check
       - name: Build Rust targets
-        run: cargo +1.95.0 build --locked --all-targets --manifest-path bot/Cargo.toml
+        run: cargo +1.95.0 build --locked --all-targets
       - name: Lint Rust targets
-        run: cargo +1.95.0 clippy --locked --all-targets --manifest-path bot/Cargo.toml -- -D warnings
+        run: cargo +1.95.0 clippy --locked --all-targets -- -D warnings
       - name: Test Rust
-        run: cargo +1.95.0 test --locked --manifest-path bot/Cargo.toml
+        run: cargo +1.95.0 test --locked
       - name: Test PostgreSQL integration
         env:
           ARB_TEST_DATABASE_URL: postgresql://arb_ci:arb_ci@127.0.0.1:5432/arb_ci_test?sslmode=disable
-        run: cargo +1.95.0 test --locked --manifest-path bot/Cargo.toml -- --ignored
+        run: cargo +1.95.0 test --locked -- --ignored
       - name: Compare bundle contract checkers
         run: |
           python contracts/check_bundle.py tests/fixtures/bundle > "$RUNNER_TEMP/python-bundle.txt"
-          cargo +1.95.0 run --quiet --locked --manifest-path bot/Cargo.toml --bin check_bundle -- tests/fixtures/bundle > "$RUNNER_TEMP/rust-bundle.txt"
+          cargo +1.95.0 run --quiet --locked --bin check_bundle -- tests/fixtures/bundle > "$RUNNER_TEMP/rust-bundle.txt"
           diff -u "$RUNNER_TEMP/python-bundle.txt" "$RUNNER_TEMP/rust-bundle.txt"
           cat "$RUNNER_TEMP/python-bundle.txt"
 
   python:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -107,15 +107,18 @@ jobs:
       - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
         with:
           version: '0.11.12'
+      - name: Install Rust toolchain and native build prerequisites
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libssl-dev
       - name: Sync recommendation dependencies
-        working-directory: recsys
         run: uv sync --locked --no-editable --extra quality
       - name: Test recommendation preparation
-        working-directory: recsys
-        run: uv run --locked --no-editable --extra quality python -m unittest discover -s tests -p 'test_*.py' -v
+        run: uv run --locked --no-editable --extra quality python -m unittest discover -s recsys/tests -p 'test_*.py' -v
       - name: Test bundle contract
         run: |
           python contracts/check_bundle.py tests/fixtures/bundle
           python -m unittest discover -s contracts -p 'test_*.py' -v
       - name: Check dependency lockfiles
-        run: git diff --exit-code -- recsys/uv.lock bot/Cargo.lock
+        run: git diff --exit-code -- uv.lock Cargo.lock
