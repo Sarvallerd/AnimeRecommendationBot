@@ -120,5 +120,9 @@ jobs:
         run: |
           python contracts/check_bundle.py tests/fixtures/bundle
           python -m unittest discover -s contracts -p 'test_*.py' -v
+      - name: Test private acceptance evidence
+        run: |
+          python -m unittest discover -s deploy/tests -p 'test_acceptance_evidence.py' -v
+          bash -n deploy/tests/full-catalog-acceptance.sh
       - name: Check dependency lockfiles
         run: git diff --exit-code -- uv.lock Cargo.lock
