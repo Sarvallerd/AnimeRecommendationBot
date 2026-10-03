@@ -109,10 +109,10 @@ jobs:
           version: '0.11.12'
       - name: Sync recommendation dependencies
         working-directory: recsys
-        run: uv sync --locked --no-editable
+        run: uv sync --locked --no-editable --extra quality
       - name: Test recommendation preparation
         working-directory: recsys
-        run: uv run --locked --no-editable python -m unittest discover -s tests -p 'test_*.py' -v
+        run: uv run --locked --no-editable --extra quality python -m unittest discover -s tests -p 'test_*.py' -v
       - name: Test bundle contract
         run: |
           python contracts/check_bundle.py tests/fixtures/bundle

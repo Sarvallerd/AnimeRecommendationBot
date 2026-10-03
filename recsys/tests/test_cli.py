@@ -70,6 +70,23 @@ class CliTests(unittest.TestCase):
         self.assertIn("catalog SHA256 mismatch", loaded.stderr)
         self.assertNotIn("Traceback", loaded.stderr)
 
+    def test_comparison_and_summary_help_outside_cwd(self) -> None:
+        for command, option in (("compare", "--repetitions"),
+                                ("summarize", "--assessment")):
+            result = self.run_cli("quality", command, "--help", console=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(option, result.stdout)
+        with tempfile.TemporaryDirectory() as directory:
+            result = self.run_cli("quality", "compare", "--bundle-dir", "missing",
+                                  "--normalization-report", "missing", "--build-report", "missing",
+                                  "--anime-csv", "missing", "--synopsis-csv", "missing",
+                                  "--glove", "missing", "--lockfile", "missing",
+                                  "--code-revision", "a" * 40, "--output-dir", directory,
+                                  "--repetitions", "0", console=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("repetitions must be 1..10", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
     def test_build_help_and_input_error_outside_cwd(self) -> None:
         help_result = self.run_cli("build", "--help", console=True)
         self.assertEqual(help_result.returncode, 0, help_result.stderr)
