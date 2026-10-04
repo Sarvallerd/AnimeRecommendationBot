@@ -50,9 +50,41 @@ fn synthetic_bundle() -> (tempfile::TempDir, Arc<Bundle>) {
     }
     anime.insert("107".into(), json!({"title":"カウボーイビバップ", "aliases":["Cowboy Bebop"], "genres":[], "score":null, "year":null, "type":null, "episodes":null, "synopsis":null}));
     anime.insert("108".into(), json!({"title":"X".repeat(1000), "aliases":[], "genres":[], "score":null, "year":null, "type":null, "episodes":null, "synopsis":null}));
+    for (id, title, alias) in [
+        (16498, "Shingeki no Kyojin", "Attack on Titan"),
+        (
+            25777,
+            "Shingeki no Kyojin Season 2",
+            "Attack on Titan Season 2",
+        ),
+        (
+            35760,
+            "Shingeki no Kyojin Season 3",
+            "Attack on Titan Season 3",
+        ),
+        (
+            36106,
+            "Shingeki no Kyojin: Lost Girls",
+            "Attack on Titan: Lost Girls",
+        ),
+        (
+            31374,
+            "Shingeki! Kyojin Chuugakkou",
+            "Attack on Titan: Junior High",
+        ),
+    ] {
+        let mut aliases = vec![alias.to_owned()];
+        if id == 16498 {
+            aliases.extend(["Ａｔｔａｃｋ　ｏｎ　Ｔｉｔａｎ".into(), "進撃の巨人".into()]);
+        }
+        anime.insert(id.to_string(), json!({"title":title, "aliases":aliases, "genres":[], "score":null, "year":2013, "type":"TV", "episodes":null, "synopsis":null}));
+    }
+    anime.insert("40000".into(), json!({"title":"Nova-X", "aliases":["Nova Y", "Nova Z", "Alias X", "Alias Y"], "genres":[], "score":null, "year":null, "type":null, "episodes":null, "synopsis":null}));
+    let long_alias = format!("English {}", "A".repeat(250));
+    anime.insert("40001".into(), json!({"title":"Short canonical", "aliases":[long_alias], "genres":[], "score":null, "year":null, "type":null, "episodes":null, "synopsis":null}));
     let mut neighbors: Value =
         serde_json::from_slice(&std::fs::read(base.join("neighbors.json")).unwrap()).unwrap();
-    for id in 101..=108 {
+    for id in (101..=108).chain([16498, 25777, 35760, 36106, 31374, 40000, 40001]) {
         neighbors["neighbors"][id.to_string()] = json!([]);
     }
     let catalog_bytes = format!("{}\n", catalog).into_bytes();
@@ -87,6 +119,59 @@ fn unicode_ranking_limits_and_validation() {
     assert_eq!(index.find("a\0b"), Err(QueryError::InvalidText));
     assert_eq!(index.find(&"a".repeat(257)), Err(QueryError::TooLong));
     assert_eq!(index.find(&"x".repeat(1000)), Err(QueryError::TooLong));
+}
+
+#[test]
+fn search_returns_the_original_best_matching_title_for_each_ranked_id() {
+    let (_dir, bundle) = synthetic_bundle();
+    let index = SearchIndex::new(bundle.catalog());
+    let english = index.find("Attack on Titan").unwrap();
+    assert_eq!(english.candidates, vec![16498, 25777, 35760, 36106, 31374]);
+    assert_eq!(english.display_title(16498), Some("Attack on Titan"));
+    assert_eq!(
+        english.display_title(25777),
+        Some("Attack on Titan Season 2")
+    );
+    assert_eq!(
+        english.display_title(35760),
+        Some("Attack on Titan Season 3")
+    );
+    assert_eq!(
+        english.display_title(36106),
+        Some("Attack on Titan: Lost Girls")
+    );
+    assert_eq!(
+        english.display_title(31374),
+        Some("Attack on Titan: Junior High")
+    );
+    assert_eq!(english.display_title(107), None);
+
+    for query in ["ＡＴＴＡＣＫ—ＯＮ—ＴＩＴＡＮ", "Attack on", "on Titan"] {
+        let matches = index.find(query).unwrap();
+        assert_eq!(matches.candidates[0], 16498);
+        assert_eq!(matches.display_title(16498), Some("Attack on Titan"));
+    }
+    let typo = index.find("Attack on Ttan").unwrap();
+    assert_eq!(typo.candidates, vec![16498]);
+    assert_eq!(typo.display_title(16498), Some("Attack on Titan"));
+    let romaji = index.find("Shingeki no Kyojin").unwrap();
+    assert_eq!(romaji.candidates[0], 16498);
+    assert_eq!(romaji.display_title(16498), Some("Shingeki no Kyojin"));
+    let japanese = index.find("進撃の巨人").unwrap();
+    assert_eq!(japanese.candidates, vec![16498]);
+    assert_eq!(japanese.display_title(16498), Some("進撃の巨人"));
+    assert_eq!(
+        index.find("Nova").unwrap().display_title(40000),
+        Some("Nova-X")
+    );
+    assert_eq!(
+        index.find("Alias").unwrap().display_title(40000),
+        Some("Alias X")
+    );
+    assert_eq!(
+        index.find("неттакогоаниме").unwrap().display_title(16498),
+        None
+    );
 }
 
 #[derive(Default)]
@@ -254,6 +339,24 @@ fn chosen(session: &bot::dialogue::storage::Session, mal: i32) -> (String, i32) 
         })
         .unwrap()
 }
+fn last_keyboard(api: &FakeTelegram) -> (String, Vec<String>) {
+    let (_, fields) = api
+        .decoded()
+        .into_iter()
+        .rev()
+        .find(|(path, fields)| {
+            path.ends_with("/SendMessage") && fields.contains_key("reply_markup")
+        })
+        .unwrap();
+    let markup: Value = serde_json::from_str(&fields["reply_markup"]).unwrap();
+    let buttons = markup["inline_keyboard"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row[0]["text"].as_str().unwrap().to_owned())
+        .collect();
+    (fields["text"].clone(), buttons)
+}
 async fn dispatch_result(
     bot: &Bot,
     ctx: &Arc<AppContext>,
@@ -317,6 +420,156 @@ async fn public_router_registers_actual_profile_and_requires_confirmation() {
             assert_eq!(repo.deliveries.lock().unwrap().as_slice(), rows.as_slice());
         }
     }
+}
+
+#[tokio::test]
+async fn both_intents_confirm_with_the_matched_title_and_stable_id() {
+    for command in ["/recommend", "/rate"] {
+        for (query, expected_ids, expected_titles) in [
+            (
+                "Attack on titan",
+                vec![16498, 25777, 35760, 36106, 31374],
+                vec![
+                    "Attack on Titan",
+                    "Attack on Titan Season 2",
+                    "Attack on Titan Season 3",
+                    "Attack on Titan: Lost Girls",
+                    "Attack on Titan: Junior High",
+                ],
+            ),
+            (
+                "Shingeki no Kyojin",
+                vec![16498, 25777, 35760, 36106],
+                vec![
+                    "Shingeki no Kyojin",
+                    "Shingeki no Kyojin Season 2",
+                    "Shingeki no Kyojin Season 3",
+                    "Shingeki no Kyojin: Lost Girls",
+                ],
+            ),
+            ("進撃の巨人", vec![16498], vec!["進撃の巨人"]),
+        ] {
+            let (_dir, bundle) = synthetic_bundle();
+            let api = FakeTelegram::new();
+            let bot = api.bot();
+            let repo = Arc::new(FakeRepo::default());
+            let ctx = fixture(bundle, repo.clone());
+            dispatch(&bot, &ctx, message(1, 7, 42, command)).await;
+            dispatch(&bot, &ctx, message(2, 7, 42, query)).await;
+            let (text, buttons) = last_keyboard(&api);
+            assert!(text.starts_with("Подтвердите аниме:\n"));
+            assert_eq!(buttons.len(), expected_ids.len());
+            for (index, ((mal_id, title), button)) in expected_ids
+                .iter()
+                .zip(expected_titles.iter())
+                .zip(buttons.iter())
+                .enumerate()
+            {
+                assert!(
+                    text.contains(&format!(
+                        "{}. {} (2013, TV) · MAL ID {mal_id}",
+                        index + 1,
+                        title
+                    )),
+                    "{text}"
+                );
+                assert_eq!(
+                    button,
+                    &format!("{}. {} · MAL ID {mal_id}", index + 1, title)
+                );
+            }
+            let actor = Actor {
+                chat_id: 7,
+                user_id: 42,
+            };
+            let session = ctx.sessions.get(actor);
+            let guard = session.lock().await;
+            assert!(
+                matches!(&guard.state, State::ChoosingAnime { intent, query: context, candidates, selected_mal_id: None }
+                if *intent == if command == "/recommend" { AnimeIntent::Recommend } else { AnimeIntent::Rate }
+                && context.raw_query == query && candidates == &expected_ids)
+            );
+            let selected_id = if query == "Attack on titan" {
+                25777
+            } else {
+                16498
+            };
+            let (token, message_id) = chosen(&guard, selected_id);
+            drop(guard);
+            assert!(repo.resolutions.lock().unwrap().is_empty());
+            dispatch(&bot, &ctx, callback(3, 7, 42, message_id, Some(&token))).await;
+            let resolutions = repo.resolutions.lock().unwrap();
+            assert_eq!(resolutions.len(), 1);
+            assert_eq!(resolutions[0].2, selected_id);
+            assert_eq!(resolutions[0].3, ctx.bundle.identity());
+        }
+    }
+}
+
+#[tokio::test]
+async fn long_alias_has_independent_message_and_button_bounds() {
+    let (_dir, bundle) = synthetic_bundle();
+    let api = FakeTelegram::new();
+    let bot = api.bot();
+    let ctx = fixture(bundle, Arc::new(FakeRepo::default()));
+    dispatch(&bot, &ctx, message(1, 7, 42, "/rate")).await;
+    dispatch(
+        &bot,
+        &ctx,
+        message(2, 7, 42, &format!("English {}", "A".repeat(240))),
+    )
+    .await;
+    let (text, buttons) = last_keyboard(&api);
+    assert!(text.contains(&format!(
+        "1. English {}… (—, —) · MAL ID 40001",
+        "A".repeat(231)
+    )));
+    assert_eq!(
+        buttons,
+        vec![format!("1. English {}… · MAL ID 40001", "A".repeat(41))]
+    );
+    let matches = ctx
+        .search
+        .find(&format!("English {}", "A".repeat(240)))
+        .unwrap();
+    assert_eq!(
+        matches.display_title(40001).unwrap(),
+        format!("English {}", "A".repeat(250))
+    );
+}
+
+#[tokio::test]
+async fn failed_candidate_send_retries_with_the_original_alias_and_request() {
+    let (_dir, bundle) = synthetic_bundle();
+    let api = FakeTelegram::new();
+    let bot = api.bot();
+    let repo = Arc::new(FakeRepo::default());
+    let ctx = fixture(bundle, repo.clone());
+    dispatch(&bot, &ctx, message(1, 7, 42, "/recommend")).await;
+    api.fail_send.store(true, Ordering::SeqCst);
+    assert!(!dispatch_result(&bot, &ctx, message(2, 7, 42, "Attack on Titan")).await);
+    assert_eq!(repo.queries.lock().unwrap().len(), 1);
+    let session = ctx.sessions.get(Actor {
+        chat_id: 7,
+        user_id: 42,
+    });
+    let (token, message_id) = {
+        let guard = session.lock().await;
+        assert!(matches!(guard.state, State::PendingQuery { .. }));
+        guard
+            .callbacks
+            .iter()
+            .find_map(|(token, record)| {
+                matches!(record.action, Action::RetryQuery { .. })
+                    .then_some((token.clone(), record.message_id.unwrap()))
+            })
+            .unwrap()
+    };
+    dispatch(&bot, &ctx, callback(3, 7, 42, message_id, Some(&token))).await;
+    assert_eq!(repo.queries.lock().unwrap().len(), 1);
+    let (text, buttons) = last_keyboard(&api);
+    assert!(text.contains("1. Attack on Titan (2013, TV) · MAL ID 16498"));
+    assert_eq!(buttons[0], "1. Attack on Titan · MAL ID 16498");
 }
 
 #[tokio::test]
