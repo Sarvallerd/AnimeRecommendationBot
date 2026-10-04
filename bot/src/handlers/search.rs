@@ -148,7 +148,8 @@ async fn run_pending(
             .catalog()
             .get(*mal_id)
             .expect("indexed catalog ID");
-        let title = ui::bounded(&anime.title, 240);
+        let display_title = matches.display_title(*mal_id).unwrap_or(&anime.title);
+        let title = ui::bounded(display_title, 240);
         let kind = ui::bounded(anime.anime_type.as_deref().unwrap_or("—"), 32);
         let year = anime
             .year
@@ -162,7 +163,7 @@ async fn run_pending(
             format!(
                 "{}. {} · MAL ID {mal_id}",
                 index + 1,
-                ui::bounded(&anime.title, 50)
+                ui::bounded(display_title, 50)
             ),
             Action::Select {
                 intent,

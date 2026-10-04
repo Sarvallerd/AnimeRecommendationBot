@@ -1,6 +1,6 @@
 //! Immutable Unicode title index. Results always refer to catalog MAL IDs.
 use crate::catalog::{Catalog, MalId};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use unicode_normalization::UnicodeNormalization;
 
 pub const MAX_QUERY_CHARS: usize = 256;
@@ -17,11 +17,28 @@ pub enum QueryError {
 pub struct SearchMatches {
     pub candidates: Vec<MalId>,
     pub has_more: bool,
+    display_titles: BTreeMap<MalId, String>,
+}
+
+impl SearchMatches {
+    pub fn display_title(&self, mal_id: MalId) -> Option<&str> {
+        self.display_titles.get(&mal_id).map(String::as_str)
+    }
+}
+
+struct TitleVariant {
+    mal_id: MalId,
+    normalized: String,
+    char_count: usize,
+    display_title: String,
 }
 
 pub struct SearchIndex {
-    variants: Vec<(MalId, String, usize)>,
+    variants: Vec<TitleVariant>,
 }
+
+type MatchScore = (u8, usize, usize, MalId);
+type RankedVariant = (MatchScore, usize);
 
 impl SearchIndex {
     pub fn new(catalog: &Catalog) -> Self {
@@ -32,7 +49,12 @@ impl SearchIndex {
                 let normalized = normalize(title);
                 if !normalized.is_empty() && seen.insert(normalized.clone()) {
                     let len = normalized.chars().count();
-                    variants.push((id, normalized, len));
+                    variants.push(TitleVariant {
+                        mal_id: id,
+                        normalized,
+                        char_count: len,
+                        display_title: title.clone(),
+                    });
                 }
             }
         }
@@ -56,32 +78,45 @@ impl SearchIndex {
         }
         // Variants are grouped by numeric ID. Finalize each ID's best variant before
         // admitting it to the bounded result list.
-        let mut top = Vec::<(u8, usize, usize, MalId)>::new();
+        let mut top = Vec::<RankedVariant>::new();
         let mut matching_ids = 0;
         let mut current_id = None;
         let mut best_score = None;
-        for (id, variant, len) in &self.variants {
-            if current_id != Some(*id) {
+        for (variant_index, variant) in self.variants.iter().enumerate() {
+            if current_id != Some(variant.mal_id) {
                 if let Some(score) = best_score.take() {
                     admit(&mut top, score);
                     matching_ids += 1;
                 }
-                current_id = Some(*id);
+                current_id = Some(variant.mal_id);
             }
-            let rank = if variant == &query {
+            let rank = if variant.normalized == query {
                 Some((0, 0))
             } else if query_len < 3 {
                 None
-            } else if variant.starts_with(&query) {
+            } else if variant.normalized.starts_with(&query) {
                 Some((1, 0))
-            } else if variant.contains(&query) {
+            } else if variant.normalized.contains(&query) {
                 Some((2, 0))
             } else {
                 let limit = if query_len <= 5 { 1 } else { 2 };
-                bounded_distance(&query, variant, query_len, *len, limit).map(|d| (3, d))
+                bounded_distance(
+                    &query,
+                    &variant.normalized,
+                    query_len,
+                    variant.char_count,
+                    limit,
+                )
+                .map(|d| (3, d))
             };
             if let Some((class, distance)) = rank {
-                let score = (class, distance, len.saturating_sub(query_len), *id);
+                let score = (
+                    class,
+                    distance,
+                    variant.char_count.saturating_sub(query_len),
+                    variant.mal_id,
+                );
+                let score = (score, variant_index);
                 best_score = Some(best_score.map_or(score, |old| old.min(score)));
             }
         }
@@ -89,14 +124,22 @@ impl SearchIndex {
             admit(&mut top, score);
             matching_ids += 1;
         }
+        let mut candidates = Vec::with_capacity(top.len());
+        let mut display_titles = BTreeMap::new();
+        for (score, variant_index) in top {
+            let mal_id = score.3;
+            candidates.push(mal_id);
+            display_titles.insert(mal_id, self.variants[variant_index].display_title.clone());
+        }
         Ok(SearchMatches {
-            candidates: top.into_iter().map(|(_, _, _, id)| id).collect(),
+            candidates,
             has_more: matching_ids > MAX_CANDIDATES,
+            display_titles,
         })
     }
 }
 
-fn admit(top: &mut Vec<(u8, usize, usize, MalId)>, score: (u8, usize, usize, MalId)) {
+fn admit(top: &mut Vec<RankedVariant>, score: RankedVariant) {
     top.push(score);
     top.sort_unstable();
     top.truncate(MAX_CANDIDATES);
