@@ -145,7 +145,7 @@ fn admit(top: &mut Vec<RankedVariant>, score: RankedVariant) {
     top.truncate(MAX_CANDIDATES);
 }
 
-fn normalize(input: &str) -> String {
+pub(crate) fn normalize(input: &str) -> String {
     let mut result = String::new();
     let mut separator = false;
     for ch in input.nfkc().flat_map(char::to_lowercase) {

@@ -87,6 +87,7 @@ fn synthetic_bundle() -> (tempfile::TempDir, Arc<Bundle>) {
     for id in (101..=108).chain([16498, 25777, 35760, 36106, 31374, 40000, 40001]) {
         neighbors["neighbors"][id.to_string()] = json!([]);
     }
+    neighbors["neighbors"]["25777"] = json!([{"mal_id":107,"similarity":1.0}]);
     let catalog_bytes = format!("{}\n", catalog).into_bytes();
     let neighbors_bytes = format!("{}\n", neighbors).into_bytes();
     std::fs::write(dir.path().join("catalog.json"), &catalog_bytes).unwrap();
@@ -502,6 +503,35 @@ async fn both_intents_confirm_with_the_matched_title_and_stable_id() {
             assert_eq!(resolutions.len(), 1);
             assert_eq!(resolutions[0].2, selected_id);
             assert_eq!(resolutions[0].3, ctx.bundle.identity());
+            let sent = api
+                .decoded()
+                .into_iter()
+                .filter_map(|(path, fields)| {
+                    path.ends_with("/SendMessage")
+                        .then(|| fields.get("text").cloned())
+                        .flatten()
+                })
+                .next_back()
+                .unwrap();
+            if command == "/rate" {
+                let chosen_title = if query == "Attack on titan" {
+                    "Attack on Titan Season 2"
+                } else if query == "進撃の巨人" {
+                    "進撃の巨人"
+                } else {
+                    "Shingeki no Kyojin"
+                };
+                assert!(
+                    sent.contains(&format!("Оцените «{chosen_title}»")),
+                    "{sent}"
+                );
+            } else if query == "Attack on titan" {
+                assert!(
+                    sent.contains("По запросу: Attack on Titan Season 2"),
+                    "{sent}"
+                );
+                assert!(sent.contains("Название: Cowboy Bebop"), "{sent}");
+            }
         }
     }
 }
@@ -536,6 +566,23 @@ async fn long_alias_has_independent_message_and_button_bounds() {
         matches.display_title(40001).unwrap(),
         format!("English {}", "A".repeat(250))
     );
+    let session = ctx.sessions.get(Actor {
+        chat_id: 7,
+        user_id: 42,
+    });
+    let guard = session.lock().await;
+    let (token, message_id) = chosen(&guard, 40001);
+    drop(guard);
+    dispatch(&bot, &ctx, callback(3, 7, 42, message_id, Some(&token))).await;
+    let prompt = api
+        .decoded()
+        .into_iter()
+        .filter_map(|(_, fields)| fields.get("text").cloned())
+        .next_back()
+        .unwrap();
+    let shown = prompt.split('«').nth(1).unwrap().split('»').next().unwrap();
+    assert!(shown.starts_with("English A") && shown.ends_with('…'));
+    assert!(shown.encode_utf16().count() <= 240);
 }
 
 #[tokio::test]

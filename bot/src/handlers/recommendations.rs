@@ -1,4 +1,4 @@
-use super::{ui, HandlerResult};
+use super::{titles::ResponseTitles, ui, HandlerResult};
 use crate::{
     catalog::{Anime, MalId},
     db::{DbError, DeliveredPosition, DeliveryInput, WriteOutcome},
@@ -54,6 +54,12 @@ async fn deliver(
         .bundle
         .neighbors(selection.seed_mal_id)
         .ok_or(DbError::Conflict)?;
+    let titles = ResponseTitles::resolve(
+        &ctx.search,
+        &selection.query.raw_query,
+        selection.seed_mal_id,
+        seed,
+    );
 
     // A confirmed send is always reconciled with its original request and coordinates.
     if let Some(pending) = session.pending_recommendation_delivery.as_ref() {
@@ -115,7 +121,7 @@ async fn deliver(
         let sent = bot
             .send_message(
                 ChatId(actor.chat_id),
-                render_card(seed, rank, neighbors.len(), neighbor.mal_id, anime),
+                render_card(&titles, rank, neighbors.len(), neighbor.mal_id, anime),
             )
             .await?;
         if sent.id.0 <= 0 {
@@ -227,9 +233,15 @@ async fn persist_pending(
     Ok(row)
 }
 
-fn render_card(seed: &Anime, rank: i16, total: usize, mal_id: MalId, anime: &Anime) -> String {
-    let seed_title = ui::bounded(&seed.title, 160);
-    let title = ui::bounded(&anime.title, 240);
+fn render_card(
+    titles: &ResponseTitles,
+    rank: i16,
+    total: usize,
+    mal_id: MalId,
+    anime: &Anime,
+) -> String {
+    let seed_title = ui::bounded(titles.seed_title(), 160);
+    let title = ui::bounded(titles.recommendation_title(anime), 240);
     let score = anime
         .score
         .map_or_else(|| "нет данных".to_owned(), |v| v.to_string());
@@ -268,7 +280,7 @@ pub async fn on_score(
     ctx: &AppContext,
     actor: Actor,
     session: &mut Session,
-    _selection: &ResolvedSelection,
+    selection: &ResolvedSelection,
     action: ScoreAction<'_>,
 ) -> HandlerResult {
     session.callbacks.retain(|_, record| {
@@ -282,11 +294,27 @@ pub async fn on_score(
         .await
     {
         Ok(WriteOutcome::Created(()) | WriteOutcome::AlreadyRecorded(())) => {
+            let seed = ctx.bundle.catalog().get(selection.seed_mal_id);
+            let titles = seed.map(|seed| {
+                ResponseTitles::resolve(
+                    &ctx.search,
+                    &selection.query.raw_query,
+                    selection.seed_mal_id,
+                    seed,
+                )
+            });
             let title = ctx
                 .bundle
                 .catalog()
                 .get(action.position.mal_id)
-                .map(|anime| ui::bounded(&anime.title, 240))
+                .map(|anime| {
+                    ui::bounded(
+                        titles.as_ref().map_or(anime.title.as_str(), |titles| {
+                            titles.recommendation_title(anime)
+                        }),
+                        240,
+                    )
+                })
                 .unwrap_or_else(|| "Аниме".to_owned());
             bot.send_message(
                 ChatId(actor.chat_id),

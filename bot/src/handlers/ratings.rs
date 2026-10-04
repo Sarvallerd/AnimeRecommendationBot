@@ -1,4 +1,4 @@
-use super::{ui, HandlerResult};
+use super::{titles::ResponseTitles, ui, HandlerResult};
 use crate::{
     db::{DbError, WriteOutcome},
     dialogue::{
@@ -115,5 +115,11 @@ fn title(ctx: &AppContext, selection: &ResolvedSelection) -> String {
         .catalog()
         .get(selection.seed_mal_id)
         .expect("selected MAL ID belongs to loaded bundle");
-    ui::bounded(&anime.title, 240)
+    let titles = ResponseTitles::resolve(
+        &ctx.search,
+        &selection.query.raw_query,
+        selection.seed_mal_id,
+        anime,
+    );
+    ui::bounded(titles.seed_title(), 240)
 }
