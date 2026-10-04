@@ -305,6 +305,44 @@ async fn full_flow_without_start_uses_selected_id_and_ten_bound_scores() {
 }
 
 #[tokio::test]
+async fn matched_alias_survives_rate_prompt_and_failed_write_retry() {
+    let api = FakeTelegram::new();
+    let bot = api.bot();
+    let repo = Arc::new(FakeRepo::default());
+    let ctx = fixture(repo.clone());
+    dispatch(&bot, &ctx, message(1, 73, 42, "/rate")).await;
+    dispatch(&bot, &ctx, message(2, 73, 42, "second edition")).await;
+    let request = choose(&bot, &ctx, 3, 2).await.2;
+    let prompt = api
+        .decoded()
+        .into_iter()
+        .filter_map(|(_, fields)| fields.get("text").cloned())
+        .next_back()
+        .unwrap();
+    assert!(
+        prompt.contains("Оцените «Second Edition» · MAL ID 2"),
+        "{prompt}"
+    );
+    let (score, message_id) = score_token(&ctx, request, 7).await;
+    repo.set_failure(2);
+    assert!(!result(&bot, &ctx, callback(4, 73, 42, message_id, Some(&score))).await);
+    assert!(ctx.sessions.get(actor()).lock().await.state != State::Idle);
+    dispatch(&bot, &ctx, callback(5, 73, 42, message_id, Some(&score))).await;
+    let confirmation = api
+        .decoded()
+        .into_iter()
+        .filter_map(|(_, fields)| fields.get("text").cloned())
+        .next_back()
+        .unwrap();
+    assert!(
+        confirmation.contains("Оценка 7/10 для «Second Edition» · MAL ID 2 сохранена"),
+        "{confirmation}"
+    );
+    assert_eq!(repo.events.lock().unwrap().len(), 1);
+    assert_eq!(ctx.sessions.get(actor()).lock().await.state, State::Idle);
+}
+
+#[tokio::test]
 async fn first_score_pins_and_uncertain_writes_retry_only_that_button() {
     for mode in [1, 2] {
         let api = FakeTelegram::new();

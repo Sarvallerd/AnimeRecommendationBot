@@ -3,6 +3,7 @@ pub mod feedback;
 pub mod ratings;
 pub mod recommendations;
 pub mod search;
+mod titles;
 pub mod ui;
 
 use crate::{

@@ -32,6 +32,14 @@ const ACTOR: Actor = Actor {
 };
 
 fn bundle(count: usize, long: bool) -> (tempfile::TempDir, Arc<Bundle>) {
+    bundle_with(count, long, |_| {})
+}
+
+fn bundle_with(
+    count: usize,
+    long: bool,
+    edit_catalog: impl FnOnce(&mut Value),
+) -> (tempfile::TempDir, Arc<Bundle>) {
     let dir = tempfile::tempdir().unwrap();
     let base = Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -51,6 +59,7 @@ fn bundle(count: usize, long: bool) -> (tempfile::TempDir, Arc<Bundle>) {
         catalog["anime"]["10"]["synopsis"] = json!("🌸".repeat(6000));
         catalog["anime"]["10"]["episodes"] = json!("LONG_EPISODES_MARKER");
     }
+    edit_catalog(&mut catalog);
     let catalog_bytes = format!("{catalog}\n")
         .replace("\"LONG_EPISODES_MARKER\"", &"9".repeat(300))
         .into_bytes();
@@ -66,6 +75,27 @@ fn bundle(count: usize, long: bool) -> (tempfile::TempDir, Arc<Bundle>) {
     std::fs::write(dir.path().join("manifest.json"), format!("{manifest}\n")).unwrap();
     let loaded = Arc::new(Bundle::load(dir.path()).unwrap());
     (dir, loaded)
+}
+
+fn english_bundle() -> (tempfile::TempDir, Arc<Bundle>) {
+    bundle_with(5, false, |catalog| {
+        catalog["anime"]["1"]["title"] = json!("Shingeki no Kyojin");
+        catalog["anime"]["1"]["aliases"] = json!([
+            "Attack on Titan",
+            "Ａｔｔａｃｋ　ｏｎ　Ｔｉｔａｎ",
+            "進撃の巨人"
+        ]);
+        catalog["anime"]["10"]["title"] = json!("Koutetsujou no Kabaneri");
+        catalog["anime"]["10"]["aliases"] = json!(["Kabaneri of the Iron Fortress"]);
+        catalog["anime"]["11"]["title"] = json!("Karas");
+        catalog["anime"]["11"]["aliases"] = json!(["鴉 -KARAS-", "Crow"]);
+        catalog["anime"]["12"]["title"] = json!("Naruto");
+        catalog["anime"]["12"]["aliases"] = json!([]);
+        catalog["anime"]["2"]["title"] = json!("Romaji Two");
+        catalog["anime"]["2"]["aliases"] = json!(["日本語", "English Two"]);
+        catalog["anime"]["3"]["title"] = json!("No Alias");
+        catalog["anime"]["3"]["aliases"] = json!([]);
+    })
 }
 
 fn selection(bundle: &Bundle, request: i64, seed: i32) -> ResolvedSelection {
@@ -392,6 +422,227 @@ async fn nulls_long_unicode_and_plain_text_stay_bounded() {
         .filter(|(path, _)| path.ends_with("/SendMessage"))
         .all(|(_, fields)| !fields.contains_key("parse_mode")
             && !fields.contains_key("reply_markup")));
+}
+
+#[tokio::test]
+async fn selected_spelling_controls_seed_and_neighbor_titles() {
+    for (query, seed, target) in [
+        (
+            "Attack on Titan",
+            "Attack on Titan",
+            "Kabaneri of the Iron Fortress",
+        ),
+        (
+            "attack on titan",
+            "Attack on Titan",
+            "Kabaneri of the Iron Fortress",
+        ),
+        (
+            "ＡＴＴＡＣＫ—ＯＮ—ＴＩＴＡＮ",
+            "Attack on Titan",
+            "Kabaneri of the Iron Fortress",
+        ),
+        (
+            "Attack on",
+            "Attack on Titan",
+            "Kabaneri of the Iron Fortress",
+        ),
+        (
+            "Attack on Ttan",
+            "Attack on Titan",
+            "Kabaneri of the Iron Fortress",
+        ),
+        (
+            "Shingeki no Kyojin",
+            "Shingeki no Kyojin",
+            "Koutetsujou no Kabaneri",
+        ),
+        ("進撃の巨人", "進撃の巨人", "Koutetsujou no Kabaneri"),
+        (
+            "unmatched query",
+            "Shingeki no Kyojin",
+            "Koutetsujou no Kabaneri",
+        ),
+    ] {
+        let (_dir, bundle) = english_bundle();
+        let ctx = context(bundle.clone(), Arc::new(FakeRepo::default()));
+        let api = FakeTelegram::new();
+        let mut sel = selection(&bundle, 1, 1);
+        sel.query.raw_query = query.into();
+        recommendations::begin(&api.bot(), &ctx, ACTOR, &mut session(&sel), &sel)
+            .await
+            .unwrap();
+        let cards = sent_texts(&api);
+        assert_eq!(cards.len(), 5, "{query}");
+        assert!(
+            cards[0].contains(&format!("По запросу: {seed}\nНазвание: {target}\n")),
+            "{query}: {}",
+            cards[0]
+        );
+        assert!(cards[1].contains("Название: Karas\n"), "{query}");
+        assert!(cards[2].contains("Название: Naruto\n"), "{query}");
+        assert!(cards[3].contains("Название: Romaji Two\n"), "{query}");
+        assert!(cards[4].contains("Название: No Alias\n"), "{query}");
+        assert!(cards.iter().all(|card| card.encode_utf16().count() <= 4000));
+    }
+}
+
+#[tokio::test]
+async fn english_canonical_without_alias_enables_neighbor_preference() {
+    let (_dir, bundle) = bundle_with(1, false, |catalog| {
+        catalog["anime"]["1"]["title"] = json!("Cowboy Bebop");
+        catalog["anime"]["1"]["aliases"] = json!(["カウボーイビバップ"]);
+        catalog["anime"]["10"]["title"] = json!("Koutetsujou no Kabaneri");
+        catalog["anime"]["10"]["aliases"] = json!(["Kabaneri of the Iron Fortress"]);
+    });
+    let ctx = context(bundle.clone(), Arc::new(FakeRepo::default()));
+    let api = FakeTelegram::new();
+    let mut sel = selection(&bundle, 1, 1);
+    sel.query.raw_query = "Cowboy Bebop".into();
+    recommendations::begin(&api.bot(), &ctx, ACTOR, &mut session(&sel), &sel)
+        .await
+        .unwrap();
+    assert!(sent_texts(&api)[0]
+        .contains("По запросу: Cowboy Bebop\nНазвание: Kabaneri of the Iron Fortress"));
+}
+
+#[tokio::test]
+async fn duplicate_normalized_spellings_and_ambiguous_latin_canonical_are_deterministic() {
+    for (canonical, aliases, expected_seed) in [
+        (
+            "Ａｔｔａｃｋ　ｏｎ　Ｔｉｔａｎ",
+            json!(["Attack on Titan"]),
+            "Ａｔｔａｃｋ　ｏｎ　Ｔｉｔａｎ",
+        ),
+        ("Attack on Titan", json!([]), "Attack on Titan"),
+    ] {
+        let (_dir, bundle) = bundle_with(1, false, |catalog| {
+            catalog["anime"]["1"]["title"] = json!(canonical);
+            catalog["anime"]["1"]["aliases"] = aliases;
+            catalog["anime"]["10"]["title"] = json!("Koutetsujou no Kabaneri");
+            catalog["anime"]["10"]["aliases"] = json!(["Kabaneri of the Iron Fortress"]);
+        });
+        let ctx = context(bundle.clone(), Arc::new(FakeRepo::default()));
+        let api = FakeTelegram::new();
+        let mut sel = selection(&bundle, 1, 1);
+        sel.query.raw_query = "Attack on Titan".into();
+        recommendations::begin(&api.bot(), &ctx, ACTOR, &mut session(&sel), &sel)
+            .await
+            .unwrap();
+        let card = &sent_texts(&api)[0];
+        assert!(
+            card.contains(&format!(
+                "По запросу: {expected_seed}\nНазвание: Kabaneri of the Iron Fortress"
+            )),
+            "{card}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn long_matched_seed_and_neighbor_aliases_keep_independent_bounds() {
+    let seed_alias = format!("English {}", "A".repeat(240));
+    let neighbor_alias = format!("Target {}", "B".repeat(400));
+    let (_dir, bundle) = bundle_with(1, false, |catalog| {
+        catalog["anime"]["1"]["title"] = json!("Seed Romaji");
+        catalog["anime"]["1"]["aliases"] = json!([seed_alias]);
+        catalog["anime"]["10"]["aliases"] = json!([neighbor_alias]);
+    });
+    let ctx = context(bundle.clone(), Arc::new(FakeRepo::default()));
+    let api = FakeTelegram::new();
+    let mut sel = selection(&bundle, 1, 1);
+    sel.query.raw_query = seed_alias.clone();
+    recommendations::begin(&api.bot(), &ctx, ACTOR, &mut session(&sel), &sel)
+        .await
+        .unwrap();
+    let card = &sent_texts(&api)[0];
+    let shown_seed = card
+        .lines()
+        .find_map(|line| line.strip_prefix("По запросу: "))
+        .unwrap();
+    let shown_target = card
+        .lines()
+        .find_map(|line| line.strip_prefix("Название: "))
+        .unwrap();
+    assert!(shown_seed.encode_utf16().count() <= 160);
+    assert!(shown_target.encode_utf16().count() <= 240);
+    assert!(shown_seed.starts_with("English A") && shown_seed.ends_with('…'));
+    assert!(shown_target.starts_with("Target B") && shown_target.ends_with('…'));
+    assert_eq!(sel.query.raw_query, seed_alias);
+    assert!(card.encode_utf16().count() <= 4000);
+}
+
+#[tokio::test]
+async fn usefulness_retry_retains_english_target_title() {
+    let (_dir, bundle) = english_bundle();
+    let repo = Arc::new(FakeRepo::default());
+    let ctx = context(bundle.clone(), repo.clone());
+    let api = FakeTelegram::new();
+    let mut sel = selection(&bundle, 1, 1);
+    sel.query.raw_query = "Attack on Titan".into();
+    let mut session = session(&sel);
+    recommendations::begin(&api.bot(), &ctx, ACTOR, &mut session, &sel)
+        .await
+        .unwrap();
+    let row = repo.rows.lock().unwrap()[0].clone();
+    let token = score_token(&session, row.id, 4);
+    let key = session.claim(&token, row.message_id).unwrap().1;
+    repo.score_failure.store(2, Ordering::SeqCst);
+    let action = || recommendations::ScoreAction {
+        position: &row,
+        score: 4,
+        action_key: &key,
+    };
+    assert!(
+        recommendations::on_score(&api.bot(), &ctx, ACTOR, &mut session, &sel, action())
+            .await
+            .is_err()
+    );
+    session.finish(&token, false);
+    assert!(session.claim(&token, row.message_id).is_some());
+    recommendations::on_score(&api.bot(), &ctx, ACTOR, &mut session, &sel, action())
+        .await
+        .unwrap();
+    let confirmation = sent_texts(&api).last().unwrap().clone();
+    assert!(confirmation.contains("Kabaneri of the Iron Fortress"));
+    assert!(!confirmation.contains("Koutetsujou"));
+    assert_eq!(repo.scores.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn usefulness_confirmation_handles_missing_seed_or_target() {
+    let (_dir, bundle) = english_bundle();
+    let ctx = context(bundle.clone(), Arc::new(FakeRepo::default()));
+    for (seed_mal_id, target_mal_id, expected_title) in
+        [(1, 999, "Аниме"), (999, 10, "Koutetsujou no Kabaneri")]
+    {
+        let api = FakeTelegram::new();
+        let mut sel = selection(&bundle, 1, seed_mal_id);
+        sel.query.raw_query = "Attack on Titan".into();
+        let row = DeliveredPosition {
+            id: i64::from(target_mal_id),
+            request_id: 1,
+            rank: 1,
+            mal_id: target_mal_id,
+            chat_id: ACTOR.chat_id,
+            message_id: 101,
+        };
+        recommendations::on_score(
+            &api.bot(),
+            &ctx,
+            ACTOR,
+            &mut session(&sel),
+            &sel,
+            recommendations::ScoreAction {
+                position: &row,
+                score: 3,
+                action_key: "test",
+            },
+        )
+        .await
+        .unwrap();
+        assert!(sent_texts(&api)[0].contains(&format!("«{expected_title}»")));
+    }
 }
 
 #[tokio::test]
