@@ -18,11 +18,15 @@ use bot::{
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
+    io::{Read, Write},
+    net::TcpListener,
     path::Path,
     sync::{
         atomic::{AtomicBool, AtomicU8, Ordering},
         Arc, Mutex,
     },
+    thread,
+    time::Duration,
 };
 use support::{callback, dispatch, message, FakeTelegram};
 
@@ -35,6 +39,115 @@ impl bot::covers::CoverProvider for FixedCovers {
             ))
             .ok()
         })
+    }
+}
+
+struct SlowCovers;
+impl bot::covers::CoverProvider for SlowCovers {
+    fn lookup(&self, id: i32) -> bot::covers::CoverFuture<'_> {
+        Box::pin(async move {
+            tokio::time::sleep(Duration::from_millis(2200)).await;
+            reqwest::Url::parse(&format!("https://s4.anilist.co/{id}.jpg")).ok()
+        })
+    }
+}
+
+struct CoverFixture {
+    url: reqwest::Url,
+    ids: Arc<Mutex<Vec<i32>>>,
+    stop: Arc<AtomicBool>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl CoverFixture {
+    fn anilist() -> Self {
+        Self::new(true)
+    }
+    fn jikan_failure() -> Self {
+        Self::new(false)
+    }
+    fn new(anilist: bool) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!(
+            "http://{}/{}",
+            listener.local_addr().unwrap(),
+            if anilist { "graphql" } else { "v4/anime/" }
+        )
+        .parse()
+        .unwrap();
+        let ids = Arc::new(Mutex::new(Vec::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let recorded = ids.clone();
+        let stopping = stop.clone();
+        let thread = thread::spawn(move || {
+            while !stopping.load(Ordering::SeqCst) {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(stream) => stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(2));
+                        continue;
+                    }
+                    Err(error) => panic!("cover fixture accept: {error}"),
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let mut bytes = Vec::new();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    let n = stream.read(&mut chunk).unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    bytes.extend_from_slice(&chunk[..n]);
+                    if let Some(at) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                        let head = String::from_utf8_lossy(&bytes[..at]);
+                        let len = head
+                            .lines()
+                            .find_map(|line| {
+                                line.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .and_then(|s| s.trim().parse::<usize>().ok())
+                            })
+                            .unwrap_or(0);
+                        if bytes.len() >= at + 4 + len {
+                            break;
+                        }
+                    }
+                }
+                let body = String::from_utf8_lossy(&bytes)
+                    .split_once("\r\n\r\n")
+                    .map_or(String::new(), |(_, body)| body.to_owned());
+                let wire = if anilist {
+                    let posted: Value = serde_json::from_str(&body).unwrap();
+                    assert_eq!(posted["query"], "query ($id: Int!) { Media(idMal: $id, type: ANIME) { idMal coverImage { large } } }");
+                    let id = posted["variables"]["id"].as_i64().unwrap() as i32;
+                    recorded.lock().unwrap().push(id);
+                    let response = json!({"data":{"Media":{"idMal":id,"coverImage":{"large":format!("https://s4.anilist.co/{id}.jpg")}}}}).to_string();
+                    format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len())
+                } else {
+                    recorded.lock().unwrap().push(0);
+                    "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned()
+                };
+                let _ = stream.write_all(wire.as_bytes());
+            }
+        });
+        Self {
+            url,
+            ids,
+            stop,
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for CoverFixture {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(thread) = self.thread.take() {
+            thread.join().unwrap();
+        }
     }
 }
 
@@ -1577,6 +1690,121 @@ async fn five_covers_follow_the_five_durable_cards_in_order() {
             .filter(|(path, _)| path.ends_with("/SendMessage"))
             .count(),
         5
+    );
+}
+
+#[tokio::test]
+async fn real_fallback_covers_reply_to_five_durable_cards_once() {
+    let (_dir, bundle) = bundle(5, false);
+    let repo = Arc::new(FakeRepo::default());
+    let jikan = CoverFixture::jikan_failure();
+    let anilist = CoverFixture::anilist();
+    let covers =
+        bot::covers::RemoteCovers::with_loopback_endpoints(jikan.url.clone(), anilist.url.clone())
+            .unwrap();
+    let ctx = context(bundle.clone(), repo.clone()).with_covers(Arc::new(covers));
+    let api = FakeTelegram::new();
+    let sel = selection(&bundle, 1, 1);
+    let mut session = session(&sel);
+    recommendations::begin(&api.bot(), &ctx, ACTOR, &mut session, &sel)
+        .await
+        .unwrap();
+    let rows = repo.rows.lock().unwrap().clone();
+    let sent = api.decoded();
+    let photos: Vec<_> = sent
+        .iter()
+        .filter(|(path, _)| path.ends_with("/SendPhoto"))
+        .collect();
+    assert_eq!(rows.len(), 5);
+    assert_eq!(photos.len(), 5);
+    assert_eq!(jikan.ids.lock().unwrap().len(), 1);
+    assert_eq!(
+        *anilist.ids.lock().unwrap(),
+        rows.iter().map(|row| row.mal_id).collect::<Vec<_>>()
+    );
+    for (photo, row) in photos.iter().zip(&rows) {
+        assert!(photo.1["reply_parameters"].contains(&row.message_id.to_string()));
+        assert!(photo.1["photo"].contains(&format!("/{}.jpg", row.mal_id)));
+        assert_eq!(photo.1["disable_notification"], "true");
+        assert!(!photo.1.contains_key("caption"));
+    }
+    assert_eq!(
+        sent.iter()
+            .filter(|(path, _)| path.ends_with("/SendMessage"))
+            .count(),
+        5
+    );
+    recommendations::begin(&api.bot(), &ctx, ACTOR, &mut session, &sel)
+        .await
+        .unwrap();
+    assert_eq!(
+        api.decoded()
+            .iter()
+            .filter(|(path, _)| path.ends_with("/SendPhoto"))
+            .count(),
+        5
+    );
+    assert_eq!(repo.rows.lock().unwrap().len(), 5);
+}
+
+#[tokio::test]
+async fn slow_cover_lookup_can_still_send_a_photo_after_two_seconds() {
+    let (_dir, bundle) = bundle(1, false);
+    let repo = Arc::new(FakeRepo::default());
+    let ctx = context(bundle.clone(), repo.clone()).with_covers(Arc::new(SlowCovers));
+    let api = FakeTelegram::new();
+    let sel = selection(&bundle, 1, 1);
+    let mut session = session(&sel);
+    recommendations::begin(&api.bot(), &ctx, ACTOR, &mut session, &sel)
+        .await
+        .unwrap();
+    let sent = api.decoded();
+    assert_eq!(
+        sent.iter()
+            .filter(|(path, _)| path.ends_with("/SendPhoto"))
+            .count(),
+        1
+    );
+    assert_eq!(repo.rows.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn photo_timeout_is_bounded_and_skips_remaining_photos() {
+    let (_dir, bundle) = bundle(2, false);
+    let repo = Arc::new(FakeRepo::default());
+    let ctx = context(bundle.clone(), repo.clone()).with_covers(Arc::new(FixedCovers));
+    let api = FakeTelegram::new();
+    api.photo_delay_ms.store(5200, Ordering::SeqCst);
+    let sel = selection(&bundle, 1, 1);
+    let mut session = session(&sel);
+    let started = std::time::Instant::now();
+    recommendations::begin(&api.bot(), &ctx, ACTOR, &mut session, &sel)
+        .await
+        .unwrap();
+    assert!(started.elapsed() < Duration::from_secs(10));
+    let sent = api.decoded();
+    assert_eq!(
+        sent.iter()
+            .filter(|(path, _)| path.ends_with("/SendPhoto"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        sent.iter()
+            .filter(|(path, _)| path.ends_with("/SendMessage"))
+            .count(),
+        2
+    );
+    assert_eq!(repo.rows.lock().unwrap().len(), 2);
+    recommendations::begin(&api.bot(), &ctx, ACTOR, &mut session, &sel)
+        .await
+        .unwrap();
+    assert_eq!(
+        api.decoded()
+            .iter()
+            .filter(|(path, _)| path.ends_with("/SendPhoto"))
+            .count(),
+        1
     );
 }
 

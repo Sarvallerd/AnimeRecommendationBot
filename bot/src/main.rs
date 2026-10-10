@@ -1,7 +1,7 @@
 mod config;
 use bot::{
     catalog::Bundle,
-    covers::{CoverProvider, JikanCovers, NoCovers},
+    covers::{CoverProvider, NoCovers, RemoteCovers},
     db::Db,
     dialogue::{context::AppContext, storage::SessionStore},
     handlers,
@@ -54,7 +54,7 @@ async fn run() -> Result<(), String> {
     }
     let bot = Bot::new(config.token());
     let covers: Arc<dyn CoverProvider> = if config.covers_enabled() {
-        match JikanCovers::new() {
+        match RemoteCovers::new() {
             Ok(covers) => Arc::new(covers),
             Err(_) => {
                 log::warn!("Cover provider unavailable; showing text cards");
