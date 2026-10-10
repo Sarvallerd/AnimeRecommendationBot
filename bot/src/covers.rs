@@ -98,7 +98,7 @@ impl RemoteCovers {
                 jikan,
                 1024,
                 jikan_interval,
-                Duration::from_millis(1500),
+                Duration::from_millis(1200),
                 Duration::from_millis(1400),
             )?,
             anilist: UpstreamCovers::build_with(
@@ -161,7 +161,7 @@ impl UpstreamCovers {
             base,
             capacity,
             interval,
-            Duration::from_millis(1500),
+            Duration::from_millis(1200),
             Duration::from_millis(1400),
         )
     }
@@ -301,12 +301,6 @@ impl UpstreamCovers {
                 parsed.pointer("/data/images/jpg/image_url")
             }
             Provider::AniList => {
-                if let Some(errors) = parsed.get("errors") {
-                    let errors = errors.as_array().ok_or("malformed_errors")?;
-                    if !errors.is_empty() {
-                        return Err("graphql_errors");
-                    }
-                }
                 let data = parsed
                     .get("data")
                     .and_then(serde_json::Value::as_object)
@@ -336,25 +330,18 @@ impl UpstreamCovers {
             .ok_or("invalid_image_url")
     }
 
-    async fn lookup_inner(
-        &self,
-        id: MalId,
-        next: &mut Instant,
-        started_request: &mut bool,
-    ) -> Option<Url> {
+    async fn wait_slot(&self, id: MalId, next: Instant) -> Option<Option<Url>> {
         if let Some(hit) = self.cached(id).await {
-            return hit;
+            return Some(hit);
         }
         let now = Instant::now();
-        if *next > now {
-            tokio::time::sleep(*next - now).await;
+        if next > now {
+            tokio::time::sleep(next - now).await;
         }
-        if let Some(hit) = self.cached(id).await {
-            return hit;
-        }
-        *next = Instant::now() + self.interval;
-        // The caller keeps the gate until the response is cached or a cooldown
-        // is set, including when the total lookup deadline expires.
+        self.cached(id).await
+    }
+
+    async fn lookup_http(&self, id: MalId) -> Option<Url> {
         let request = match self.provider {
             Provider::Jikan => self.client.get(self.base.join(&id.to_string()).ok()?),
             Provider::AniList => self.client.post(self.base.clone()).json(&serde_json::json!({
@@ -363,7 +350,6 @@ impl UpstreamCovers {
             })),
         };
         let started = Instant::now();
-        *started_request = true;
         let response = match request.send().await {
             Ok(response) => response,
             Err(_) => {
@@ -445,6 +431,27 @@ impl UpstreamCovers {
                 return None;
             }
         };
+        if self.provider == Provider::AniList {
+            match graphql_error(&parsed) {
+                Some(GraphqlError::RateLimited) => {
+                    self.warn("graphql", "rate_limited", Some(429), started.elapsed());
+                    self.cooldown(rate_limit_duration(response.headers(), self.provider))
+                        .await;
+                    return None;
+                }
+                Some(GraphqlError::Missing) => {
+                    self.debug("graphql", "not_found");
+                    self.store(id, None, Duration::from_secs(600)).await;
+                    return None;
+                }
+                Some(GraphqlError::Transient) => {
+                    self.warn("graphql", "errors", None, started.elapsed());
+                    self.cooldown(Duration::from_secs(30)).await;
+                    return None;
+                }
+                None => {}
+            }
+        }
         let value = match self.parse_cover(id, &parsed) {
             Ok(value) => value,
             Err(reason) => {
@@ -491,26 +498,53 @@ impl CoverProvider for UpstreamCovers {
                 // caching its response or establishing a cooldown.
                 Err(_) => return None,
             };
-            let mut started_request = false;
-            match tokio::time::timeout_at(
-                deadline,
-                self.lookup_inner(mal_id, &mut gate, &mut started_request),
-            )
-            .await
-            {
-                Ok(value) => value,
+            match tokio::time::timeout_at(deadline, self.wait_slot(mal_id, *gate)).await {
+                Ok(Some(hit)) => return hit,
+                Ok(None) => {}
                 Err(_) => {
-                    if started_request {
-                        // Publish cleanup before releasing the gate after a real request.
-                        self.warn("http", "deadline", None, self.slot_timeout);
-                        self.cooldown(Duration::from_secs(30)).await;
-                    } else {
-                        self.debug("gate", "slot_timeout");
-                    }
-                    None
+                    self.debug("gate", "slot_timeout");
+                    return None;
                 }
             }
+            *gate = Instant::now() + self.interval;
+            // Reqwest's full request timeout starts here, after the waiting slot.
+            // Keep the gate until the response is cached or cooldown is visible.
+            self.lookup_http(mal_id).await
         })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GraphqlError {
+    RateLimited,
+    Missing,
+    Transient,
+}
+
+fn graphql_error(parsed: &serde_json::Value) -> Option<GraphqlError> {
+    let errors = parsed.get("errors")?;
+    let Some(errors) = errors.as_array() else {
+        return Some(GraphqlError::Transient);
+    };
+    if errors.is_empty() {
+        return None;
+    }
+    let statuses: Vec<_> = errors
+        .iter()
+        .map(|error| {
+            error.get("status").and_then(|status| {
+                status
+                    .as_u64()
+                    .or_else(|| status.as_str().and_then(|value| value.parse().ok()))
+            })
+        })
+        .collect();
+    if statuses.contains(&Some(429)) {
+        Some(GraphqlError::RateLimited)
+    } else if statuses.iter().all(|status| *status == Some(404)) {
+        Some(GraphqlError::Missing)
+    } else {
+        Some(GraphqlError::Transient)
     }
 }
 
@@ -853,6 +887,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn graphql_error_statuses_override_partial_data() {
+        let partial = r#""data":{"Media":{"idMal":10,"coverImage":{"large":"https://s4.anilist.co/10.jpg"}}}"#;
+        for (errors, expected_cooldown, expected_negative) in [
+            (r#"[{"status":429},{"status":404}]"#, 100, false),
+            (r#"[{"status":404}]"#, 0, true),
+            (r#"[{"status":404},{"status":500}]"#, 20, false),
+        ] {
+            let body = format!("{{{partial},\"errors\":{errors}}}");
+            let anilist = FixtureServer::new(move |_| FixtureReply {
+                headers: "Retry-After: 120\r\n".to_owned(),
+                ..FixtureReply::json(body.clone())
+            });
+            let upstream = UpstreamCovers::build_with(
+                Provider::AniList,
+                anilist.url.join("graphql").unwrap(),
+                2,
+                Duration::ZERO,
+                Duration::from_millis(2300),
+                Duration::from_millis(2000),
+            )
+            .unwrap();
+            assert_eq!(upstream.lookup(10).await, None);
+            let state = upstream.state.lock().await;
+            assert_eq!(state.entries.contains_key(&10), expected_negative);
+            if expected_cooldown == 0 {
+                assert!(state.cooldown_until.is_none());
+            } else {
+                assert!(
+                    state.cooldown_until.unwrap().duration_since(Instant::now())
+                        >= Duration::from_secs(expected_cooldown)
+                );
+            }
+            drop(state);
+            assert_eq!(upstream.lookup(10).await, None);
+            assert_eq!(anilist.calls().len(), 1);
+        }
+    }
+
+    #[tokio::test]
     async fn upstream_cooldowns_are_independent_and_both_fail_cleanly() {
         let jikan = FixtureServer::new(|_| FixtureReply::status("500 Internal Server Error"));
         let anilist = FixtureServer::new(|request| {
@@ -1025,6 +1098,27 @@ mod tests {
         assert!(upstream.state.lock().await.cooldown_until.is_none());
     }
 
+    #[tokio::test]
+    async fn nearly_used_wait_slot_still_gets_full_http_budget() {
+        let anilist = FixtureServer::new(|_| FixtureReply {
+            delay: Duration::from_millis(1000),
+            ..anilist_fixture(10)
+        });
+        let upstream = UpstreamCovers::build_with(
+            Provider::AniList,
+            anilist.url.join("graphql").unwrap(),
+            2,
+            Duration::ZERO,
+            Duration::from_millis(2300),
+            Duration::from_millis(2000),
+        )
+        .unwrap();
+        *upstream.next_start.lock().await = Instant::now() + Duration::from_millis(1700);
+        assert!(upstream.lookup(10).await.is_some());
+        assert_eq!(anilist.calls().len(), 1);
+        assert!(upstream.state.lock().await.cooldown_until.is_none());
+    }
+
     fn serve_once(
         status: &str,
         body: Vec<u8>,
@@ -1179,7 +1273,7 @@ mod tests {
                         let _ = stream.read(&mut request);
                         let number = seen.fetch_add(1, Ordering::SeqCst) + 1;
                         if number == 1 {
-                            thread::sleep(Duration::from_millis(1300));
+                            thread::sleep(Duration::from_millis(1600));
                         }
                         let body = br#"{"data":{"mal_id":10,"images":{"jpg":{"image_url":"https://cdn.myanimelist.net/10.jpg"}}}}"#;
                         let response = format!(
@@ -1200,8 +1294,8 @@ mod tests {
         *covers.next_start.lock().await = Instant::now() + Duration::from_millis(300);
         let first_covers = covers.clone();
         let first = tokio::spawn(async move { first_covers.lookup(10).await });
-        tokio::time::sleep(Duration::from_millis(1350)).await;
-        // Delay cooldown publication across the 1500 ms deadline. The first
+        tokio::time::sleep(Duration::from_millis(1650)).await;
+        // Delay cooldown publication across the independent HTTP deadline. The first
         // lookup must still own the pacing gate while waiting for this lock.
         let state = covers.state.lock().await;
         tokio::time::sleep(Duration::from_millis(220)).await;
