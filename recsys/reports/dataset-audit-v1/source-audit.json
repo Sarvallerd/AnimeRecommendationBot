@@ -1,0 +1,2173 @@
+{
+  "audit_date": "2026-10-10",
+  "audit_version": "dataset-audit-v1",
+  "candidates": [
+    {
+      "artifacts": [
+        {
+          "archive_member": null,
+          "id": "neelagiri_details_csv",
+          "inspection_status": "full",
+          "observed_bytes": 20178926,
+          "observed_sha256": "023b36604b475c07f0952caa1954168ba86d5ebd94b65458c4de522f78e6d1ee",
+          "role": "metadata",
+          "stable_url": "https://www.kaggle.com/api/v1/datasets/download/neelagiriaditya/anime-dataset-jan-1917-to-oct-2025/datasets%2Fdetails.csv?datasetVersionNumber=1",
+          "version": "1"
+        },
+        {
+          "archive_member": null,
+          "id": "neelagiri_ratings_csv",
+          "inspection_status": "full",
+          "observed_bytes": 4504586658,
+          "observed_sha256": "b93f8f1a540510a8640243ec6bba771212ae33e1fba50f257621f9d1077439e1",
+          "role": "ratings",
+          "stable_url": "https://www.kaggle.com/api/v1/datasets/download/neelagiriaditya/anime-dataset-jan-1917-to-oct-2025/datasets%2Fratings.csv?datasetVersionNumber=1",
+          "version": "1"
+        },
+        {
+          "archive_member": "glove.6B.300d.txt",
+          "id": "current_glove_300d",
+          "inspection_status": "full",
+          "observed_bytes": 1037962819,
+          "observed_sha256": "91125602f730fea7ca768736c6f442e668b49db095682bf2aad375db061c21ed",
+          "role": "current_ranker_diagnostic",
+          "stable_url": "https://nlp.stanford.edu/data/glove.6B.zip",
+          "version": "pinned-current-registry"
+        }
+      ],
+      "candidate_decision": "eligible",
+      "content": {
+        "english_synopsis_count": null,
+        "field_projection": "title; title_japanese as alias; parsed genre-string list; synopsis",
+        "glove_artifact_id": "current_glove_300d",
+        "glove_audit_status": "full_pinned_current_glove_verified",
+        "items_with_matched_tokens": 28855,
+        "items_with_nonzero_vectors": 28855,
+        "matched_token_occurrence_count": 1619303,
+        "matched_vocabulary_token_count": 37758,
+        "metadata_field_coverage": {
+          "explicit_english_title_column_present": false,
+          "explicit_synonyms_column_present": false,
+          "genres_actual_nonempty_list": 22972,
+          "image_url_nonempty": 28955,
+          "start_date_nonempty": 28104,
+          "synopsis_nonempty": 23828,
+          "title_japanese_nonempty": 28836,
+          "title_nonempty": 28955
+        },
+        "synopsis_ascii_letters_proxy_count": 23828,
+        "synopsis_boilerplate_count": null,
+        "synopsis_language_method": "ASCII-letter and pinned GloVe token coverage proxy; no validated language classifier; 4,057 synopses include MAL Rewrite credit text",
+        "synopsis_nonempty_count": 23828,
+        "synopsis_only_items_with_matched_tokens": 23828,
+        "token_occurrence_count": 1710441,
+        "tokenizer": "[a-z]+(?:'[a-z]+)?",
+        "unknown_synopsis_language_count": 23828,
+        "vocabulary_token_count": 67275
+      },
+      "counts": {
+        "accepted_distinct_user_mal_pairs": 69459966,
+        "accepted_positive_users_ge_15": 241412,
+        "accepted_rated_2024_plus": 1871,
+        "accepted_rated_2025_plus": 740,
+        "accepted_rated_mal_ids": 28514,
+        "accepted_rated_users": 286866,
+        "completed_only_pairs": 65372644,
+        "completed_only_users": 278656,
+        "completed_only_users_ge_15_positive": 238279,
+        "conflicting_rating_pairs": 0,
+        "distinct_valid_rated_source_pairs": 69606111,
+        "exact_duplicate_rows_removed": 3,
+        "invalid_rows": 7,
+        "metadata_distinct_mal_ids": 28955,
+        "metadata_rows": 28955,
+        "missing_or_zero_rating_rows": 54692236,
+        "mixed_rated_unrated_pair_conflicts": 1,
+        "quarantined_mixed_pair_count": 1,
+        "rated_2025_not_yet_aired_ids": 98,
+        "rated_2026_not_yet_aired_ids": 6,
+        "raw_explicit_score_rows_including_invalid_user": 69606121,
+        "raw_interaction_rows": 124298357,
+        "unambiguously_joined_source_pairs": 69459967,
+        "valid_rated_rows": 69606114
+      },
+      "distributions": {
+        "accepted_status_histogram": {
+          "completed": 65372644,
+          "dropped": 1953948,
+          "on_hold": 729637,
+          "plan_to_watch": 212065,
+          "unknown": 689,
+          "watching": 1190983
+        },
+        "bin_definition": "five-item bins: 0–4,5–9,...,95–99,100+",
+        "first_release_year_histogram": {
+          "1917": 17,
+          "1918": 9,
+          "1922": 1,
+          "1923": 1,
+          "1924": 5,
+          "1925": 9,
+          "1926": 7,
+          "1927": 5,
+          "1928": 9,
+          "1929": 7,
+          "1930": 8,
+          "1931": 22,
+          "1932": 12,
+          "1933": 16,
+          "1934": 15,
+          "1935": 20,
+          "1936": 12,
+          "1937": 2,
+          "1938": 3,
+          "1939": 4,
+          "1940": 4,
+          "1941": 5,
+          "1942": 6,
+          "1943": 4,
+          "1944": 1,
+          "1945": 1,
+          "1946": 3,
+          "1947": 4,
+          "1948": 6,
+          "1949": 4,
+          "1950": 4,
+          "1951": 3,
+          "1952": 4,
+          "1953": 4,
+          "1954": 7,
+          "1955": 8,
+          "1956": 14,
+          "1957": 8,
+          "1958": 27,
+          "1959": 25,
+          "1960": 23,
+          "1961": 30,
+          "1962": 31,
+          "1963": 38,
+          "1964": 46,
+          "1965": 44,
+          "1966": 40,
+          "1967": 42,
+          "1968": 50,
+          "1969": 50,
+          "1970": 50,
+          "1971": 51,
+          "1972": 50,
+          "1973": 42,
+          "1974": 53,
+          "1975": 54,
+          "1976": 60,
+          "1977": 63,
+          "1978": 78,
+          "1979": 95,
+          "1980": 107,
+          "1981": 119,
+          "1982": 126,
+          "1983": 130,
+          "1984": 141,
+          "1985": 158,
+          "1986": 162,
+          "1987": 200,
+          "1988": 205,
+          "1989": 233,
+          "1990": 238,
+          "1991": 236,
+          "1992": 253,
+          "1993": 230,
+          "1994": 227,
+          "1995": 229,
+          "1996": 239,
+          "1997": 247,
+          "1998": 283,
+          "1999": 307,
+          "2000": 293,
+          "2001": 420,
+          "2002": 407,
+          "2003": 427,
+          "2004": 436,
+          "2005": 500,
+          "2006": 557,
+          "2007": 575,
+          "2008": 604,
+          "2009": 709,
+          "2010": 776,
+          "2011": 919,
+          "2012": 977,
+          "2013": 978,
+          "2014": 1088,
+          "2015": 1097,
+          "2016": 1232,
+          "2017": 1256,
+          "2018": 1216,
+          "2019": 1225,
+          "2020": 1180,
+          "2021": 1244,
+          "2022": 1236,
+          "2023": 1203,
+          "2024": 1131,
+          "2025": 838,
+          "2026": 6,
+          "missing": 598
+        },
+        "normalized_score_histogram": {
+          "1.0": 683819,
+          "10.0": 7278742,
+          "2.0": 718144,
+          "3.0": 1201677,
+          "4.0": 2301222,
+          "5.0": 4817429,
+          "6.0": 8896421,
+          "7.0": 16264928,
+          "8.0": 16980598,
+          "9.0": 10316986
+        },
+        "positive_items_per_user_bins": {
+          "0": 23388,
+          "10": 9813,
+          "100": 117894,
+          "15": 9088,
+          "20": 8684,
+          "25": 8613,
+          "30": 8289,
+          "35": 8193,
+          "40": 7918,
+          "45": 7928,
+          "5": 12253,
+          "50": 7549,
+          "55": 7396,
+          "60": 7193,
+          "65": 6839,
+          "70": 6472,
+          "75": 6499,
+          "80": 6235,
+          "85": 5757,
+          "90": 5618,
+          "95": 5247
+        },
+        "rated_items_per_user_bins": {
+          "0": 19257,
+          "10": 7336,
+          "100": 174619,
+          "15": 6091,
+          "20": 5498,
+          "25": 5383,
+          "30": 4893,
+          "35": 4735,
+          "40": 4580,
+          "45": 4411,
+          "5": 10021,
+          "50": 4366,
+          "55": 4353,
+          "60": 4174,
+          "65": 4191,
+          "70": 4059,
+          "75": 3995,
+          "80": 3791,
+          "85": 3845,
+          "90": 3746,
+          "95": 3522
+        },
+        "status_histogram": {
+          "completed": 79138385,
+          "dropped": 4580651,
+          "on_hold": 3253152,
+          "plan_to_watch": 31631312,
+          "unknown": 16690,
+          "watching": 5678167
+        }
+      },
+      "enrichment": {
+        "mapping_key": "MAL_ID",
+        "missing_fields": [
+          "synopsis for 5,127 metadata titles",
+          "explicit English title and synonym columns",
+          "release dates for some titles"
+        ],
+        "needed": true,
+        "proposed_snapshot": "Kaggle version 1 published 2026-06-03",
+        "proposed_source": {
+          "ambiguous_overlap_ids_quarantined": 26,
+          "artifact_id": "nafiul_anime_csv",
+          "fields": [
+            "title_english",
+            "title_synonyms"
+          ],
+          "id": "nafiul-2026-v1",
+          "observed_english_title_nonempty_on_unique_overlap": 12689,
+          "observed_synonym_field_nonempty_unparsed_on_unique_overlap": 14199,
+          "observed_unique_mal_overlap": 28558,
+          "role": "screened alias enrichment candidate only"
+        },
+        "unresolved_requirements": [
+          "DATA02 must freeze source inputs and decide whether to add fresh pinned synopsis enrichment or accept documented fallback",
+          "Nafiul synonyms are free text, not verified parsed arrays; audit encoding/content and quarantine duplicate IDs before any alias import",
+          "DATA03 must normalize current catalog contract, preserve familiar search aliases, and measure missing-field impact",
+          "Resolve intended-use and MAL-origin data rights before production distribution"
+        ],
+        "verified_artifact_ids": [
+          "nafiul_anime_csv"
+        ]
+      },
+      "gates": [
+        {
+          "denominator": null,
+          "evidence_refs": [
+            "neelagiri_details_csv",
+            "neelagiri_ratings_csv",
+            "current_glove_300d"
+          ],
+          "id": "full_input_integrity",
+          "numerator": null,
+          "observed": true,
+          "reason": "Both source CSVs and current GloVe diagnostic input fully hashed.",
+          "status": "PASS",
+          "threshold": "verified"
+        },
+        {
+          "denominator": null,
+          "evidence_refs": [
+            "neelagiri_details_csv",
+            "neelagiri_ratings_csv"
+          ],
+          "id": "fresh_2025_or_2026_evidence",
+          "numerator": null,
+          "observed": "bounded_2025_inference",
+          "reason": "Dataset identifies catalog period through October 2025; 740 accepted rated aired/airing titles have first release in 2025 by Oct31. This supports a 2025 snapshot inference, not an exact crawl date.",
+          "status": "PASS",
+          "threshold": "2025_or_2026"
+        },
+        {
+          "denominator": null,
+          "evidence_refs": [
+            "neelagiri_ratings_csv"
+          ],
+          "id": "known_user_namespace",
+          "numerator": null,
+          "observed": "MAL_username",
+          "reason": "Single MAL username namespace; no case-fold collisions observed.",
+          "status": "PASS",
+          "threshold": "verified"
+        },
+        {
+          "denominator": null,
+          "evidence_refs": [
+            "neelagiri_ratings_csv"
+          ],
+          "id": "known_explicit_scale",
+          "numerator": null,
+          "observed": "integer_1_to_10",
+          "reason": "Actual score values are integer0–10; 0 unset/unrated; statuses separate.",
+          "status": "PASS",
+          "threshold": "verified"
+        },
+        {
+          "denominator": null,
+          "evidence_refs": [
+            "neelagiri_details_csv"
+          ],
+          "id": "mal_mapping",
+          "numerator": null,
+          "observed": "unique_mal_id",
+          "reason": "Metadata has 28,955 unique MAL_IDs; missing item pairs quarantined.",
+          "status": "PASS",
+          "threshold": "verified"
+        },
+        {
+          "denominator": null,
+          "evidence_refs": [
+            "neelagiri_ratings_csv"
+          ],
+          "id": "rated_users_10000",
+          "numerator": null,
+          "observed": 286866,
+          "reason": "Accepted explicit-rating users.",
+          "status": "PASS",
+          "threshold": 10000
+        },
+        {
+          "denominator": null,
+          "evidence_refs": [
+            "neelagiri_ratings_csv"
+          ],
+          "id": "users_15_positive_5000",
+          "numerator": null,
+          "observed": 241412,
+          "reason": "At least 15 distinct accepted MAL titles scored>=8.",
+          "status": "PASS",
+          "threshold": 5000
+        },
+        {
+          "denominator": null,
+          "evidence_refs": [
+            "neelagiri_details_csv",
+            "neelagiri_ratings_csv"
+          ],
+          "id": "rated_mal_items_5000",
+          "numerator": null,
+          "observed": 28514,
+          "reason": "Distinct accepted rated MAL_IDs.",
+          "status": "PASS",
+          "threshold": 5000
+        },
+        {
+          "denominator": null,
+          "evidence_refs": [
+            "neelagiri_details_csv"
+          ],
+          "id": "rated_released_2024_plus_100",
+          "numerator": null,
+          "observed": 1871,
+          "reason": "First release 2024–2025-10-31, status aired/airing; future/not-yet-aired excluded.",
+          "status": "PASS",
+          "threshold": 100
+        },
+        {
+          "denominator": null,
+          "evidence_refs": [
+            "neelagiri_details_csv"
+          ],
+          "id": "rated_released_2025_plus_20",
+          "numerator": null,
+          "observed": 740,
+          "reason": "First release 2025 by Oct31, status aired/airing; 98 scored not-yet-aired 2025 entries excluded.",
+          "status": "PASS",
+          "threshold": 20
+        },
+        {
+          "denominator": 69606111,
+          "evidence_refs": [
+            "neelagiri_details_csv",
+            "neelagiri_ratings_csv"
+          ],
+          "id": "raw_distinct_pair_join_99pct",
+          "numerator": 69459967,
+          "observed": {
+            "denominator": 69606111,
+            "numerator": 69459967,
+            "ratio": 0.9979004142323078
+          },
+          "reason": "69,459,967 / 69,606,111 = 99.7900%; denominator retains the one mixed zero/explicit pair before quarantine.",
+          "status": "PASS",
+          "threshold": 0.99
+        },
+        {
+          "denominator": 69459966,
+          "evidence_refs": [
+            "neelagiri_details_csv"
+          ],
+          "id": "accepted_pair_join_100pct",
+          "numerator": 69459966,
+          "observed": {
+            "denominator": 69459966,
+            "numerator": 69459966,
+            "ratio": 1.0
+          },
+          "reason": "Every accepted pair maps to one unique MAL_ID.",
+          "status": "PASS",
+          "threshold": 1.0
+        }
+      ],
+      "id": "neelagiri-2025-v1",
+      "inspection": {
+        "coverage": "full_consumed_files",
+        "fully_scanned_artifact_ids": [
+          "neelagiri_details_csv",
+          "neelagiri_ratings_csv",
+          "current_glove_300d"
+        ],
+        "item_namespace": "mal_id / anime_id; 28,955 unique metadata MAL_IDs",
+        "missing_semantics": "No null score rows; 7 rows lack username and are excluded",
+        "rating_scale": "Observed integer 0–10; direct MAL-style score field, with 0 treated as unset and 1–10 explicit",
+        "schema": [
+          {
+            "artifact_id": "neelagiri_details_csv",
+            "consumed_field_mapping": {
+              "genres": "list of genre strings",
+              "mal_id": "canonical MAL_ID",
+              "start_date": "first-release candidate",
+              "status": "anime release status",
+              "synopsis": "synopsis",
+              "title": "title",
+              "title_japanese": "alias"
+            },
+            "fields": [
+              "mal_id",
+              "title",
+              "title_japanese",
+              "url",
+              "image_url",
+              "type",
+              "status",
+              "score",
+              "scored_by",
+              "start_date",
+              "end_date",
+              "synopsis",
+              "rank",
+              "popularity",
+              "members",
+              "favorites",
+              "genres",
+              "studios",
+              "themes",
+              "demographics",
+              "source",
+              "rating",
+              "episodes",
+              "season",
+              "year",
+              "producers",
+              "explicit_genres",
+              "licensors",
+              "streaming"
+            ]
+          },
+          {
+            "artifact_id": "neelagiri_ratings_csv",
+            "consumed_field_mapping": {
+              "anime_id": "MAL_ID",
+              "score": "explicit rating when 1–10",
+              "status": "watch status",
+              "username": "MAL source profile"
+            },
+            "fields": [
+              "username",
+              "anime_id",
+              "status",
+              "score",
+              "is_rewatching",
+              "num_watched_episodes"
+            ]
+          }
+        ],
+        "status_semantics": "All watch statuses retained; completed-only diagnostic computed separately",
+        "timestamp_semantics": "No interaction event timestamps or reliable rating chronology",
+        "user_namespace": "Single MAL username namespace; lowercasing leaves same 309,313 distinct source users",
+        "zero_semantics": "54,692,236 score=0 rows excluded from positive/rated pairs; zero occurs in all watch statuses"
+      },
+      "license": {
+        "data_or_code_scope": "Kaggle dataset listing declares CC BY-NC-SA 4.0; underlying MAL metadata/user-history rights remain to be checked for intended use.",
+        "declared_label": "CC BY-NC-SA 4.0",
+        "evidence_urls": [
+          "https://www.kaggle.com/datasets/neelagiriaditya/anime-dataset-jan-1917-to-oct-2025"
+        ],
+        "known_restrictions": [
+          "NonCommercial",
+          "Attribution",
+          "ShareAlike"
+        ],
+        "unresolved_questions": [
+          "Intended commercial or monetized production use",
+          "Underlying MAL content redistribution and user-history rights"
+        ]
+      },
+      "limitations": [
+        "Source version published November 2025; exact rating crawl dates and event times are unknown, so no chronological recommendation evaluation is justified.",
+        "Metadata contains 98 rated 2025 and 6 rated 2026 titles marked not yet aired; excluded from fresh-title gates.",
+        "146,144 valid source pairs lack metadata and are excluded; one zero/explicit mixed pair is additionally quarantined.",
+        "5,127 metadata titles lack synopsis; current text baseline has title/genre fallback, but final normalization/quality check remains DATA03.",
+        "No explicit English/synonym fields; familiar search aliases need a separately audited and frozen enrichment source or coverage decision. Nafiul version 1 has screened field presence but synonym quality is unverified.",
+        "CC BY-NC-SA 4.0 restricts commercial use and may impose attribution/share-alike; underlying MAL-derived content rights require review for intended production scope."
+      ],
+      "mapping": {
+        "accepted_join": {
+          "denominator": 69459966,
+          "numerator": 69459966,
+          "ratio": 1.0
+        },
+        "ambiguous_pairs": 0,
+        "cross_platform_collisions": 0,
+        "distinct_item_join": {
+          "denominator": 28757,
+          "numerator": 28514,
+          "ratio": 0.9915498835066244
+        },
+        "distinct_pair_join": {
+          "denominator": 69606111,
+          "numerator": 69459967,
+          "ratio": 0.9979004142323078
+        },
+        "missing_metadata_pairs": 146144,
+        "raw_pair_denominator_includes_mixed_state_pair": true,
+        "resolution_policy": "Use only unique MAL_ID metadata rows; quarantine 146,144 missing-metadata explicit pairs and one pair with both score 0 and explicit score. Do not infer recency from row order.",
+        "row_weighted_join": {
+          "denominator": 69606114,
+          "numerator": 69459970,
+          "ratio": 0.9979004143227993
+        },
+        "unmapped_pairs": 146144
+      },
+      "source": {
+        "bounded_snapshot_inference": "2025, supported by 740 explicitly rated MAL titles released by 2025-10-31 and the source 2025 catalog period; exact crawl day unknown",
+        "claimed_catalog_coverage_end": "2025-10",
+        "claimed_catalog_coverage_start": "1917-01",
+        "claimed_collection_end": null,
+        "claimed_collection_start": null,
+        "collection_evidence_urls": [
+          "https://www.kaggle.com/datasets/neelagiriaditya/anime-dataset-jan-1917-to-oct-2025"
+        ],
+        "commit": null,
+        "page_url": "https://www.kaggle.com/datasets/neelagiriaditya/anime-dataset-jan-1917-to-oct-2025",
+        "published_at": "2025-11-05T06:36:05.95Z",
+        "updated_at": "2025-11-05T06:36:05.95Z",
+        "version": "1"
+      }
+    },
+    {
+      "artifacts": [
+        {
+          "archive_member": null,
+          "id": "ramazan_animes_csv",
+          "inspection_status": "full",
+          "observed_bytes": 10816239,
+          "observed_sha256": "5bec78930e6e7633156046338947954c7e619d9615116bec13d9fc4e04221175",
+          "role": "metadata",
+          "stable_url": "https://www.kaggle.com/api/v1/datasets/download/ramazanturann/user-animelist-dataset/animes.csv?datasetVersionNumber=8",
+          "version": "8"
+        },
+        {
+          "archive_member": null,
+          "id": "ramazan_ratings_csv",
+          "inspection_status": "full",
+          "observed_bytes": 2254824347,
+          "observed_sha256": "2ee00f83262cd4cdb2d4a0f1661545307ccc956b01314df0d5e5232433339e68",
+          "role": "ratings",
+          "stable_url": "https://www.kaggle.com/api/v1/datasets/download/ramazanturann/user-animelist-dataset/ratings.csv?datasetVersionNumber=8",
+          "version": "8"
+        }
+      ],
+      "candidate_decision": "insufficient_evidence",
+      "content": {
+        "english_synopsis_count": null,
+        "glove_artifact_id": null,
+        "glove_audit_status": "not_run_semantic_gates_unknown",
+        "items_with_matched_tokens": null,
+        "items_with_nonzero_vectors": null,
+        "matched_token_occurrence_count": null,
+        "matched_vocabulary_token_count": null,
+        "metadata_field_coverage": {
+          "alternative_title_nonempty": 8676,
+          "genres_nonempty_csv": 20237,
+          "synopsis_column_present": false,
+          "title_nonempty": 20237
+        },
+        "synopsis_boilerplate_count": null,
+        "synopsis_language_method": "No synopsis field; title/genre English proxy not evaluated after semantic provenance gates remained unknown",
+        "synopsis_nonempty_count": 0,
+        "synopsis_only_items_with_matched_tokens": null,
+        "token_occurrence_count": null,
+        "tokenizer": "[a-z]+(?:'[a-z]+)?",
+        "unknown_synopsis_language_count": null,
+        "vocabulary_token_count": null
+      },
+      "counts": {
+        "accepted_distinct_user_mal_pairs": null,
+        "accepted_positive_users_ge_15": null,
+        "accepted_rated_2024_plus": null,
+        "accepted_rated_2025_plus": null,
+        "accepted_rated_mal_ids": null,
+        "accepted_rated_users": null,
+        "all_conflict_groups": 57478,
+        "all_extra_rows_vs_distinct_pairs": 3390648,
+        "conflict_group_rows_excluded": 130189,
+        "conflicting_rating_pairs": 57157,
+        "distinct_valid_rated_source_pairs": 144679503,
+        "exact_duplicate_rows_removed": 3312526,
+        "invalid_rows": 0,
+        "mechanical_users": 1774490,
+        "mechanical_users_ge_15_positive": 1037678,
+        "mechanically_mapped_distinct_pairs_after_conflict_quarantine": 144622025,
+        "mechanically_rated_mal_ids": 20237,
+        "mechanically_rated_release_year_2025": 364,
+        "mechanically_rated_release_year_2026": 31,
+        "metadata_distinct_mal_ids": 20237,
+        "metadata_rows": 20237,
+        "missing_or_zero_rating_rows": 106281,
+        "mixed_zero_explicit_pairs": 321,
+        "raw_interaction_rows": 148170496,
+        "unambiguously_joined_source_pairs": 144679503,
+        "valid_rated_rows": 148064215
+      },
+      "distributions": {
+        "first_release_year_histogram": {
+          "1907": 1,
+          "1917": 12,
+          "1918": 6,
+          "1920": 1,
+          "1922": 1,
+          "1924": 2,
+          "1925": 4,
+          "1926": 5,
+          "1927": 4,
+          "1928": 7,
+          "1929": 5,
+          "1930": 8,
+          "1931": 18,
+          "1932": 12,
+          "1933": 15,
+          "1934": 11,
+          "1935": 16,
+          "1936": 11,
+          "1937": 2,
+          "1938": 3,
+          "1939": 3,
+          "1940": 3,
+          "1941": 5,
+          "1942": 6,
+          "1943": 3,
+          "1944": 1,
+          "1945": 1,
+          "1946": 3,
+          "1947": 3,
+          "1948": 3,
+          "1949": 2,
+          "1950": 2,
+          "1951": 2,
+          "1952": 3,
+          "1953": 2,
+          "1954": 3,
+          "1955": 2,
+          "1956": 6,
+          "1957": 6,
+          "1958": 8,
+          "1959": 8,
+          "1960": 10,
+          "1961": 11,
+          "1962": 9,
+          "1963": 16,
+          "1964": 22,
+          "1965": 23,
+          "1966": 27,
+          "1967": 31,
+          "1968": 31,
+          "1969": 30,
+          "1970": 41,
+          "1971": 35,
+          "1972": 32,
+          "1973": 26,
+          "1974": 39,
+          "1975": 42,
+          "1976": 46,
+          "1977": 43,
+          "1978": 50,
+          "1979": 66,
+          "1980": 80,
+          "1981": 88,
+          "1982": 88,
+          "1983": 96,
+          "1984": 99,
+          "1985": 123,
+          "1986": 126,
+          "1987": 150,
+          "1988": 148,
+          "1989": 173,
+          "1990": 180,
+          "1991": 174,
+          "1992": 187,
+          "1993": 179,
+          "1994": 181,
+          "1995": 173,
+          "1996": 188,
+          "1997": 181,
+          "1998": 214,
+          "1999": 241,
+          "2000": 221,
+          "2001": 354,
+          "2002": 331,
+          "2003": 356,
+          "2004": 373,
+          "2005": 387,
+          "2006": 463,
+          "2007": 441,
+          "2008": 460,
+          "2009": 554,
+          "2010": 553,
+          "2011": 651,
+          "2012": 695,
+          "2013": 706,
+          "2014": 800,
+          "2015": 758,
+          "2016": 887,
+          "2017": 894,
+          "2018": 877,
+          "2019": 864,
+          "2020": 811,
+          "2021": 900,
+          "2022": 874,
+          "2023": 832,
+          "2024": 745,
+          "2025": 364,
+          "2026": 31,
+          "2027": 1,
+          "None": 136
+        },
+        "normalized_score_histogram": {
+          "0.0": 106281,
+          "1.0": 1669398,
+          "10.0": 28413226,
+          "2.0": 1306523,
+          "3.0": 1880375,
+          "4.0": 4825252,
+          "5.0": 7000477,
+          "6.0": 15976175,
+          "7.0": 28590614,
+          "8.0": 37188066,
+          "9.0": 21214109
+        },
+        "positive_items_per_user_bins": {
+          "0": 183335,
+          "10": 190167,
+          "100": 240871,
+          "15": 132279,
+          "20": 101389,
+          "25": 82307,
+          "30": 67765,
+          "35": 58570,
+          "40": 50447,
+          "45": 44165,
+          "5": 363310,
+          "50": 39543,
+          "55": 34825,
+          "60": 31393,
+          "65": 28730,
+          "70": 25969,
+          "75": 23429,
+          "80": 21511,
+          "85": 19824,
+          "90": 18094,
+          "95": 16567
+        },
+        "rated_items_per_user_bins": {
+          "0": 2183,
+          "10": 179386,
+          "100": 413403,
+          "15": 126463,
+          "20": 97556,
+          "25": 78780,
+          "30": 64460,
+          "35": 54945,
+          "40": 47402,
+          "45": 42198,
+          "5": 408618,
+          "50": 37815,
+          "55": 33636,
+          "60": 30719,
+          "65": 27947,
+          "70": 25526,
+          "75": 23583,
+          "80": 22143,
+          "85": 20417,
+          "90": 19328,
+          "95": 17982
+        },
+        "status_histogram": {}
+      },
+      "enrichment": {
+        "mapping_key": "MAL_ID via mal_url",
+        "missing_fields": [
+          "synopsis",
+          "verified platform source and scale rules"
+        ],
+        "needed": true,
+        "proposed_snapshot": null,
+        "proposed_source": null,
+        "unresolved_requirements": [
+          "Document original platform-item and user-key remapping",
+          "Pin fresh synopsis source before release"
+        ],
+        "verified_artifact_ids": []
+      },
+      "gates": [
+        {
+          "denominator": null,
+          "evidence_refs": [
+            "ramazan_animes_csv",
+            "ramazan_ratings_csv"
+          ],
+          "id": "full_input_integrity",
+          "numerator": null,
+          "observed": true,
+          "reason": "Both consumed CSVs fully hashed; author file counts matched.",
+          "status": "PASS",
+          "threshold": "verified"
+        },
+        {
+          "denominator": null,
+          "evidence_refs": [
+            "ramazan_ratings_csv"
+          ],
+          "id": "fresh_2025_or_2026_evidence",
+          "numerator": null,
+          "observed": "2025_claimed_collection",
+          "reason": "Author describes a two-month 2025 collection; exact crawl boundary remains unknown and future-rated items need explanation.",
+          "status": "PASS",
+          "threshold": "2025_or_2026"
+        },
+        {
+          "denominator": null,
+          "evidence_refs": [
+            "ramazan_ratings_csv"
+          ],
+          "id": "known_user_namespace",
+          "numerator": null,
+          "observed": null,
+          "reason": "Pooled MAL/AniList/Kitsu IDs were remapped into contiguous numeric IDs without platform/source-key provenance.",
+          "status": "UNKNOWN",
+          "threshold": "verified"
+        },
+        {
+          "denominator": null,
+          "evidence_refs": [
+            "ramazan_ratings_csv"
+          ],
+          "id": "known_explicit_scale",
+          "numerator": null,
+          "observed": null,
+          "reason": "Observed integer 0–10, but platform-specific conversions and zero/status rules are undocumented.",
+          "status": "UNKNOWN",
+          "threshold": "verified"
+        },
+        {
+          "denominator": null,
+          "evidence_refs": [
+            "ramazan_animes_csv"
+          ],
+          "id": "mal_mapping",
+          "numerator": null,
+          "observed": null,
+          "reason": "Syntactic MAL URL mapping is one-to-one, but original platform-item crosswalk was not available to verify.",
+          "status": "UNKNOWN",
+          "threshold": "verified"
+        },
+        {
+          "denominator": null,
+          "evidence_refs": [
+            "ramazan_ratings_csv"
+          ],
+          "id": "rated_users_10000",
+          "numerator": null,
+          "observed": null,
+          "reason": "Mechanical internal-user count 1,774,490 cannot be admitted until namespace verified.",
+          "status": "UNKNOWN",
+          "threshold": 10000
+        },
+        {
+          "denominator": null,
+          "evidence_refs": [
+            "ramazan_ratings_csv"
+          ],
+          "id": "users_15_positive_5000",
+          "numerator": null,
+          "observed": null,
+          "reason": "Mechanical 1,037,678 profiles lack verified source identity and scale.",
+          "status": "UNKNOWN",
+          "threshold": 5000
+        },
+        {
+          "denominator": null,
+          "evidence_refs": [
+            "ramazan_animes_csv"
+          ],
+          "id": "rated_mal_items_5000",
+          "numerator": null,
+          "observed": null,
+          "reason": "20,237 syntactically rated MAL URLs; platform crosswalk unverified.",
+          "status": "UNKNOWN",
+          "threshold": 5000
+        },
+        {
+          "denominator": null,
+          "evidence_refs": [
+            "ramazan_animes_csv"
+          ],
+          "id": "rated_released_2024_plus_100",
+          "numerator": null,
+          "observed": null,
+          "reason": "Year-only metadata; 2026 future-year items already have scores, so release eligibility cannot be confirmed from this file.",
+          "status": "UNKNOWN",
+          "threshold": 100
+        },
+        {
+          "denominator": null,
+          "evidence_refs": [
+            "ramazan_animes_csv"
+          ],
+          "id": "rated_released_2025_plus_20",
+          "numerator": null,
+          "observed": null,
+          "reason": "Same release-date gap; independent cross-catalog check found 291 rated 2025 titles released by author article date, but this is not a pinned source-native date field.",
+          "status": "UNKNOWN",
+          "threshold": 20
+        },
+        {
+          "denominator": 144679503,
+          "evidence_refs": [
+            "ramazan_animes_csv",
+            "ramazan_ratings_csv"
+          ],
+          "id": "raw_distinct_pair_join_99pct",
+          "numerator": 144679503,
+          "observed": {
+            "denominator": 144679503,
+            "numerator": 144679503,
+            "ratio": 1.0
+          },
+          "reason": "Mechanical join100%; platform crosswalk correctness unverified.",
+          "status": "UNKNOWN",
+          "threshold": 0.99
+        },
+        {
+          "denominator": null,
+          "evidence_refs": [
+            "ramazan_animes_csv"
+          ],
+          "id": "accepted_pair_join_100pct",
+          "numerator": null,
+          "observed": null,
+          "reason": "No semantically accepted cohort until user and item provenance is established.",
+          "status": "UNKNOWN",
+          "threshold": 1.0
+        }
+      ],
+      "id": "ramazan-v8",
+      "inspection": {
+        "coverage": "full_consumed_files",
+        "fully_scanned_artifact_ids": [
+          "ramazan_animes_csv",
+          "ramazan_ratings_csv"
+        ],
+        "item_namespace": "Contiguous internal anime IDs 1..20,237; unique syntactic MAL URLs in metadata",
+        "missing_semantics": "No blank user/item/score observed",
+        "rating_scale": "Observed integer 0–10; author README says 0.1–10; cross-platform conversion rules unprovided",
+        "schema": [
+          {
+            "artifact_id": "ramazan_animes_csv",
+            "consumed_field_mapping": {
+              "animeID": "internal item ID",
+              "genres": "genres",
+              "mal_url": "MAL_ID extracted from URL",
+              "title": "title",
+              "year": "claimed release year"
+            },
+            "fields": [
+              "animeID",
+              "title",
+              "alternative_title",
+              "type",
+              "year",
+              "score",
+              "episodes",
+              "mal_url",
+              "sequel",
+              "image_url",
+              "genres",
+              "genres_detailed"
+            ]
+          },
+          {
+            "artifact_id": "ramazan_ratings_csv",
+            "consumed_field_mapping": {
+              "animeID": "internal item ID",
+              "rating": "observed score",
+              "userID": "opaque internal user ID"
+            },
+            "fields": [
+              "userID",
+              "animeID",
+              "rating"
+            ]
+          }
+        ],
+        "status_semantics": "No status column",
+        "timestamp_semantics": "No event time; synthetic 978300760 timestamp in author model-loading code is not an event date",
+        "user_namespace": "Contiguous internal user IDs 1..1,774,522; original platform and source-user key discarded",
+        "zero_semantics": "Zero treated as unrated for provisional mechanical counts; upstream conversion unproven"
+      },
+      "license": {
+        "data_or_code_scope": "Dataset listing declares CC BY-NC 4.0; origin-platform user-list rights not independently verified.",
+        "declared_label": "CC BY-NC 4.0",
+        "evidence_urls": [
+          "https://www.kaggle.com/datasets/ramazanturann/user-animelist-dataset"
+        ],
+        "known_restrictions": [
+          "NonCommercial",
+          "Attribution"
+        ],
+        "unresolved_questions": [
+          "Rights in pooled MAL/AniList/Kitsu records",
+          "Whether any intended production use is noncommercial"
+        ]
+      },
+      "limitations": [
+        "Author README says 0.1–10, whereas complete CSV scan found only integer 0–10.",
+        "All 31 metadata year-2026 items have nonzero ratings despite dataset version timestamp in September 2025; cause is unverified.",
+        "No interaction timestamps; synthetic model loader timestamp 978300760 must not support temporal claims.",
+        "No source synopsis field; current GloVe ranker would need fresh enrichment."
+      ],
+      "mapping": {
+        "accepted_join": null,
+        "ambiguous_pairs": 0,
+        "cross_platform_collisions": null,
+        "distinct_item_join": {
+          "denominator": 20237,
+          "numerator": 20237,
+          "ratio": 1.0
+        },
+        "distinct_pair_join": {
+          "denominator": 144679503,
+          "numerator": 144679503,
+          "ratio": 1.0
+        },
+        "missing_metadata_pairs": 0,
+        "resolution_policy": "Metadata provides a bijective internal item ID to MAL URL, but original platform-item crosswalk and user namespace conversion are unavailable; mechanical joins are not semantic validation.",
+        "row_weighted_join": {
+          "denominator": 148170496,
+          "numerator": 148170496,
+          "ratio": 1.0
+        },
+        "unmapped_pairs": 0
+      },
+      "source": {
+        "claimed_catalog_coverage_end": null,
+        "claimed_collection_end": null,
+        "claimed_collection_start": null,
+        "collection_evidence_urls": [
+          "https://animeratingsdataset.hashnode.dev/5-million-anime-lists-collected-from-myanimelist-anilist-and-kitsu-a-massive-dataset-for-research",
+          "https://github.com/MRamazan/User-Animelist-Dataset"
+        ],
+        "commit": null,
+        "page_url": "https://www.kaggle.com/datasets/ramazanturann/user-animelist-dataset",
+        "published_at": null,
+        "updated_at": "2025-09-04T16:53:21.6Z",
+        "version": "8"
+      }
+    },
+    {
+      "artifacts": [
+        {
+          "archive_member": null,
+          "id": "shikimori_readme",
+          "inspection_status": "full",
+          "observed_bytes": 1811,
+          "observed_sha256": "890970529b46248caeea3d3c3807fb14e3e7668af1007952ddc904909ca833b0",
+          "role": "collection_claim",
+          "stable_url": "https://huggingface.co/datasets/kdduha/shikimori-recsys/resolve/033630726d82cd9d99817a735dced800984c3aa8/README.md",
+          "version": "033630726d82cd9d99817a735dced800984c3aa8"
+        },
+        {
+          "archive_member": null,
+          "id": "shikimori_anime_csv",
+          "inspection_status": "full",
+          "observed_bytes": 9030125,
+          "observed_sha256": "3114aa603076c4eaa8b9d6c3d9c485ee702c8448c84271e16756fefdd58a14fd",
+          "role": "metadata",
+          "stable_url": "https://huggingface.co/datasets/kdduha/shikimori-recsys/resolve/033630726d82cd9d99817a735dced800984c3aa8/anime.csv",
+          "version": "033630726d82cd9d99817a735dced800984c3aa8"
+        },
+        {
+          "archive_member": null,
+          "id": "shikimori_rates_csv",
+          "inspection_status": "full",
+          "observed_bytes": 6209577,
+          "observed_sha256": "d0bcc8b69a304e1693d8e94eb38d2dacb0ecd54754a1e261c1335945a2184755",
+          "role": "ratings",
+          "stable_url": "https://huggingface.co/datasets/kdduha/shikimori-recsys/resolve/033630726d82cd9d99817a735dced800984c3aa8/users_rates.csv",
+          "version": "033630726d82cd9d99817a735dced800984c3aa8"
+        },
+        {
+          "archive_member": null,
+          "id": "shikimori_genres_csv",
+          "inspection_status": "full",
+          "observed_bytes": 2897,
+          "observed_sha256": "38c26b5795162cd73bde9d13ddff18c289090fe76cca7bcd3895b75f50be8c63",
+          "role": "genre_lookup",
+          "stable_url": "https://huggingface.co/datasets/kdduha/shikimori-recsys/resolve/033630726d82cd9d99817a735dced800984c3aa8/genres.csv",
+          "version": "033630726d82cd9d99817a735dced800984c3aa8"
+        }
+      ],
+      "candidate_decision": "rejected",
+      "content": {
+        "english_synopsis_count": null,
+        "glove_artifact_id": null,
+        "glove_audit_status": "not_run_rejected",
+        "items_with_matched_tokens": null,
+        "items_with_nonzero_vectors": null,
+        "matched_token_occurrence_count": null,
+        "matched_vocabulary_token_count": null,
+        "metadata_field_coverage": {
+          "any_text_nonempty": 9950,
+          "description_nonempty": 5789,
+          "mal_id_column_present": false
+        },
+        "synopsis_boilerplate_count": null,
+        "synopsis_language_method": "Not inspected after quantitative failure; Russian/English fields exist",
+        "synopsis_nonempty_count": 5789,
+        "synopsis_only_items_with_matched_tokens": null,
+        "token_occurrence_count": null,
+        "tokenizer": "[a-z]+(?:'[a-z]+)?",
+        "unknown_synopsis_language_count": 5789,
+        "vocabulary_token_count": null
+      },
+      "counts": {
+        "accepted_distinct_user_mal_pairs": 0,
+        "accepted_positive_users_ge_15": 0,
+        "accepted_rated_2024_plus": 0,
+        "accepted_rated_2025_plus": 0,
+        "accepted_rated_mal_ids": 0,
+        "accepted_rated_users": 0,
+        "conflicting_rating_pairs": 1,
+        "distinct_valid_rated_source_pairs": 28126,
+        "exact_duplicate_rows_removed": null,
+        "invalid_rows": 0,
+        "metadata_distinct_mal_ids": null,
+        "metadata_duplicate_id_groups": 1,
+        "metadata_rows": 9950,
+        "missing_or_zero_rating_rows": 38942,
+        "mixed_rated_unrated_pair_conflicts": 1,
+        "native_distinct_rated_item_ids": 3540,
+        "native_explicit_users": 726,
+        "native_unique_metadata_joined_pairs": 27456,
+        "native_users_ge_15_positive_upper_bound": 315,
+        "raw_interaction_rows": 67071,
+        "unambiguously_joined_source_pairs": 0,
+        "valid_rated_rows": 28129
+      },
+      "distributions": {
+        "first_release_year_histogram": {
+          "1969": 5,
+          "1970": 1,
+          "1971": 1,
+          "1972": 1,
+          "1973": 2,
+          "1975": 1,
+          "1977": 1,
+          "1978": 1,
+          "1979": 3,
+          "1981": 1,
+          "1983": 3,
+          "1984": 2,
+          "1985": 3,
+          "1986": 6,
+          "1987": 2,
+          "1988": 5,
+          "1989": 5,
+          "1990": 4,
+          "1991": 2,
+          "1992": 3,
+          "1993": 11,
+          "1994": 6,
+          "1995": 13,
+          "1996": 11,
+          "1997": 12,
+          "1998": 15,
+          "1999": 16,
+          "2000": 24,
+          "2001": 32,
+          "2002": 38,
+          "2003": 37,
+          "2004": 47,
+          "2005": 50,
+          "2006": 64,
+          "2007": 65,
+          "2008": 77,
+          "2009": 83,
+          "2010": 97,
+          "2011": 97,
+          "2012": 116,
+          "2013": 121,
+          "2014": 136,
+          "2015": 141,
+          "2016": 167,
+          "2017": 148,
+          "2018": 163,
+          "2019": 155,
+          "2020": 139,
+          "2021": 197,
+          "2022": 199,
+          "2023": 240,
+          "2024": 217,
+          "2025": 168,
+          "2026": 15
+        },
+        "normalized_score_histogram": {
+          "0.0": 38942,
+          "1.0": 152,
+          "10.0": 6717,
+          "2.0": 147,
+          "3.0": 257,
+          "4.0": 529,
+          "5.0": 1211,
+          "6.0": 2808,
+          "7.0": 5374,
+          "8.0": 6383,
+          "9.0": 4551
+        },
+        "positive_items_per_user_bins": {},
+        "rated_items_per_user_bins": {
+          "0": 247,
+          "10": 47,
+          "100": 99,
+          "15": 35,
+          "20": 24,
+          "25": 32,
+          "30": 24,
+          "35": 25,
+          "40": 24,
+          "45": 10,
+          "5": 74,
+          "50": 11,
+          "55": 18,
+          "60": 12,
+          "65": 8,
+          "70": 6,
+          "75": 8,
+          "80": 2,
+          "85": 10,
+          "90": 5,
+          "95": 5
+        },
+        "status_histogram": {}
+      },
+      "enrichment": {
+        "mapping_key": null,
+        "missing_fields": [
+          "MAL_ID crosswalk"
+        ],
+        "needed": true,
+        "proposed_snapshot": null,
+        "proposed_source": null,
+        "unresolved_requirements": [
+          "A verified crosswalk would still leave insufficient users and rated items"
+        ],
+        "verified_artifact_ids": []
+      },
+      "gates": [
+        {
+          "denominator": null,
+          "evidence_refs": [
+            "shikimori_readme",
+            "shikimori_anime_csv",
+            "shikimori_rates_csv",
+            "shikimori_genres_csv"
+          ],
+          "id": "full_input_integrity",
+          "numerator": null,
+          "observed": true,
+          "reason": "All four files fully hashed.",
+          "status": "PASS",
+          "threshold": "verified"
+        },
+        {
+          "denominator": null,
+          "evidence_refs": [
+            "shikimori_rates_csv"
+          ],
+          "id": "fresh_2025_or_2026_evidence",
+          "numerator": null,
+          "observed": "2025-11_to_2026-02",
+          "reason": "Observed createdAt values corroborate recent records, although parser link unavailable.",
+          "status": "PASS",
+          "threshold": "2025_or_2026"
+        },
+        {
+          "denominator": null,
+          "evidence_refs": [
+            "shikimori_readme"
+          ],
+          "id": "known_user_namespace",
+          "numerator": null,
+          "observed": null,
+          "reason": "Source user_id is claimed anonymized; generation method not available.",
+          "status": "UNKNOWN",
+          "threshold": "verified"
+        },
+        {
+          "denominator": null,
+          "evidence_refs": [
+            "shikimori_rates_csv"
+          ],
+          "id": "known_explicit_scale",
+          "numerator": null,
+          "observed": "integer_1_to_10",
+          "reason": "Observed 1–10 explicit scores and zero values.",
+          "status": "PASS",
+          "threshold": "verified"
+        },
+        {
+          "denominator": null,
+          "evidence_refs": [
+            "shikimori_anime_csv"
+          ],
+          "id": "mal_mapping",
+          "numerator": null,
+          "observed": null,
+          "reason": "No MAL_ID crosswalk; Shikimori ID cannot be used as MAL_ID.",
+          "status": "FAIL",
+          "threshold": "verified"
+        },
+        {
+          "denominator": null,
+          "evidence_refs": [
+            "shikimori_rates_csv"
+          ],
+          "id": "rated_users_10000",
+          "numerator": null,
+          "observed": 726,
+          "reason": "Only 726 source profiles have explicit scores even before MAL mapping.",
+          "status": "FAIL",
+          "threshold": 10000
+        },
+        {
+          "denominator": null,
+          "evidence_refs": [
+            "shikimori_rates_csv"
+          ],
+          "id": "users_15_positive_5000",
+          "numerator": null,
+          "observed": 315,
+          "reason": "Native distinct-positive upper bound 315 before MAL mapping.",
+          "status": "FAIL",
+          "threshold": 5000
+        },
+        {
+          "denominator": null,
+          "evidence_refs": [
+            "shikimori_rates_csv"
+          ],
+          "id": "rated_mal_items_5000",
+          "numerator": null,
+          "observed": 3540,
+          "reason": "Only 3,540 native item IDs have explicit scores before MAL mapping.",
+          "status": "FAIL",
+          "threshold": 5000
+        },
+        {
+          "denominator": null,
+          "evidence_refs": [
+            "shikimori_anime_csv"
+          ],
+          "id": "rated_released_2024_plus_100",
+          "numerator": null,
+          "observed": null,
+          "reason": "No accepted MAL_ID mapping.",
+          "status": "UNKNOWN",
+          "threshold": 100
+        },
+        {
+          "denominator": null,
+          "evidence_refs": [
+            "shikimori_anime_csv"
+          ],
+          "id": "rated_released_2025_plus_20",
+          "numerator": null,
+          "observed": null,
+          "reason": "No accepted MAL_ID mapping.",
+          "status": "UNKNOWN",
+          "threshold": 20
+        },
+        {
+          "denominator": 28126,
+          "evidence_refs": [
+            "shikimori_anime_csv"
+          ],
+          "id": "raw_distinct_pair_join_99pct",
+          "numerator": 0,
+          "observed": {
+            "denominator": 28126,
+            "numerator": 0,
+            "ratio": 0.0
+          },
+          "reason": "No canonical MAL mapping in source files.",
+          "status": "FAIL",
+          "threshold": 0.99
+        },
+        {
+          "denominator": null,
+          "evidence_refs": [
+            "shikimori_anime_csv"
+          ],
+          "id": "accepted_pair_join_100pct",
+          "numerator": null,
+          "observed": null,
+          "reason": "No accepted MAL pairs.",
+          "status": "UNKNOWN",
+          "threshold": 1.0
+        }
+      ],
+      "id": "shikimori-2026",
+      "inspection": {
+        "coverage": "full_consumed_files",
+        "fully_scanned_artifact_ids": [
+          "shikimori_readme",
+          "shikimori_anime_csv",
+          "shikimori_rates_csv",
+          "shikimori_genres_csv"
+        ],
+        "item_namespace": "Shikimori ID; no MAL crosswalk in downloaded metadata",
+        "missing_semantics": "No missing score observed",
+        "rating_scale": "Observed integers 0–10",
+        "schema": [
+          {
+            "artifact_id": "shikimori_anime_csv",
+            "consumed_field_mapping": {
+              "airedOn": "first-release candidate",
+              "description": "synopsis",
+              "id": "Shikimori item ID",
+              "name": "title"
+            },
+            "fields": [
+              "id",
+              "name",
+              "russian",
+              "description",
+              "score",
+              "rating",
+              "episodes",
+              "episodesAired",
+              "duration",
+              "genres",
+              "season",
+              "airedOn",
+              "releasedOn",
+              "status",
+              "studios",
+              "isCensored"
+            ]
+          },
+          {
+            "artifact_id": "shikimori_rates_csv",
+            "consumed_field_mapping": {
+              "anime": "Python-literal embedded Shikimori ID",
+              "createdAt": "record timestamp",
+              "score": "observed score",
+              "user_id": "source user ID"
+            },
+            "fields": [
+              "id",
+              "score",
+              "episodes",
+              "rewatches",
+              "createdAt",
+              "updatedAt",
+              "anime",
+              "user_id"
+            ]
+          }
+        ],
+        "status_semantics": "No separate watch-status column",
+        "timestamp_semantics": "createdAt actually ranges 2025-11-07 to 2026-02-23, narrower than card claim; timestamp provenance not independently verifiable",
+        "user_namespace": "Anonymized user_id claimed in card; 1,151 profiles have rows",
+        "zero_semantics": "Zero treated as unrated; 38,942 rows"
+      },
+      "license": {
+        "data_or_code_scope": "Hugging Face dataset card declares MIT; scope of rights in Shikimori-derived user/metadata content is not established.",
+        "declared_label": "MIT",
+        "evidence_urls": [
+          "https://huggingface.co/datasets/kdduha/shikimori-recsys/resolve/033630726d82cd9d99817a735dced800984c3aa8/README.md"
+        ],
+        "known_restrictions": [],
+        "unresolved_questions": [
+          "Underlying Shikimori API/content redistribution rights",
+          "Linked parser repository was unavailable at audit"
+        ]
+      },
+      "limitations": [
+        "Quantitative sample fails even under an optimistic native-ID upper bound.",
+        "Source README claims data starting February 2025, but observed createdAt minimum is November 2025.",
+        "A duplicate anime metadata ID and 668 explicit source pairs without unique native metadata require quarantine."
+      ],
+      "mapping": {
+        "accepted_join": null,
+        "ambiguous_pairs": null,
+        "cross_platform_collisions": null,
+        "distinct_item_join": {
+          "denominator": 3540,
+          "numerator": 0,
+          "ratio": 0.0
+        },
+        "distinct_pair_join": {
+          "denominator": 28126,
+          "numerator": 0,
+          "ratio": 0.0
+        },
+        "missing_metadata_pairs": 668,
+        "native_metadata_join_after_conflict_quarantine": {
+          "denominator": 28124,
+          "numerator": 27456,
+          "ratio": 0.9762480443749111
+        },
+        "resolution_policy": "No MAL_ID or verified Shikimori-to-MAL crosswalk in consumed files; native Shikimori metadata joins are diagnostic only.",
+        "row_weighted_join": {
+          "denominator": 28129,
+          "numerator": 0,
+          "ratio": 0.0
+        },
+        "unmapped_pairs": 28126
+      },
+      "source": {
+        "claimed_collection_end": "2026-02-23",
+        "claimed_collection_start": "2025-02-23",
+        "collection_evidence_urls": [
+          "https://huggingface.co/datasets/kdduha/shikimori-recsys/resolve/033630726d82cd9d99817a735dced800984c3aa8/README.md"
+        ],
+        "commit": "033630726d82cd9d99817a735dced800984c3aa8",
+        "page_url": "https://huggingface.co/datasets/kdduha/shikimori-recsys",
+        "published_at": "2026-02-24T16:28:21Z",
+        "updated_at": "2026-02-24T16:33:29Z",
+        "version": "033630726d82cd9d99817a735dced800984c3aa8"
+      }
+    },
+    {
+      "artifacts": [
+        {
+          "archive_member": null,
+          "id": "nafiul_anime_csv",
+          "inspection_status": "full",
+          "observed_bytes": 22314208,
+          "observed_sha256": "e833476c0da3eadd4c033889e1e8defb2808baf95b0ae38b55009f45d5d72c35",
+          "role": "metadata",
+          "stable_url": "https://www.kaggle.com/api/v1/datasets/download/nafiulislam490/comprehensive-myanimelist-mal-dataset-2026/anime_info.csv?datasetVersionNumber=1",
+          "version": "1"
+        },
+        {
+          "archive_member": null,
+          "id": "nafiul_rates_csv",
+          "inspection_status": "full",
+          "observed_bytes": 69996918,
+          "observed_sha256": "edd3161e20097072acd42918dacaa8f88fbbb9e20b1668716c0f5bf0e36ca94d",
+          "role": "ratings",
+          "stable_url": "https://www.kaggle.com/api/v1/datasets/download/nafiulislam490/comprehensive-myanimelist-mal-dataset-2026/user_ratings.csv?datasetVersionNumber=1",
+          "version": "1"
+        }
+      ],
+      "candidate_decision": "rejected",
+      "content": {
+        "english_synopsis_count": null,
+        "glove_artifact_id": null,
+        "glove_audit_status": "not_run_rejected",
+        "items_with_matched_tokens": null,
+        "items_with_nonzero_vectors": null,
+        "matched_token_occurrence_count": null,
+        "matched_vocabulary_token_count": null,
+        "metadata_field_coverage": {
+          "aired_from_nonempty": 28912,
+          "genres_nonempty": 23519,
+          "synopsis_nonempty": 24846,
+          "title_english_nonempty": 13237,
+          "title_nonempty": 29816
+        },
+        "synopsis_boilerplate_count": null,
+        "synopsis_language_method": "Not assessed after quantitative/join failure",
+        "synopsis_nonempty_count": 24846,
+        "synopsis_only_items_with_matched_tokens": null,
+        "token_occurrence_count": null,
+        "tokenizer": "[a-z]+(?:'[a-z]+)?",
+        "unknown_synopsis_language_count": 24846,
+        "vocabulary_token_count": null
+      },
+      "counts": {
+        "accepted_distinct_user_mal_pairs": 246873,
+        "accepted_positive_users_ge_15": 632,
+        "accepted_rated_2024_plus": null,
+        "accepted_rated_2025_plus": null,
+        "accepted_rated_mal_ids": 10432,
+        "accepted_rated_users": 50336,
+        "ambiguous_metadata_id_groups": 134,
+        "conflicting_rating_pairs": 0,
+        "distinct_valid_rated_source_pairs": 253949,
+        "exact_duplicate_rows_removed": 359,
+        "extra_duplicate_metadata_rows": 145,
+        "invalid_rows": 0,
+        "metadata_distinct_mal_ids": 29671,
+        "metadata_rows": 29816,
+        "missing_or_zero_rating_rows": 570904,
+        "raw_interaction_rows": 825212,
+        "unambiguously_joined_source_pairs": 246873,
+        "valid_rated_rows": 254308
+      },
+      "distributions": {
+        "first_release_year_histogram": {},
+        "normalized_score_histogram": {
+          "1": 7431,
+          "10": 28113,
+          "2": 6493,
+          "3": 8531,
+          "4": 17142,
+          "5": 34238,
+          "6": 46246,
+          "7": 52895,
+          "8": 35742,
+          "9": 17477
+        },
+        "positive_items_per_user_bins": {},
+        "rated_items_per_user_bins": {},
+        "status_histogram": {
+          "": 15727,
+          "Completed": 389706,
+          "Dropped": 41999,
+          "On-Hold": 23737,
+          "Plan to Watch": 269340,
+          "Watching": 84703
+        }
+      },
+      "enrichment": {
+        "mapping_key": "mal_id",
+        "missing_fields": [
+          "Unique metadata for duplicate MAL_IDs",
+          "Metadata for unmatched pairs"
+        ],
+        "needed": true,
+        "proposed_snapshot": null,
+        "proposed_source": null,
+        "unresolved_requirements": [
+          "Even repaired joins cannot raise observed positive-user cohort to 5,000 without more data"
+        ],
+        "verified_artifact_ids": []
+      },
+      "gates": [
+        {
+          "denominator": null,
+          "evidence_refs": [
+            "nafiul_anime_csv",
+            "nafiul_rates_csv"
+          ],
+          "id": "full_input_integrity",
+          "numerator": null,
+          "observed": true,
+          "reason": "Both relevant CSVs fully hashed.",
+          "status": "PASS",
+          "threshold": "verified"
+        },
+        {
+          "denominator": null,
+          "evidence_refs": [
+            "nafiul_rates_csv"
+          ],
+          "id": "fresh_2025_or_2026_evidence",
+          "numerator": null,
+          "observed": "2026_record_updates",
+          "reason": "Recorded updated_at values are concentrated in 2026; exact event semantics were not certified.",
+          "status": "PASS",
+          "threshold": "2025_or_2026"
+        },
+        {
+          "denominator": null,
+          "evidence_refs": [
+            "nafiul_rates_csv"
+          ],
+          "id": "known_user_namespace",
+          "numerator": null,
+          "observed": "MAL_username",
+          "reason": "Username/MAL_ID single-platform schema.",
+          "status": "PASS",
+          "threshold": "verified"
+        },
+        {
+          "denominator": null,
+          "evidence_refs": [
+            "nafiul_rates_csv"
+          ],
+          "id": "known_explicit_scale",
+          "numerator": null,
+          "observed": "observed_1_to_10",
+          "reason": "Numeric scored rows lie in MAL 1–10 range.",
+          "status": "PASS",
+          "threshold": "verified"
+        },
+        {
+          "denominator": 253949,
+          "evidence_refs": [
+            "nafiul_anime_csv"
+          ],
+          "id": "mal_mapping",
+          "numerator": 246873,
+          "observed": {
+            "denominator": 253949,
+            "numerator": 246873,
+            "ratio": 0.9721361375709296
+          },
+          "reason": "145 metadata duplicate IDs and 6,741 missing-metadata pairs require quarantine.",
+          "status": "FAIL",
+          "threshold": "verified"
+        },
+        {
+          "denominator": null,
+          "evidence_refs": [
+            "nafiul_rates_csv"
+          ],
+          "id": "rated_users_10000",
+          "numerator": null,
+          "observed": 50336,
+          "reason": "Accepted source profiles with rated MAL pairs.",
+          "status": "PASS",
+          "threshold": 10000
+        },
+        {
+          "denominator": null,
+          "evidence_refs": [
+            "nafiul_rates_csv"
+          ],
+          "id": "users_15_positive_5000",
+          "numerator": null,
+          "observed": 632,
+          "reason": "Only 632 accepted profiles with at least 15 distinct positive MAL items.",
+          "status": "FAIL",
+          "threshold": 5000
+        },
+        {
+          "denominator": null,
+          "evidence_refs": [
+            "nafiul_anime_csv",
+            "nafiul_rates_csv"
+          ],
+          "id": "rated_mal_items_5000",
+          "numerator": null,
+          "observed": 10432,
+          "reason": "Distinct accepted rated MAL_IDs.",
+          "status": "PASS",
+          "threshold": 5000
+        },
+        {
+          "denominator": null,
+          "evidence_refs": [
+            "nafiul_anime_csv"
+          ],
+          "id": "rated_released_2024_plus_100",
+          "numerator": null,
+          "observed": null,
+          "reason": "Not recomputed after decisive failures.",
+          "status": "UNKNOWN",
+          "threshold": 100
+        },
+        {
+          "denominator": null,
+          "evidence_refs": [
+            "nafiul_anime_csv"
+          ],
+          "id": "rated_released_2025_plus_20",
+          "numerator": null,
+          "observed": null,
+          "reason": "Not recomputed after decisive failures.",
+          "status": "UNKNOWN",
+          "threshold": 20
+        },
+        {
+          "denominator": 253949,
+          "evidence_refs": [
+            "nafiul_anime_csv",
+            "nafiul_rates_csv"
+          ],
+          "id": "raw_distinct_pair_join_99pct",
+          "numerator": 246873,
+          "observed": {
+            "denominator": 253949,
+            "numerator": 246873,
+            "ratio": 0.9721361375709296
+          },
+          "reason": "Unique metadata join 97.21%, below 99%.",
+          "status": "FAIL",
+          "threshold": 0.99
+        },
+        {
+          "denominator": 246873,
+          "evidence_refs": [
+            "nafiul_anime_csv"
+          ],
+          "id": "accepted_pair_join_100pct",
+          "numerator": 246873,
+          "observed": {
+            "denominator": 246873,
+            "numerator": 246873,
+            "ratio": 1.0
+          },
+          "reason": "Ambiguous and missing metadata pairs quarantined.",
+          "status": "PASS",
+          "threshold": 1.0
+        }
+      ],
+      "id": "nafiul-2026-v1",
+      "inspection": {
+        "coverage": "full_consumed_files",
+        "fully_scanned_artifact_ids": [
+          "nafiul_anime_csv",
+          "nafiul_rates_csv"
+        ],
+        "item_namespace": "MAL_ID with 145 duplicate metadata rows",
+        "missing_semantics": "Blank/unparseable score excluded",
+        "rating_scale": "Observed numeric 1–10 among scored rows",
+        "schema": [
+          {
+            "artifact_id": "nafiul_anime_csv",
+            "consumed_field_mapping": {
+              "aired_from": "release date",
+              "mal_id": "MAL_ID",
+              "synopsis": "synopsis"
+            },
+            "fields": [
+              "mal_id",
+              "title",
+              "title_english",
+              "title_japanese",
+              "title_synonyms",
+              "mal_url",
+              "image_url",
+              "type",
+              "source",
+              "episodes",
+              "status",
+              "airing",
+              "aired_from",
+              "aired_to",
+              "aired_string",
+              "duration",
+              "content_rating",
+              "score",
+              "scored_by",
+              "rank",
+              "popularity",
+              "members",
+              "favorites",
+              "season",
+              "year",
+              "broadcast_day",
+              "broadcast_time",
+              "studios",
+              "producers",
+              "licensors",
+              "genres",
+              "themes",
+              "demographics",
+              "opening_themes",
+              "ending_themes",
+              "synopsis",
+              "background",
+              "approved",
+              "trailer_url"
+            ]
+          },
+          {
+            "artifact_id": "nafiul_rates_csv",
+            "consumed_field_mapping": {
+              "mal_id": "MAL_ID",
+              "score": "observed score",
+              "updated_at": "listed update timestamp",
+              "username": "MAL profile key"
+            },
+            "fields": [
+              "username",
+              "mal_id",
+              "anime_title",
+              "score",
+              "watch_status",
+              "episodes_seen",
+              "updated_at"
+            ]
+          }
+        ],
+        "status_semantics": "watch_status retained, not a completed-only filter",
+        "timestamp_semantics": "updated_at exists; exact provenance/chronology not audited after proven sample/join failure",
+        "user_namespace": "MAL username",
+        "zero_semantics": "Blank/unparseable 570,904 rows treated as unrated; zero not separately observed"
+      },
+      "license": {
+        "data_or_code_scope": "Kaggle dataset listing; underlying MAL data rights unresolved.",
+        "declared_label": "CC BY-NC-SA 4.0",
+        "evidence_urls": [
+          "https://www.kaggle.com/datasets/nafiulislam490/comprehensive-myanimelist-mal-dataset-2026"
+        ],
+        "known_restrictions": [
+          "NonCommercial",
+          "Attribution",
+          "ShareAlike"
+        ],
+        "unresolved_questions": [
+          "Rights in MAL-derived user histories"
+        ]
+      },
+      "limitations": [
+        "Only two files required for selection were inspected, not every auxiliary file in the 318 MB Kaggle package.",
+        "Author dataset size/profile count does not imply enough users with 15 positive ratings."
+      ],
+      "mapping": {
+        "accepted_join": {
+          "denominator": 246873,
+          "numerator": 246873,
+          "ratio": 1.0
+        },
+        "ambiguous_pairs": 335,
+        "cross_platform_collisions": 0,
+        "distinct_item_join": null,
+        "distinct_pair_join": {
+          "denominator": 253949,
+          "numerator": 246873,
+          "ratio": 0.9721361375709296
+        },
+        "join_any_metadata_diagnostic": {
+          "denominator": 253949,
+          "numerator": 247208,
+          "ratio": 0.9734553000799373
+        },
+        "missing_metadata_pairs": 6741,
+        "resolution_policy": "Quarantine 335 rated pairs pointing to duplicate metadata IDs and 6,741 without metadata; never choose arbitrary duplicate row.",
+        "row_weighted_join": null,
+        "unmapped_pairs": 6741
+      },
+      "source": {
+        "claimed_collection_end": null,
+        "claimed_collection_start": null,
+        "collection_evidence_urls": [
+          "https://www.kaggle.com/datasets/nafiulislam490/comprehensive-myanimelist-mal-dataset-2026"
+        ],
+        "commit": null,
+        "page_url": "https://www.kaggle.com/datasets/nafiulislam490/comprehensive-myanimelist-mal-dataset-2026",
+        "published_at": "2026-06-03T14:45:26Z",
+        "updated_at": "2026-06-03T14:45:26Z",
+        "version": "1"
+      }
+    }
+  ],
+  "decision": {
+    "downstream_actions": [
+      "DATA02: pin/freeze version-1 details.csv and ratings.csv bytes in source intake; decide on separately pinned Nafiul alias enrichment after field/duplicate audit; record license and intended-use review; retain old pinned bundle as rollback.",
+      "DATA03: normalize unique MAL_ID catalog and ratings, quarantine 146,144 missing-metadata pairs and one mixed state pair, remeasure synopsis/release/alias coverage.",
+      "DATA04: rebuild and validate immutable candidate bundle; switch default only after DATA02/03 dependencies, focused checks and review.",
+      "DATA05/06: full-catalog and private opt-in update/rollback acceptance before live deployment."
+    ],
+    "reasons": [
+      "Only fully audited candidate passing every mandatory research-data gate",
+      "69,459,967/69,606,111 distinct explicit pairs join unique MAL metadata (99.7900%)",
+      "286,866 rated profiles, 241,412 with at least 15 positive titles, 28,514 rated MAL items, including 740 released 2025 titles"
+    ],
+    "release_eligible": false,
+    "research_eligible": true,
+    "selected_candidate_id": "neelagiri-2025-v1",
+    "status": "selected_with_integration_blockers",
+    "unresolved_gates": [
+      "NonCommercial/ShareAlike and underlying MAL rights for intended production scope",
+      "Fresh synopsis and English-alias coverage; normalizer/bundle contract not yet integrated"
+    ]
+  },
+  "protocol": {
+    "conflicting_rating_policy": "Exclude entire pair if multiple explicit scores lack reliable event time. A pair containing both zero/unrated and an explicit score is separately quarantined conservatively.",
+    "duplicate_policy": "Deduplicate exact (source namespace,user,item,score) triples; retain one distinct rated pair.",
+    "gates": [
+      {
+        "definition": "Full byte count and SHA-256 of every consumed ratings and metadata file",
+        "id": "full_input_integrity",
+        "threshold": "verified",
+        "unit": "status"
+      },
+      {
+        "definition": "Collection or snapshot year supported by source record content or collection evidence beyond publication date alone",
+        "id": "fresh_2025_or_2026_evidence",
+        "threshold": "2025_or_2026",
+        "unit": "year"
+      },
+      {
+        "definition": "Distinct user key within established source namespace; cross-platform numeric collisions cannot be silently merged",
+        "id": "known_user_namespace",
+        "threshold": "verified",
+        "unit": "status"
+      },
+      {
+        "definition": "Explicit source ratings can be interpreted on the 1–10 MAL-like scale; zeros/missing are unrated",
+        "id": "known_explicit_scale",
+        "threshold": "verified",
+        "unit": "status"
+      },
+      {
+        "definition": "Unique source item to stable MAL_ID crosswalk for accepted pairs; missing and ambiguous mapping quarantined",
+        "id": "mal_mapping",
+        "threshold": "verified",
+        "unit": "status"
+      },
+      {
+        "definition": "Distinct accepted users with >=1 explicitly rated MAL item",
+        "id": "rated_users_10000",
+        "threshold": 10000,
+        "unit": "users"
+      },
+      {
+        "definition": "Distinct accepted users with >=15 distinct MAL items rated >=8",
+        "id": "users_15_positive_5000",
+        "threshold": 5000,
+        "unit": "users"
+      },
+      {
+        "definition": "Distinct accepted MAL items with >=1 explicit rating",
+        "id": "rated_mal_items_5000",
+        "threshold": 5000,
+        "unit": "MAL_IDs"
+      },
+      {
+        "definition": "Distinct accepted rated MAL items first released from 2024 through snapshot, excluding future or unreleased",
+        "id": "rated_released_2024_plus_100",
+        "threshold": 100,
+        "unit": "MAL_IDs"
+      },
+      {
+        "definition": "Distinct accepted rated MAL items first released from 2025 through snapshot, excluding future or unreleased",
+        "id": "rated_released_2025_plus_20",
+        "threshold": 20,
+        "unit": "MAL_IDs"
+      },
+      {
+        "definition": "Unique MAL mapping among distinct valid explicit (source user,item) pairs before mapping/conflict exclusions",
+        "id": "raw_distinct_pair_join_99pct",
+        "threshold": 0.99,
+        "unit": "ratio"
+      },
+      {
+        "definition": "Every accepted pair maps to exactly one MAL_ID",
+        "id": "accepted_pair_join_100pct",
+        "threshold": 1.0,
+        "unit": "ratio"
+      }
+    ],
+    "mal_join_definition": "Denominator is distinct valid explicit (source namespace,user,item) pairs before mapping or mixed-state exclusion; numerator has a unique canonical MAL_ID. Raw row-weighted and distinct-item joins are reported separately.",
+    "positive_threshold": 8,
+    "rating_definition": "Known explicit rating normalized to integer 1–10; missing or zero is unrated and never a negative label. Source-specific scale and provenance must be evidenced.",
+    "release_year_definition": "Use first-release date with source status aired/airing and upper cutoff at supported snapshot period; future/not-yet-aired and unknown dates are excluded from recent gates.",
+    "user_identity_policy": "Count source profiles, not unique people. MAL usernames are one namespace; opaque mixed-platform numeric IDs need source-key provenance before cohort admission."
+  },
+  "repository_baseline_sha": "912fb5bbfeb08ab5b067f5f714ce8c74453e9cf5",
+  "schema_version": 1,
+  "task_id": "ARB-027",
+  "verification": {
+    "audit_method_sha256": {
+      "audit_alias_enrichment.py": "673611c1b35e968aa1ea85a2e0de2ad51f191189c64bfe312d444f89c0d228b6",
+      "audit_kaggle_metadata.py": "83ab689d9d3ab35709c54f9ee96a19536acb1ed49c57ee64ab0be2c695de9764",
+      "audit_kaggle_ratings.py": "3bc7a74e6c20355528183bc4da9dc2c37b01557fb959011ab9a476f0f694f0db",
+      "audit_neelagiri_glove.py": "6b25c5e91047a59b645ad0e07ece5f41c0d24de0e3fcc95d49e341a4e6d2be07",
+      "audit_neelagiri_metadata.py": "b57e3033bec093b5df59c36b77455847477b39d81850efbd662837629e2299f3",
+      "audit_neelagiri_ratings.py": "1d60c13c7b208dd40731a746ea1050eb371e3224d0e66871525929d32d724481",
+      "audit_shikimori.py": "811dc002640d21d9e147e6afc7bdb7a584f53cbe94e08265f46a5063e49f33c4",
+      "audit_shikimori_pairs.py": "a6aaff0eb8411e694742b6ff8d136ea3fa458fabc7064f34642f9474c80b8078",
+      "check_nafiul_duckdb.py": "792d576179c0794d58c83f3bbacda3b789b6b3fc6056f9c57040de7d42dedc82",
+      "cohorts_kaggle.py": "48955bb63d6133eec6cfa751caa49518fc00fe435e720c4d719adfad08768af2",
+      "cohorts_neelagiri.py": "dba0d57864f49d3a4f734b24fe973593d101f10f5cb062b9b520b706741cf8ac",
+      "group_kaggle_pairs.py": "9581f614ed0e3fea5b4be14a037d192bea88bb44dcfe90473c47d900afee9812",
+      "group_neelagiri_pairs.py": "8b12be09f02cc7afc3dc7da3372145ea3834654549b9d1b99b8c71cc7d08080d"
+    },
+    "completed_checks": [
+      "Full bytes and SHA-256 on all consumed CSVs; GloVe matched current source registry pin.",
+      "Exact pair dedup/conflicts and score/status distributions computed on all candidate ratings files.",
+      "Neelagiri first-release gates require aired/airing status and date at most 2025-10-31.",
+      "Manifest/schema/coverage/arithmetic/privacy checks run on final two files."
+    ],
+    "environment": {
+      "duckdb": "1.5.6",
+      "method": "full-file CSV scan; DuckDB disk-backed exact pair grouping; Python metadata/GloVe stream; no raw data committed",
+      "numpy": "2.5.3",
+      "python": "3.12.3"
+    },
+    "independent_cross_checks": [
+      "Coordinator independently rehashed all full CSV inputs and matched receipt hashes.",
+      "Coordinator independent Neelagiri explicit-triple grouping found 69,606,111 source pairs, 69,459,967 unique metadata joins, 286,866 accepted users, 28,514 accepted items, 241,412 positive users; the all-score method quarantines one mixed 0/explicit pair, yielding 69,459,966 accepted pairs. Method SHA-256 7f3ab99ee15c6c2dec0492fbb044c118eb1245d163e99eed0ade145a9d656c77.",
+      "Independent Nafiul DuckDB join found 246,873/253,949 uniquely mapped pairs and 632 positive-cohort profiles, matching coordinator Python probe.",
+      "Coordinator SQLite Shikimori check confirmed 67,071 rows, 28,129 explicit rows and source-native positive-cohort upper bound 315."
+    ]
+  }
+}
