@@ -124,11 +124,10 @@ impl JikanCovers {
         }
     }
 
-    async fn lookup_inner(&self, id: MalId) -> Option<Url> {
+    async fn lookup_inner(&self, id: MalId, next: &mut Instant) -> Option<Url> {
         if let Some(hit) = self.cached(id).await {
             return hit;
         }
-        let mut next = self.next_start.lock().await;
         let now = Instant::now();
         if *next > now {
             tokio::time::sleep(*next - now).await;
@@ -137,8 +136,8 @@ impl JikanCovers {
             return hit;
         }
         *next = Instant::now() + self.interval;
-        // Keep the gate until the response is cached or a cooldown is set. A
-        // second lookup for the same ID must not race an unfinished request.
+        // The caller keeps the gate until the response is cached or a cooldown
+        // is set, including when the total lookup deadline expires.
         let endpoint = self.base.join(&id.to_string()).ok()?;
         let response = match self.client.get(endpoint).send().await {
             Ok(response) => response,
@@ -234,10 +233,21 @@ impl CoverProvider for JikanCovers {
             if mal_id <= 0 {
                 return None;
             }
-            match tokio::time::timeout(Duration::from_millis(1500), self.lookup_inner(mal_id)).await
-            {
+            let deadline = tokio::time::Instant::now() + Duration::from_millis(1500);
+            if let Ok(Some(hit)) = tokio::time::timeout_at(deadline, self.cached(mal_id)).await {
+                return hit;
+            }
+            let mut gate = match tokio::time::timeout_at(deadline, self.next_start.lock()).await {
+                Ok(gate) => gate,
+                // This lookup sent nothing; the holder remains responsible for
+                // caching its response or establishing a cooldown.
+                Err(_) => return None,
+            };
+            match tokio::time::timeout_at(deadline, self.lookup_inner(mal_id, &mut gate)).await {
                 Ok(value) => value,
                 Err(_) => {
+                    // Hold the gate while publishing the cooldown, so a waiter
+                    // cannot observe an empty cache and start the same request.
                     self.cooldown(Duration::from_secs(30)).await;
                     None
                 }
@@ -272,7 +282,10 @@ mod tests {
     use std::{
         io::{Read, Write},
         net::TcpListener,
-        sync::Mutex as StdMutex,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Mutex as StdMutex,
+        },
         thread,
     };
 
@@ -386,6 +399,62 @@ mod tests {
         let times = starts.lock().unwrap();
         assert_eq!(times.len(), 2);
         assert!(times[1].duration_since(times[0]) >= Duration::from_millis(1100));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn total_deadline_keeps_gate_until_cooldown_is_visible() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let base = Url::parse(&format!(
+            "http://{}/v4/anime/",
+            listener.local_addr().unwrap()
+        ))
+        .unwrap();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let seen = requests.clone();
+        let server = thread::spawn(move || {
+            let until = Instant::now() + Duration::from_millis(2100);
+            while Instant::now() < until {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut request = [0u8; 2048];
+                        let _ = stream.read(&mut request);
+                        let number = seen.fetch_add(1, Ordering::SeqCst) + 1;
+                        if number == 1 {
+                            thread::sleep(Duration::from_millis(1300));
+                        }
+                        let body = br#"{"data":{"mal_id":10,"images":{"jpg":{"image_url":"https://cdn.myanimelist.net/10.jpg"}}}}"#;
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = stream.write_all(response.as_bytes());
+                        let _ = stream.write_all(body);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(2))
+                    }
+                    Err(error) => panic!("local fixture failed: {error}"),
+                }
+            }
+        });
+        let covers = Arc::new(JikanCovers::build(base, 2, Duration::from_millis(1100)).unwrap());
+        *covers.next_start.lock().await = Instant::now() + Duration::from_millis(300);
+        let first_covers = covers.clone();
+        let first = tokio::spawn(async move { first_covers.lookup(10).await });
+        tokio::time::sleep(Duration::from_millis(1350)).await;
+        // Delay cooldown publication across the 1500 ms deadline. The first
+        // lookup must still own the pacing gate while waiting for this lock.
+        let state = covers.state.lock().await;
+        tokio::time::sleep(Duration::from_millis(220)).await;
+        assert!(covers.next_start.try_lock().is_err());
+        let second_covers = covers.clone();
+        let second = tokio::spawn(async move { second_covers.lookup(10).await });
+        drop(state);
+        assert_eq!(first.await.unwrap(), None);
+        assert_eq!(second.await.unwrap(), None);
+        server.join().unwrap();
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
