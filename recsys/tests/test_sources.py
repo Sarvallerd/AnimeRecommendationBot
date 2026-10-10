@@ -2,6 +2,7 @@
 
 import copy
 import json
+import shlex
 from pathlib import Path
 import unittest
 
@@ -10,6 +11,40 @@ from recsys.sources import (DEFAULT_SNAPSHOT, SNAPSHOT_IDS, SourceError,
 
 
 class SourceTests(unittest.TestCase):
+    def assert_documented_download_pins(self, instructions, registry):
+        """Read complete shell arguments as text; never execute the documentation."""
+        urls = {}
+        hashes = {}
+        for line in instructions.splitlines():
+            if line.startswith("curl "):
+                tokens = shlex.split(line)
+                self.assertEqual(tokens[:3], ["curl", "--fail", "--location"])
+                self.assertEqual(len(tokens), 6)
+                self.assertEqual(tokens[4], "-o")
+                self.assertTrue(tokens[5].startswith("$AUDIT_DIR/"))
+                filename = tokens[5].removeprefix("$AUDIT_DIR/")
+                self.assertNotIn("/", filename)
+                self.assertNotIn(filename, urls)
+                urls[filename] = tokens[3]
+            elif line.startswith("printf ") and "| sha256sum" in line:
+                command, separator, check = line.partition("|")
+                self.assertEqual(separator, "|")
+                self.assertEqual(shlex.split(check), ["sha256sum", "--check", "-"])
+                tokens = shlex.split(command)
+                self.assertEqual(len(tokens), 4)
+                self.assertEqual(tokens[0], "printf")
+                self.assertTrue(tokens[3].startswith("$AUDIT_DIR/"))
+                filename = tokens[3].removeprefix("$AUDIT_DIR/")
+                self.assertNotIn("/", filename)
+                self.assertNotIn(filename, hashes)
+                hashes[filename] = tokens[2]
+        expected = {item["filename"]: item for item in registry["sources"]}
+        self.assertEqual(set(urls), set(expected))
+        self.assertEqual(set(hashes), set(expected))
+        for filename, item in expected.items():
+            self.assertEqual(urls[filename], item["url"])
+            self.assertEqual(hashes[filename], item["sha256"])
+
     def test_packaged_registry_has_pinned_inputs(self):
         registry, digest = load_registry()
         self.assertEqual(digest, "49bb399935f0ac7ec649fe2f4bd7715444c09c8513704866fa90b9bea29d182f")
@@ -54,10 +89,25 @@ class SourceTests(unittest.TestCase):
             self.assertEqual((item["url"], item["size"], item["sha256"]),
                              (pin["stable_url"], pin["observed_bytes"], pin["observed_sha256"]))
         instructions = (root / "reports/dataset-audit-v1/README.md").read_text()
-        for item in registry["sources"]:
-            self.assertIn(item["url"], instructions)
-            self.assertIn(item["sha256"], instructions)
-            self.assertEqual(len(item["sha256"]), 64)
+        self.assert_documented_download_pins(instructions, registry)
+
+    def test_documented_pins_reject_hash_suffix_and_changed_version(self):
+        registry, _ = load_registry("neelagiri-2025-v1")
+        root = Path(__file__).resolve().parents[1]
+        instructions = (root / "reports/dataset-audit-v1/README.md").read_text()
+        first = registry["sources"][0]
+        with self.assertRaises(AssertionError):
+            self.assert_documented_download_pins(
+                instructions.replace(f"'{first['sha256']}'", f"'{first['sha256']}20'", 1),
+                registry,
+            )
+        with self.assertRaises(AssertionError):
+            self.assert_documented_download_pins(
+                instructions.replace(first["url"],
+                                     first["url"].replace("datasetVersionNumber=1",
+                                                          "datasetVersionNumber=10"), 1),
+                registry,
+            )
 
     def test_unknown_snapshot_rejected_before_resource_lookup(self):
         for snapshot in ("latest", "../source_registry.json", "NEELAGIRI", None):
