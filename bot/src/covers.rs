@@ -44,6 +44,9 @@ pub struct JikanCovers {
     interval: Duration,
 }
 
+// Absurd Retry-After values cannot be represented by every platform's Instant.
+const MAX_COOLDOWN: Duration = Duration::from_secs(365 * 24 * 60 * 60);
+
 impl JikanCovers {
     pub fn new() -> Result<Self, reqwest::Error> {
         Self::build(
@@ -114,7 +117,8 @@ impl JikanCovers {
 
     async fn cooldown(&self, duration: Duration) {
         let mut state = self.state.lock().await;
-        let until = Instant::now() + duration;
+        let now = Instant::now();
+        let until = now.checked_add(duration.min(MAX_COOLDOWN)).unwrap_or(now);
         if state.cooldown_until.is_none_or(|old| old < until) {
             state.cooldown_until = Some(until);
         }
@@ -133,7 +137,8 @@ impl JikanCovers {
             return hit;
         }
         *next = Instant::now() + self.interval;
-        drop(next);
+        // Keep the gate until the response is cached or a cooldown is set. A
+        // second lookup for the same ID must not race an unfinished request.
         let endpoint = self.base.join(&id.to_string()).ok()?;
         let response = match self.client.get(endpoint).send().await {
             Ok(response) => response,
@@ -345,7 +350,7 @@ mod tests {
         let starts = Arc::new(StdMutex::new(Vec::<Instant>::new()));
         let recorded = starts.clone();
         let thread = thread::spawn(move || {
-            for _ in 0..2 {
+            for request in 0..2 {
                 let (mut stream, _) = listener.accept().unwrap();
                 let mut data = [0u8; 2048];
                 let n = stream.read(&mut data).unwrap();
@@ -360,6 +365,10 @@ mod tests {
                     .parse::<i32>()
                     .unwrap();
                 recorded.lock().unwrap().push(Instant::now());
+                if request == 0 {
+                    // The first response arrives after the pacing interval.
+                    thread::sleep(Duration::from_millis(1150));
+                }
                 let body = format!("{{\"data\":{{\"mal_id\":{id},\"images\":{{\"jpg\":{{\"image_url\":\"https://cdn.myanimelist.net/{id}.jpg\"}}}}}}}}");
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -368,7 +377,7 @@ mod tests {
                 stream.write_all(response.as_bytes()).unwrap();
             }
         });
-        let covers = JikanCovers::build(base, 2, Duration::from_millis(50)).unwrap();
+        let covers = JikanCovers::build(base, 2, Duration::from_millis(1100)).unwrap();
         let (a, b) = tokio::join!(covers.lookup(10), covers.lookup(10));
         assert_eq!(a, b);
         assert!(a.is_some());
@@ -376,7 +385,7 @@ mod tests {
         thread.join().unwrap();
         let times = starts.lock().unwrap();
         assert_eq!(times.len(), 2);
-        assert!(times[1].duration_since(times[0]) >= Duration::from_millis(45));
+        assert!(times[1].duration_since(times[0]) >= Duration::from_millis(1100));
     }
 
     #[tokio::test]
@@ -387,6 +396,12 @@ mod tests {
                 b"".to_vec(),
                 "Retry-After: 120\r\n",
                 110,
+            ),
+            (
+                "429 Too Many Requests",
+                b"".to_vec(),
+                "Retry-After: 18446744073709551615\r\n",
+                300 * 24 * 60 * 60,
             ),
             ("200 OK", b"not-json".to_vec(), "", 20),
             ("200 OK", br#"{"data":{"mal_id":11}}"#.to_vec(), "", 20),
