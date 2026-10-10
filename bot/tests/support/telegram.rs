@@ -7,7 +7,7 @@ use std::{
     io::{Read, Write},
     net::TcpListener,
     sync::{
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering},
         Arc, Mutex,
     },
     thread,
@@ -26,8 +26,9 @@ pub struct FakeTelegram {
     pub fail_send_count: Arc<AtomicUsize>,
     pub fail_edit: Arc<AtomicBool>,
     pub fail_edit_text: Arc<AtomicBool>,
+    pub fail_edit_caption: Arc<AtomicBool>,
     pub edit_not_modified: Arc<AtomicBool>,
-    pub fail_photo: Arc<AtomicBool>,
+    pub photo_failure_mode: Arc<AtomicU8>,
     pub photo_delay_ms: Arc<AtomicU64>,
     pub fail_ack: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
@@ -42,8 +43,9 @@ impl FakeTelegram {
         let fail_send_count = Arc::new(AtomicUsize::new(0));
         let fail_edit = Arc::new(AtomicBool::new(false));
         let fail_edit_text = Arc::new(AtomicBool::new(false));
+        let fail_edit_caption = Arc::new(AtomicBool::new(false));
         let edit_not_modified = Arc::new(AtomicBool::new(false));
-        let fail_photo = Arc::new(AtomicBool::new(false));
+        let photo_failure_mode = Arc::new(AtomicU8::new(0));
         let photo_delay_ms = Arc::new(AtomicU64::new(0));
         let fail_ack = Arc::new(AtomicBool::new(false));
         listener.set_nonblocking(true).unwrap();
@@ -54,8 +56,9 @@ impl FakeTelegram {
         let counted_failures = fail_send_count.clone();
         let edit_failure = fail_edit.clone();
         let text_failure = fail_edit_text.clone();
+        let caption_failure = fail_edit_caption.clone();
         let not_modified = edit_not_modified.clone();
-        let photo_failure = fail_photo.clone();
+        let photo_failure = photo_failure_mode.clone();
         let photo_delay = photo_delay_ms.clone();
         let ack_failure = fail_ack.clone();
         let thread = thread::spawn(move || {
@@ -134,13 +137,41 @@ impl FakeTelegram {
                             .unwrap_or(0);
                         json!({"ok":true,"result":{"message_id":message_id,"date":1,"chat":{"id":chat_id,"type":"private","first_name":"Test"},"text":fields.get("text").cloned().unwrap_or_default()}})
                     }
+                } else if path.ends_with("/EditMessageCaption") {
+                    if caption_failure.swap(false, Ordering::SeqCst) {
+                        json!({"ok":false,"error_code":500,"description":"failed"})
+                    } else if not_modified.swap(false, Ordering::SeqCst) {
+                        json!({"ok":false,"error_code":400,"description":"Bad Request: message is not modified: specified new message content and reply markup are exactly the same as a current content and reply markup of the message"})
+                    } else {
+                        let message_id = fields
+                            .get("message_id")
+                            .and_then(|v| v.parse::<i32>().ok())
+                            .unwrap_or(0);
+                        json!({"ok":true,"result":{"message_id":message_id,"date":1,"chat":{"id":chat_id,"type":"private","first_name":"Test"},"photo":[{"file_id":"photo","file_unique_id":"unique","width":1,"height":1}],"caption":fields.get("caption").cloned().unwrap_or_default()}})
+                    }
                 } else if path.ends_with("/SendPhoto") {
                     thread::sleep(Duration::from_millis(photo_delay.swap(0, Ordering::SeqCst)));
-                    if photo_failure.swap(false, Ordering::SeqCst) {
-                        json!({"ok":false,"error_code":500,"description":"failed"})
+                    let mode = photo_failure.swap(0, Ordering::SeqCst);
+                    if mode == 6 {
+                        continue;
+                    }
+                    if (1..=5).contains(&mode) {
+                        let (code, description) = match mode {
+                            1 => (400, "Bad Request: wrong file id"),
+                            2 => (400, "Bad Request: wrong file identifier/HTTP URL specified"),
+                            3 => (400, "Bad Request: failed to get HTTP URL content"),
+                            4 => (400, "Bad Request: IMAGE_PROCESS_FAILED"),
+                            _ => (429, "Too Many Requests: retry after 30"),
+                        };
+                        json!({"ok":false,"error_code":code,"description":description})
                     } else {
                         next_id += 1;
-                        json!({"ok":true,"result":{"message_id":next_id,"date":1,"chat":{"id":chat_id,"type":"private","first_name":"Test"},"photo":[]}})
+                        let photos = if mode == 7 {
+                            json!([])
+                        } else {
+                            json!([{"file_id":"photo","file_unique_id":"unique","width":1,"height":1}])
+                        };
+                        json!({"ok":true,"result":{"message_id":next_id,"date":1,"chat":{"id":chat_id,"type":"private","first_name":"Test"},"photo":photos,"caption":fields.get("caption").cloned().unwrap_or_default()}})
                     }
                 } else if path.ends_with("/SendMessage") {
                     if failure.swap(false, Ordering::SeqCst)
@@ -170,8 +201,9 @@ impl FakeTelegram {
             fail_send_count,
             fail_edit,
             fail_edit_text,
+            fail_edit_caption,
             edit_not_modified,
-            fail_photo,
+            photo_failure_mode,
             photo_delay_ms,
             fail_ack,
             stop,

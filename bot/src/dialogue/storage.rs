@@ -8,7 +8,14 @@ use super::{
     callback::{self, Action, RandomTokenSource, TokenSource},
     state::{Actor, ResolvedSelection, State},
 };
+use crate::db::PositionId;
 use crate::db::{DeliveryInput, UserProfile};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RecommendationFormat {
+    Text,
+    Photo,
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct PendingFeedback {
@@ -24,6 +31,7 @@ pub(crate) struct PendingRecommendationDelivery {
     pub actor: Actor,
     pub selection: ResolvedSelection,
     pub input: DeliveryInput,
+    pub format: RecommendationFormat,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,6 +57,7 @@ pub struct Session {
     pub state: State,
     pub callbacks: HashMap<String, CallbackRecord>,
     pub(crate) pending_recommendation_delivery: Option<PendingRecommendationDelivery>,
+    pub(crate) recommendation_formats: HashMap<PositionId, RecommendationFormat>,
     pub(crate) pending_feedback: Option<PendingFeedback>,
 }
 
@@ -66,6 +75,7 @@ impl Session {
             state: State::Idle,
             callbacks: HashMap::new(),
             pending_recommendation_delivery: None,
+            recommendation_formats: HashMap::new(),
             pending_feedback: None,
         }
     }
@@ -73,6 +83,7 @@ impl Session {
         self.generation = self.generation.wrapping_add(1);
         self.state = State::Idle;
         self.callbacks.clear();
+        self.recommendation_formats.clear();
     }
     pub fn begin(&mut self, state: State) {
         self.reset();
