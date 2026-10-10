@@ -25,6 +25,9 @@ pub struct FakeTelegram {
     pub fail_send: Arc<AtomicBool>,
     pub fail_send_count: Arc<AtomicUsize>,
     pub fail_edit: Arc<AtomicBool>,
+    pub fail_edit_text: Arc<AtomicBool>,
+    pub edit_not_modified: Arc<AtomicBool>,
+    pub fail_photo: Arc<AtomicBool>,
     pub fail_ack: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
@@ -37,6 +40,9 @@ impl FakeTelegram {
         let fail_send = Arc::new(AtomicBool::new(false));
         let fail_send_count = Arc::new(AtomicUsize::new(0));
         let fail_edit = Arc::new(AtomicBool::new(false));
+        let fail_edit_text = Arc::new(AtomicBool::new(false));
+        let edit_not_modified = Arc::new(AtomicBool::new(false));
+        let fail_photo = Arc::new(AtomicBool::new(false));
         let fail_ack = Arc::new(AtomicBool::new(false));
         listener.set_nonblocking(true).unwrap();
         let stop = Arc::new(AtomicBool::new(false));
@@ -45,6 +51,9 @@ impl FakeTelegram {
         let failure = fail_send.clone();
         let counted_failures = fail_send_count.clone();
         let edit_failure = fail_edit.clone();
+        let text_failure = fail_edit_text.clone();
+        let not_modified = edit_not_modified.clone();
+        let photo_failure = fail_photo.clone();
         let ack_failure = fail_ack.clone();
         let thread = thread::spawn(move || {
             let mut next_id = 100;
@@ -110,6 +119,25 @@ impl FakeTelegram {
                             .unwrap_or(0);
                         json!({"ok":true,"result":{"message_id":message_id,"date":1,"chat":{"id":chat_id,"type":"private","first_name":"Test"},"text":"ok"}})
                     }
+                } else if path.ends_with("/EditMessageText") {
+                    if text_failure.swap(false, Ordering::SeqCst) {
+                        json!({"ok":false,"error_code":500,"description":"failed"})
+                    } else if not_modified.swap(false, Ordering::SeqCst) {
+                        json!({"ok":false,"error_code":400,"description":"Bad Request: message is not modified: specified new message content and reply markup are exactly the same as a current content and reply markup of the message"})
+                    } else {
+                        let message_id = fields
+                            .get("message_id")
+                            .and_then(|v| v.parse::<i32>().ok())
+                            .unwrap_or(0);
+                        json!({"ok":true,"result":{"message_id":message_id,"date":1,"chat":{"id":chat_id,"type":"private","first_name":"Test"},"text":fields.get("text").cloned().unwrap_or_default()}})
+                    }
+                } else if path.ends_with("/SendPhoto") {
+                    if photo_failure.swap(false, Ordering::SeqCst) {
+                        json!({"ok":false,"error_code":500,"description":"failed"})
+                    } else {
+                        next_id += 1;
+                        json!({"ok":true,"result":{"message_id":next_id,"date":1,"chat":{"id":chat_id,"type":"private","first_name":"Test"},"photo":[]}})
+                    }
                 } else if path.ends_with("/SendMessage") {
                     if failure.swap(false, Ordering::SeqCst)
                         || counted_failures
@@ -137,6 +165,9 @@ impl FakeTelegram {
             fail_send,
             fail_send_count,
             fail_edit,
+            fail_edit_text,
+            edit_not_modified,
+            fail_photo,
             fail_ack,
             stop,
             thread: Some(thread),
@@ -213,6 +244,17 @@ pub async fn dispatch(bot: &Bot, ctx: &Arc<AppContext>, update: Update) {
 }
 
 fn decode_fields(body: &str) -> std::collections::HashMap<String, String> {
+    if body.starts_with("--") {
+        return body
+            .split("\r\n--")
+            .filter_map(|part| {
+                let (_, named) = part.split_once("name=\"")?;
+                let (name, _) = named.split_once('"')?;
+                let (_, value) = part.split_once("\r\n\r\n")?;
+                Some((name.to_owned(), value.trim_end_matches("\r\n").to_owned()))
+            })
+            .collect();
+    }
     if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(body) {
         map.into_iter()
             .map(|(key, value)| {

@@ -5,6 +5,12 @@ use crate::{
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DescriptionView {
+    Summary,
+    Page(usize),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
     Recommend,
     Rate,
@@ -29,6 +35,10 @@ pub enum Action {
         position_id: PositionId,
         score: i16,
     },
+    RecommendationDescription {
+        position_id: PositionId,
+        view: DescriptionView,
+    },
 }
 
 impl Action {
@@ -41,6 +51,7 @@ impl Action {
             Self::RecommendationScore { position_id, score } => {
                 *position_id > 0 && (0..=5).contains(score)
             }
+            Self::RecommendationDescription { position_id, .. } => *position_id > 0,
             _ => true,
         }
     }

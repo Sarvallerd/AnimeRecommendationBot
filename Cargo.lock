@@ -89,8 +89,10 @@ name = "bot"
 version = "0.1.0"
 dependencies = [
  "getrandom",
+ "httpdate",
  "log",
  "pretty_env_logger",
+ "reqwest",
  "serde",
  "serde_json",
  "serde_urlencoded",

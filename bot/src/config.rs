@@ -15,6 +15,7 @@ pub(crate) struct Config {
     database: PgConfig,
     artifacts_dir: PathBuf,
     log_directives: Vec<LogDirective>,
+    covers_enabled: bool,
 }
 
 struct LogDirective {
@@ -74,11 +75,22 @@ impl Config {
         };
         let log_directives = parse_log_directives(&log_spec)?;
 
+        let covers_enabled = match lookup("COVERS_ENABLED") {
+            Ok(value) if value == "true" => true,
+            Ok(value) if value == "false" => false,
+            Ok(_) => return Err(ConfigError::new("COVERS_ENABLED", "must be true or false")),
+            Err(env::VarError::NotPresent) => true,
+            Err(env::VarError::NotUnicode(_)) => {
+                return Err(ConfigError::new("COVERS_ENABLED", "must be valid Unicode"))
+            }
+        };
+
         Ok(Self {
             token,
             database,
             artifacts_dir,
             log_directives,
+            covers_enabled,
         })
     }
 
@@ -92,6 +104,10 @@ impl Config {
 
     pub(crate) fn artifacts_dir(&self) -> &Path {
         &self.artifacts_dir
+    }
+
+    pub(crate) fn covers_enabled(&self) -> bool {
+        self.covers_enabled
     }
 
     pub(crate) fn init_logging(&self) -> Result<(), ConfigError> {
@@ -292,6 +308,7 @@ mod tests {
         let config = load(&input).unwrap();
         assert_eq!(config.token(), "12345:ABC_def-9");
         assert_eq!(config.artifacts_dir(), dir.0.as_path());
+        assert!(config.covers_enabled());
         assert_eq!(config.database().get_user(), Some("user"));
         assert_eq!(config.database().get_password(), Some(b"p@ss".as_slice()));
         assert_eq!(config.log_directives[0].level, LevelFilter::Info);
@@ -307,6 +324,20 @@ mod tests {
             config.artifacts_dir(),
             env::current_dir().unwrap().join("src")
         );
+    }
+
+    #[test]
+    fn covers_toggle_accepts_only_exact_boolean_values() {
+        let dir = TestDir::new();
+        let mut input = values(&dir);
+        input.insert("COVERS_ENABLED", "false".to_owned());
+        assert!(!load(&input).unwrap().covers_enabled());
+        input.insert("COVERS_ENABLED", "true".to_owned());
+        assert!(load(&input).unwrap().covers_enabled());
+        for invalid in ["TRUE", "0", "", "yes"] {
+            input.insert("COVERS_ENABLED", invalid.to_owned());
+            assert_eq!(load(&input).err().unwrap().variable, "COVERS_ENABLED");
+        }
     }
 
     #[test]

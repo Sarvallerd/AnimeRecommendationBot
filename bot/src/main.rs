@@ -1,6 +1,7 @@
 mod config;
 use bot::{
     catalog::Bundle,
+    covers::{CoverProvider, JikanCovers, NoCovers},
     db::Db,
     dialogue::{context::AppContext, storage::SessionStore},
     handlers,
@@ -52,11 +53,20 @@ async fn run() -> Result<(), String> {
         return Ok(());
     }
     let bot = Bot::new(config.token());
-    let context = Arc::new(AppContext::new(
-        bundle,
-        Arc::new(db),
-        Arc::new(SessionStore::new()),
-    ));
+    let covers: Arc<dyn CoverProvider> = if config.covers_enabled() {
+        match JikanCovers::new() {
+            Ok(covers) => Arc::new(covers),
+            Err(_) => {
+                log::warn!("Cover provider unavailable; showing text cards");
+                Arc::new(NoCovers)
+            }
+        }
+    } else {
+        Arc::new(NoCovers)
+    };
+    let context = Arc::new(
+        AppContext::new(bundle, Arc::new(db), Arc::new(SessionStore::new())).with_covers(covers),
+    );
     let webhook = bot
         .get_webhook_info()
         .await
