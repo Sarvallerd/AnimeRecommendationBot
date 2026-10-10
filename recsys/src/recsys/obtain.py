@@ -83,7 +83,9 @@ def _download(path: Path, source: dict) -> None:
         with urllib.request.urlopen(source["url"], timeout=TIMEOUT_SECONDS) as stream:
             _write_verified(path, source, _chunks(stream))
     except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
-        raise SourceError(f"download failed for {path} from {source['url']}: {exc}") from exc
+        # Remote error text can contain signed URLs or credentials.
+        detail = f"HTTP {exc.code}" if isinstance(exc, urllib.error.HTTPError) else type(exc).__name__
+        raise SourceError(f"download failed for {path}: {detail}") from exc
 
 
 def _extract(path: Path, source: dict, archive_path: Path) -> None:
@@ -106,28 +108,56 @@ def _extract(path: Path, source: dict, archive_path: Path) -> None:
         raise SourceError(f"cannot extract {source['member']} from {archive_path}: {exc}") from exc
 
 
-def obtain(data_dir: Path, *, offline: bool = False, registry: dict | None = None,
+def _check_existing_manifest(path: Path, expected: dict) -> None:
+    """A foreign or damaged success marker is evidence to preserve, not overwrite."""
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise SourceError(f"unsafe manifest target: {path}")
+    if not path.exists():
+        return
+    try:
+        existing = json.loads(path.read_bytes())
+    except (OSError, ValueError, UnicodeError) as exc:
+        raise SourceError(f"unreadable or malformed source manifest: {path}") from exc
+    if (not isinstance(existing, dict)
+            or set(existing) != set(expected)
+            or type(existing.get("schema_version")) is not int
+            or existing != expected):
+        raise SourceError(f"foreign or incompatible source manifest: {path}; use a separate --data-dir for another snapshot")
+
+
+def obtain(data_dir: Path, *, offline: bool = False, snapshot: str | None = None,
+           registry: dict | None = None,
            registry_sha256: str | None = None) -> Path:
     """Install all registry sources and return the verified manifest path.
 
     The registry arguments allow small local fixtures in tests; the CLI always uses
     the packaged registry.
     """
+    if snapshot is not None and registry is not None:
+        raise SourceError("snapshot and registry cannot be supplied together")
     if registry is None:
-        registry, registry_sha256 = load_registry()
+        registry, registry_sha256 = load_registry(snapshot) if snapshot is not None else load_registry()
     else:
         validate_registry(registry)
         if registry_sha256 is None:
             registry_sha256 = hashlib.sha256(
                 json.dumps(registry, sort_keys=True, separators=(",", ":")).encode()
             ).hexdigest()
+    payload = {
+        "schema_version": 1,
+        "registry_sha256": registry_sha256,
+        "provenance": registry["provenance"],
+        "verified": [
+            {key: source[key] for key in ("filename", "size", "sha256")}
+            for source in registry["sources"]
+        ],
+    }
     data_dir = Path(data_dir)
     if data_dir.is_symlink() or (data_dir.exists() and not data_dir.is_dir()):
         raise SourceError(f"unsafe data directory: {data_dir}")
     data_dir.mkdir(parents=True, exist_ok=True)
     manifest = data_dir / MANIFEST_NAME
-    if manifest.is_dir():
-        raise SourceError(f"unsafe manifest target: {manifest}")
+    _check_existing_manifest(manifest, payload)
     manifest.unlink(missing_ok=True)
     by_id = {source["id"]: source for source in registry["sources"]}
     for source in registry["sources"]:
@@ -141,15 +171,6 @@ def obtain(data_dir: Path, *, offline: bool = False, registry: dict | None = Non
         else:
             archive = by_id[source["archive_id"]]
             _extract(path, source, data_dir / archive["filename"])
-    payload = {
-        "schema_version": 1,
-        "registry_sha256": registry_sha256,
-        "provenance": registry["provenance"],
-        "verified": [
-            {key: source[key] for key in ("filename", "size", "sha256")}
-            for source in registry["sources"]
-        ],
-    }
     manifest_source = {
         "size": 0,
         "sha256": "",

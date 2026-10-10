@@ -27,7 +27,7 @@ curl --fail --location 'https://www.kaggle.com/api/v1/datasets/download/neelagir
 curl --fail --location 'https://www.kaggle.com/api/v1/datasets/download/neelagiriaditya/anime-dataset-jan-1917-to-oct-2025/datasets%2Fratings.csv?datasetVersionNumber=1' -o "$AUDIT_DIR/ratings.csv"
 test "$(wc -c < "$AUDIT_DIR/details.csv")" -eq 20178926
 test "$(wc -c < "$AUDIT_DIR/ratings.csv")" -eq 4504586658
-printf '%s  %s\n' '023b36604b475c07f0952caa1954168ba86d5ebd94b65458c4de522f78e6d1ee20' "$AUDIT_DIR/details.csv" | sha256sum --check -
+printf '%s  %s\n' '023b36604b475c07f0952caa1954168ba86d5ebd94b65458c4de522f78e6d1ee' "$AUDIT_DIR/details.csv" | sha256sum --check -
 printf '%s  %s\n' 'b93f8f1a540510a8640243ec6bba771212ae33e1fba50f257621f9d1077439e1' "$AUDIT_DIR/ratings.csv" | sha256sum --check -
 ```
 

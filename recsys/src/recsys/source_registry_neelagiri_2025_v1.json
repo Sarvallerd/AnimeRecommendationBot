@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "provenance": {
+    "dataset": {
+      "snapshot_id": "neelagiri-2025-v1",
+      "provider": "Kaggle",
+      "slug": "neelagiriaditya/anime-dataset-jan-1917-to-oct-2025",
+      "version": 1,
+      "page_url": "https://www.kaggle.com/datasets/neelagiriaditya/anime-dataset-jan-1917-to-oct-2025",
+      "declared_license": "CC BY-NC-SA 4.0",
+      "intake_scope": "noncommercial-research",
+      "exact_collection_date": null
+    }
+  },
+  "sources": [
+    {
+      "id": "neelagiri_details_csv",
+      "filename": "details.csv",
+      "size": 20178926,
+      "sha256": "023b36604b475c07f0952caa1954168ba86d5ebd94b65458c4de522f78e6d1ee",
+      "url": "https://www.kaggle.com/api/v1/datasets/download/neelagiriaditya/anime-dataset-jan-1917-to-oct-2025/datasets%2Fdetails.csv?datasetVersionNumber=1"
+    },
+    {
+      "id": "neelagiri_ratings_csv",
+      "filename": "ratings.csv",
+      "size": 4504586658,
+      "sha256": "b93f8f1a540510a8640243ec6bba771212ae33e1fba50f257621f9d1077439e1",
+      "url": "https://www.kaggle.com/api/v1/datasets/download/neelagiriaditya/anime-dataset-jan-1917-to-oct-2025/datasets%2Fratings.csv?datasetVersionNumber=1"
+    }
+  ]
+}

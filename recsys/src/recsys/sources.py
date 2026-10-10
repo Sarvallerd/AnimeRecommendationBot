@@ -11,9 +11,19 @@ class SourceError(Exception):
     """An input source could not be validated or installed."""
 
 
-def load_registry() -> tuple[dict, str]:
+DEFAULT_SNAPSHOT = "mal-2020-glove-v1"
+SNAPSHOT_IDS = (DEFAULT_SNAPSHOT, "neelagiri-2025-v1")
+_REGISTRY_RESOURCES = {
+    DEFAULT_SNAPSHOT: "source_registry.json",
+    "neelagiri-2025-v1": "source_registry_neelagiri_2025_v1.json",
+}
+
+
+def load_registry(snapshot: str = DEFAULT_SNAPSHOT) -> tuple[dict, str]:
     """Load the registry packaged with the installed distribution."""
-    raw = resources.files("recsys").joinpath("source_registry.json").read_bytes()
+    if not isinstance(snapshot, str) or snapshot not in _REGISTRY_RESOURCES:
+        raise SourceError("unknown source snapshot")
+    raw = resources.files("recsys").joinpath(_REGISTRY_RESOURCES[snapshot]).read_bytes()
     try:
         registry = json.loads(raw)
     except (ValueError, UnicodeError) as exc:
