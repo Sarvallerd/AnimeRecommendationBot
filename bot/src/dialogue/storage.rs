@@ -134,7 +134,10 @@ impl Session {
     pub fn finish(&mut self, token: &str, success: bool) {
         if let Some(record) = self.callbacks.get_mut(token) {
             if record.status == CallbackStatus::Processing {
-                record.status = if success {
+                record.status = if matches!(record.action, Action::RecommendationDescription { .. })
+                {
+                    CallbackStatus::Active
+                } else if success {
                     CallbackStatus::Consumed
                 } else {
                     CallbackStatus::Active
@@ -168,7 +171,7 @@ fn action_matches_state(
         Action::AnimeScore { request_id, .. } => matches!(state,
             State::Selected { intent: super::state::AnimeIntent::Rate, selection }
             if *request_id == selection.query.request_id),
-        Action::RecommendationScore { .. } => matches!(
+        Action::RecommendationScore { .. } | Action::RecommendationDescription { .. } => matches!(
             state,
             State::Selected {
                 intent: super::state::AnimeIntent::Recommend,

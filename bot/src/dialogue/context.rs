@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use crate::{
     catalog::Bundle,
+    covers::{self, CoverProvider},
     dialogue::{repository::Repository, storage::SessionStore},
     search::SearchIndex,
 };
@@ -12,6 +13,7 @@ pub struct AppContext {
     pub search: Arc<SearchIndex>,
     pub repository: Arc<dyn Repository>,
     pub sessions: Arc<SessionStore>,
+    pub covers: Arc<dyn CoverProvider>,
 }
 
 impl AppContext {
@@ -26,6 +28,12 @@ impl AppContext {
             search,
             repository,
             sessions,
+            covers: covers::disabled(),
         }
+    }
+
+    pub fn with_covers(mut self, covers: Arc<dyn CoverProvider>) -> Self {
+        self.covers = covers;
+        self
     }
 }

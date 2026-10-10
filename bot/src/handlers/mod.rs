@@ -3,6 +3,7 @@ pub mod feedback;
 pub mod ratings;
 pub mod recommendations;
 pub mod search;
+mod synopsis;
 mod titles;
 pub mod ui;
 
@@ -290,6 +291,47 @@ async fn handle_callback(bot: Bot, q: CallbackQuery, ctx: Arc<AppContext>) -> Ha
                     Ok(_) => Err(DbError::DatabaseFailure.into()),
                     Err(error) => Err(error.into()),
                 },
+            }
+        }
+        Action::RecommendationDescription { position_id, view } => {
+            let Some(selection) = (match &session.state {
+                State::Selected {
+                    intent: AnimeIntent::Recommend,
+                    selection,
+                } => Some(selection.clone()),
+                _ => None,
+            }) else {
+                session.finish(data, false);
+                return stale(&bot, actor).await;
+            };
+            match ctx
+                .repository
+                .list_delivered_positions(actor.user_id, selection.query.request_id)
+                .await
+            {
+                Ok(positions) => {
+                    if let Some(position) = positions.iter().find(|p| {
+                        p.id == position_id
+                            && p.request_id == selection.query.request_id
+                            && p.chat_id == actor.chat_id
+                            && p.message_id == message.id.0
+                    }) {
+                        recommendations::on_description(
+                            &bot,
+                            &ctx,
+                            actor,
+                            &mut session,
+                            &selection,
+                            position,
+                            view,
+                        )
+                        .await
+                    } else {
+                        stale(&bot, actor).await
+                    }
+                }
+                Err(DbError::DatabaseFailure) => Err(DbError::DatabaseFailure.into()),
+                Err(_) => stale(&bot, actor).await,
             }
         }
     };

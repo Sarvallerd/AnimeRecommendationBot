@@ -1,17 +1,20 @@
-use super::{titles::ResponseTitles, ui, HandlerResult};
+use super::{synopsis, titles::ResponseTitles, ui, HandlerResult};
 use crate::{
     catalog::{Anime, MalId},
     db::{DbError, DeliveredPosition, DeliveryInput, WriteOutcome},
     dialogue::{
-        callback::Action,
+        callback::{Action, DescriptionView},
         context::AppContext,
         state::{Actor, AnimeIntent, ResolvedSelection, State},
         storage::{CallbackStatus, PendingRecommendationDelivery, Session},
     },
 };
 use std::collections::HashSet;
+use std::time::Duration;
 use teloxide::prelude::*;
-use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, MessageId};
+use teloxide::types::{
+    InlineKeyboardButton, InlineKeyboardMarkup, InputFile, MessageId, ReplyParameters,
+};
 
 const RETRY_NOTICE: &str = "Не удалось завершить выдачу. Нажмите выбранное аниме ещё раз.";
 const EMPTY_NOTICE: &str = "Для этого аниме пока нет рекомендаций. Попробуйте другое: /recommend.";
@@ -107,10 +110,16 @@ async fn deliver(
             .await?;
         return Ok(());
     }
+    let mut photos_available = true;
     for (index, neighbor) in neighbors.iter().enumerate() {
         let rank = i16::try_from(index + 1).map_err(|_| DbError::Conflict)?;
         if let Some(row) = recorded.iter().find(|row| row.rank == rank) {
-            attach_scores(bot, actor, session, row).await?;
+            let anime = ctx
+                .bundle
+                .catalog()
+                .get(row.mal_id)
+                .ok_or(DbError::Conflict)?;
+            attach_scores(bot, actor, session, row, &titles, neighbors.len(), anime).await?;
             continue;
         }
         let anime = ctx
@@ -121,7 +130,15 @@ async fn deliver(
         let sent = bot
             .send_message(
                 ChatId(actor.chat_id),
-                render_card(&titles, rank, neighbors.len(), neighbor.mal_id, anime),
+                render_card(
+                    &titles,
+                    rank,
+                    neighbors.len(),
+                    neighbor.mal_id,
+                    anime,
+                    &DescriptionView::Summary,
+                )
+                .0,
             )
             .await?;
         if sent.id.0 <= 0 {
@@ -138,7 +155,10 @@ async fn deliver(
             },
         });
         let row = persist_pending(ctx, session).await?;
-        attach_scores(bot, actor, session, &row).await?;
+        attach_scores(bot, actor, session, &row, &titles, neighbors.len(), anime).await?;
+        if photos_available {
+            photos_available = send_cover(bot, ctx, actor, neighbor.mal_id, sent.id).await;
+        }
     }
     Ok(())
 }
@@ -148,6 +168,9 @@ async fn attach_scores(
     actor: Actor,
     session: &mut Session,
     position: &DeliveredPosition,
+    titles: &ResponseTitles,
+    total: usize,
+    anime: &Anime,
 ) -> HandlerResult {
     if position.chat_id != actor.chat_id || position.id <= 0 || position.message_id <= 0 {
         return Err(DbError::Conflict.into());
@@ -179,9 +202,30 @@ async fn attach_scores(
         ));
         tokens.push(token);
     }
+    let mut rows = vec![buttons];
+    if render_card(
+        titles,
+        position.rank,
+        total,
+        position.mal_id,
+        anime,
+        &DescriptionView::Summary,
+    )
+    .1
+    {
+        let (button, token) = description_button(
+            session,
+            position.id,
+            DescriptionView::Page(0),
+            "Развернуть описание",
+        )?;
+        // Read-only tokens are safe to retain after an ambiguous edit outcome.
+        session.activate(&[token], position.message_id);
+        rows.push(vec![button]);
+    }
     let edited = bot
         .edit_message_reply_markup(ChatId(position.chat_id), MessageId(position.message_id))
-        .reply_markup(InlineKeyboardMarkup::new(vec![buttons]))
+        .reply_markup(InlineKeyboardMarkup::new(rows))
         .await;
     match edited {
         Ok(message)
@@ -239,7 +283,8 @@ fn render_card(
     total: usize,
     mal_id: MalId,
     anime: &Anime,
-) -> String {
+    view: &DescriptionView,
+) -> (String, bool) {
     let seed_title = ui::bounded(titles.seed_title(), 160);
     let title = ui::bounded(titles.recommendation_title(anime), 240);
     let score = anime
@@ -258,15 +303,238 @@ fn render_card(
     } else {
         ui::bounded(&anime.genres.join(", "), 256)
     };
-    let mut card = format!(
-        "Рекомендация {rank}/{total}\nПо запросу: {seed_title}\nНазвание: {title}\nMAL ID: {mal_id}\nОценка MAL: {score}\nГод: {year}\nТип: {kind}\nЭпизоды: {episodes}\nЖанры: {genres}\nПолезность рекомендации: 0 — не полезна, 5 — очень полезна.\nОписание: "
+    let header = format!(
+        "Рекомендация {rank}/{total}\nПо запросу: {seed_title}\nНазвание: {title}\nMAL ID: {mal_id}\nОценка MAL: {score}\nГод: {year}\nТип: {kind}\nЭпизоды: {episodes}\nЖанры: {genres}\nПолезность рекомендации: 0 — не полезна, 5 — очень полезна.\n"
     );
-    let remaining = CARD_LIMIT.saturating_sub(card.encode_utf16().count());
-    card.push_str(&ui::bounded(
-        anime.synopsis.as_deref().unwrap_or("Описание отсутствует."),
-        remaining,
-    ));
-    card
+    let description = anime.synopsis.as_deref().unwrap_or("Описание отсутствует.");
+    let summary_end = synopsis::preview_end(description);
+    let prefix = format!("{header}Описание: ");
+    let budget = CARD_LIMIT.saturating_sub(prefix.encode_utf16().count());
+    let preview = &description[..summary_end];
+    let expandable = anime.synopsis.is_some()
+        && (summary_end < description.len() || preview.encode_utf16().count() > budget);
+    if matches!(view, DescriptionView::Summary) {
+        let mut card = prefix;
+        card.push_str(&ui::bounded(preview, budget));
+        return (card, expandable);
+    }
+    // The reserved space covers any plausible decimal page count, keeping page boundaries stable.
+    let page_budget = CARD_LIMIT
+        .saturating_sub(header.encode_utf16().count() + 80)
+        .max(1);
+    let pages = synopsis::pages(description, page_budget);
+    let DescriptionView::Page(page) = view else {
+        unreachable!()
+    };
+    let Some(payload) = pages.get(*page) else {
+        return (String::new(), expandable);
+    };
+    let mut card = format!(
+        "{header}Описание (страница {}/{}):\n",
+        page + 1,
+        pages.len()
+    );
+    card.push_str(payload);
+    (card, expandable)
+}
+
+fn description_button(
+    session: &mut Session,
+    position_id: i64,
+    view: DescriptionView,
+    label: &str,
+) -> Result<(InlineKeyboardButton, String), getrandom::Error> {
+    let token = session.callbacks.iter().find_map(|(token, record)| {
+        (record.generation == session.generation
+            && matches!(&record.action, Action::RecommendationDescription { position_id: id, view: existing }
+                if *id == position_id && *existing == view))
+        .then(|| token.clone())
+    }).map_or_else(|| session.issue(Action::RecommendationDescription { position_id, view: view.clone() }), Ok)?;
+    Ok((InlineKeyboardButton::callback(label, token.clone()), token))
+}
+
+pub async fn on_description(
+    bot: &Bot,
+    ctx: &AppContext,
+    actor: Actor,
+    session: &mut Session,
+    selection: &ResolvedSelection,
+    position: &DeliveredPosition,
+    view: DescriptionView,
+) -> HandlerResult {
+    if selection.bundle_id != ctx.bundle.identity()
+        || position.chat_id != actor.chat_id
+        || position.request_id != selection.query.request_id
+        || position.message_id <= 0
+    {
+        return Err(DbError::Conflict.into());
+    }
+    let seed = ctx
+        .bundle
+        .catalog()
+        .get(selection.seed_mal_id)
+        .ok_or(DbError::Conflict)?;
+    let anime = ctx
+        .bundle
+        .catalog()
+        .get(position.mal_id)
+        .ok_or(DbError::Conflict)?;
+    let neighbors = ctx
+        .bundle
+        .neighbors(selection.seed_mal_id)
+        .ok_or(DbError::Conflict)?;
+    let index = usize::try_from(position.rank.checked_sub(1).ok_or(DbError::Conflict)?)
+        .map_err(|_| DbError::Conflict)?;
+    if neighbors.get(index).map(|n| n.mal_id) != Some(position.mal_id) {
+        return Err(DbError::Conflict.into());
+    }
+    let titles = ResponseTitles::resolve(
+        &ctx.search,
+        &selection.query.raw_query,
+        selection.seed_mal_id,
+        seed,
+    );
+    let (text, expandable) = render_card(
+        &titles,
+        position.rank,
+        neighbors.len(),
+        position.mal_id,
+        anime,
+        &view,
+    );
+    if !expandable || text.is_empty() {
+        return Err(DbError::Conflict.into());
+    }
+    let mut score_buttons: Vec<(i16, InlineKeyboardButton)> = session
+        .callbacks
+        .iter()
+        .filter_map(|(token, record)| {
+            if record.generation == session.generation
+                && record.message_id == Some(position.message_id)
+                && matches!(
+                    record.status,
+                    CallbackStatus::Active | CallbackStatus::Processing | CallbackStatus::Consumed
+                )
+            {
+                if let Action::RecommendationScore { position_id, score } = record.action {
+                    if position_id == position.id {
+                        return Some((
+                            score,
+                            InlineKeyboardButton::callback(score.to_string(), token.clone()),
+                        ));
+                    }
+                }
+            }
+            None
+        })
+        .collect();
+    score_buttons.sort_by_key(|(score, _)| *score);
+    let mut rows: Vec<Vec<InlineKeyboardButton>> = Vec::new();
+    if !score_buttons.is_empty() {
+        rows.push(
+            score_buttons
+                .into_iter()
+                .map(|(_, button)| button)
+                .collect(),
+        );
+    }
+    let mut tokens = Vec::new();
+    match view {
+        DescriptionView::Summary => {
+            let (button, token) = description_button(
+                session,
+                position.id,
+                DescriptionView::Page(0),
+                "Развернуть описание",
+            )?;
+            rows.push(vec![button]);
+            tokens.push(token);
+        }
+        DescriptionView::Page(page) => {
+            let mut navigation = Vec::new();
+            if page > 0 {
+                let (button, token) = description_button(
+                    session,
+                    position.id,
+                    DescriptionView::Page(page - 1),
+                    "◀ Назад",
+                )?;
+                navigation.push(button);
+                tokens.push(token);
+            }
+            if !render_card(
+                &titles,
+                position.rank,
+                neighbors.len(),
+                position.mal_id,
+                anime,
+                &DescriptionView::Page(page + 1),
+            )
+            .0
+            .is_empty()
+            {
+                let (button, token) = description_button(
+                    session,
+                    position.id,
+                    DescriptionView::Page(page + 1),
+                    "Далее ▶",
+                )?;
+                navigation.push(button);
+                tokens.push(token);
+            }
+            if !navigation.is_empty() {
+                rows.push(navigation);
+            }
+            let (button, token) = description_button(
+                session,
+                position.id,
+                DescriptionView::Summary,
+                "Свернуть описание",
+            )?;
+            rows.push(vec![button]);
+            tokens.push(token);
+        }
+    }
+    session.activate(&tokens, position.message_id);
+    match bot
+        .edit_message_text(
+            ChatId(position.chat_id),
+            MessageId(position.message_id),
+            text,
+        )
+        .reply_markup(InlineKeyboardMarkup::new(rows))
+        .await
+    {
+        Ok(message)
+            if message.chat.id.0 == position.chat_id && message.id.0 == position.message_id =>
+        {
+            Ok(())
+        }
+        Ok(_) => Err(DbError::Conflict.into()),
+        Err(teloxide::RequestError::Api(teloxide::ApiError::MessageNotModified)) => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+async fn send_cover(
+    bot: &Bot,
+    ctx: &AppContext,
+    actor: Actor,
+    mal_id: MalId,
+    message_id: MessageId,
+) -> bool {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        let Some(url) = ctx.covers.lookup(mal_id).await else {
+            return true;
+        };
+        bot.send_photo(ChatId(actor.chat_id), InputFile::url(url))
+            .reply_parameters(ReplyParameters::new(message_id))
+            .disable_notification(true)
+            .await
+            .is_ok()
+    })
+    .await
+    .unwrap_or_default()
 }
 
 pub struct ScoreAction<'a> {
