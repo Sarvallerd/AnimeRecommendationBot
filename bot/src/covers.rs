@@ -341,7 +341,7 @@ impl UpstreamCovers {
         self.cached(id).await
     }
 
-    async fn lookup_http(&self, id: MalId) -> Option<Url> {
+    async fn lookup_http(&self, id: MalId, next: &mut Instant) -> Option<Url> {
         let request = match self.provider {
             Provider::Jikan => self.client.get(self.base.join(&id.to_string()).ok()?),
             Provider::AniList => self.client.post(self.base.clone()).json(&serde_json::json!({
@@ -350,6 +350,7 @@ impl UpstreamCovers {
             })),
         };
         let started = Instant::now();
+        *next = started + self.interval;
         let response = match request.send().await {
             Ok(response) => response,
             Err(_) => {
@@ -506,10 +507,9 @@ impl CoverProvider for UpstreamCovers {
                     return None;
                 }
             }
-            *gate = Instant::now() + self.interval;
             // Reqwest's full request timeout starts here, after the waiting slot.
             // Keep the gate until the response is cached or cooldown is visible.
-            self.lookup_http(mal_id).await
+            self.lookup_http(mal_id, &mut gate).await
         })
     }
 }
@@ -622,7 +622,6 @@ mod tests {
         method: String,
         path: String,
         body: String,
-        at: Instant,
     }
 
     struct FixtureReply {
@@ -714,7 +713,6 @@ mod tests {
                             .split_once("\r\n\r\n")
                             .map_or("", |(_, body)| body)
                             .to_owned(),
-                        at: Instant::now(),
                     };
                     recorded.lock().unwrap().push(captured.clone());
                     let reply = handler(&captured);
@@ -1074,10 +1072,14 @@ mod tests {
         let (a, b) = tokio::join!(upstream.lookup(10), upstream.lookup(10));
         assert_eq!(a, b);
         assert!(a.is_some());
+        let first_next_start = *upstream.next_start.lock().await;
         assert!(upstream.lookup(11).await.is_some());
+        let second_next_start = *upstream.next_start.lock().await;
         let calls = anilist.calls();
         assert_eq!(calls.len(), 2);
-        assert!(calls[1].at.duration_since(calls[0].at) >= Duration::from_millis(2100));
+        // These are client-side send-start timestamps plus the fixed interval.
+        // A server receive timestamp includes unrelated socket/scheduler delays.
+        assert!(second_next_start.duration_since(first_next_start) >= Duration::from_millis(2100));
     }
 
     #[tokio::test]
@@ -1212,8 +1214,8 @@ mod tests {
             listener.local_addr().unwrap()
         ))
         .unwrap();
-        let starts = Arc::new(StdMutex::new(Vec::<Instant>::new()));
-        let recorded = starts.clone();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let recorded = requests.clone();
         let thread = thread::spawn(move || {
             for request in 0..2 {
                 let (mut stream, _) = listener.accept().unwrap();
@@ -1229,7 +1231,7 @@ mod tests {
                     .unwrap()
                     .parse::<i32>()
                     .unwrap();
-                recorded.lock().unwrap().push(Instant::now());
+                recorded.fetch_add(1, Ordering::SeqCst);
                 if request == 0 {
                     // The first response arrives after the pacing interval.
                     thread::sleep(Duration::from_millis(1150));
@@ -1246,11 +1248,12 @@ mod tests {
         let (a, b) = tokio::join!(covers.lookup(10), covers.lookup(10));
         assert_eq!(a, b);
         assert!(a.is_some());
+        let first_next_start = *covers.next_start.lock().await;
         assert!(covers.lookup(11).await.is_some());
+        let second_next_start = *covers.next_start.lock().await;
         thread.join().unwrap();
-        let times = starts.lock().unwrap();
-        assert_eq!(times.len(), 2);
-        assert!(times[1].duration_since(times[0]) >= Duration::from_millis(1100));
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+        assert!(second_next_start.duration_since(first_next_start) >= Duration::from_millis(1100));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
