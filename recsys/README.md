@@ -16,7 +16,7 @@ Run the package checks with:
 uv run --locked --no-editable --extra quality python -m unittest discover -s recsys/tests -p 'test_*.py' -v
 ```
 
-Acquire the inputs into `data/raw` relative to the current directory:
+Acquire the unchanged MAL 2020 and GloVe default inputs into `data/raw` relative to the current directory:
 
 ```sh
 uv run --locked --no-editable recsys obtain
@@ -24,6 +24,16 @@ uv run --locked --no-editable recsys obtain --data-dir /path/to/cache --offline
 ```
 
 The first command downloads about 875 MB and extracts a 1.04 GB text file, so allow at least 2 GB of storage plus temporary download space. Every run verifies all four files by size and SHA256, then writes `source-manifest.json`. Offline mode never downloads; it can extract the text file if the verified ZIP is cached. If a file fails verification, the command reports its path and observed values. Remove that file and rerun to fetch or extract it again. Partial downloads are removed automatically.
+
+For the separately pinned 2025 research snapshot, run:
+
+```sh
+uv run --locked --no-editable recsys obtain --snapshot neelagiri-2025-v1
+uv run --locked --no-editable recsys obtain --snapshot neelagiri-2025-v1 --offline
+uv run --locked --no-editable recsys obtain --snapshot neelagiri-2025-v1 --data-dir /path/to/private/cache --offline
+```
+
+Without `--data-dir`, this snapshot uses `data/raw/neelagiri-2025-v1`; an explicit path is used exactly. Keep snapshots in separate cache directories: an existing manifest from another snapshot is preserved and rejected, so select another `--data-dir` instead of mixing their files. Its [dataset audit](reports/dataset-audit-v1/README.md) pins Kaggle version 1: `details.csv` (20,178,926 bytes) and `ratings.csv` (4,504,586,658 bytes), both verified by full size and SHA-256 before an atomic `source-manifest.json` is written. Allow more than 4.52 GB plus temporary space for a new download. Each run rehashes the cached files; `--offline` succeeds only when both are present and verified. A damaged cached file is left for inspection and must be removed explicitly before retrying. The source declares CC BY-NC-SA 4.0; this intake is for noncommercial research, with exact rating collection date unknown. Commercial use and underlying MAL-derived rights remain to be resolved. This command only obtains data: it does not normalize the new CSVs, replace the default runtime bundle, or change the pinned GloVe input. That migration follows later DATA-03/04 tasks.
 
 The MAL files are pinned to [repository commit `9a1d7f5`](https://github.com/Hernan4444/MyAnimeList-Database/tree/9a1d7f56482accbde99e24cd7cfcad65e2d24b1f). The [author's Kaggle listing](https://www.kaggle.com/datasets/hernan4444/anime-recommendation-database-2020) reports CC0: Public Domain and dataset version 7; the repository commit is a separate version pin. The [GloVe project](https://nlp.stanford.edu/projects/glove/) lists PDDL 1.0 for its pretrained vectors and Apache 2.0 for its code. The ZIP URL redirects to Stanford's downloads host. Exact URLs, sizes, hashes, and provenance are in the packaged source registry.
 

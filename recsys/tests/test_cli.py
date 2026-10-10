@@ -50,6 +50,45 @@ class CliTests(unittest.TestCase):
         self.assertIn("anime.csv", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
 
+    def test_obtain_snapshot_defaults_and_explicit_directory(self) -> None:
+        for console in (False, True):
+            with self.subTest(console=console):
+                legacy = self.run_cli("obtain", "--offline", console=console)
+                self.assertEqual(legacy.returncode, 1)
+                self.assertIn("data/raw/anime.csv", legacy.stderr)
+                fresh = self.run_cli("obtain", "--snapshot", "neelagiri-2025-v1",
+                                     "--offline", console=console)
+                self.assertEqual(fresh.returncode, 1)
+                self.assertIn("data/raw/neelagiri-2025-v1/details.csv", fresh.stderr)
+                explicit = self.run_cli("obtain", "--snapshot", "neelagiri-2025-v1",
+                                        "--data-dir", "chosen", "--offline", console=console)
+                self.assertEqual(explicit.returncode, 1)
+                self.assertIn("chosen/details.csv", explicit.stderr)
+                self.assertNotIn("chosen/neelagiri-2025-v1", explicit.stderr)
+
+    def test_invalid_snapshot_fails_before_data_directory_creation(self) -> None:
+        for console in (False, True):
+            with self.subTest(console=console), tempfile.TemporaryDirectory() as directory:
+                command = ([str(Path(sys.executable).with_name("recsys"))] if console
+                           else [sys.executable, "-m", "recsys"])
+                result = subprocess.run([*command, "obtain", "--snapshot", "latest"],
+                                        cwd=directory, capture_output=True, text=True, check=False)
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(result.stdout, "")
+                self.assertIn("invalid choice", result.stderr)
+                self.assertFalse((Path(directory) / "data").exists())
+
+    def test_isolated_installed_package_contains_new_registry(self) -> None:
+        code = ("import json; from recsys.sources import load_registry; "
+                "r,h=load_registry('neelagiri-2025-v1'); "
+                "print(json.dumps([len(r['sources']),r['provenance']['dataset']['snapshot_id'],len(h)]))")
+        with tempfile.TemporaryDirectory() as directory:
+            result = subprocess.run([sys.executable, "-I", "-c", code], cwd=directory,
+                                    capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), [2, "neelagiri-2025-v1", 64])
+        self.assertEqual(result.stderr, "")
+
     def test_quality_help_and_input_error_outside_cwd(self) -> None:
         help_result = self.run_cli("quality", "baseline", "--help", console=True)
         self.assertEqual(help_result.returncode, 0, help_result.stderr)
