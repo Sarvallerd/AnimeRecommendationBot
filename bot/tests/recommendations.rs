@@ -1615,50 +1615,46 @@ async fn description_callbacks_are_reusable_owned_and_retry_failed_edits() {
 }
 
 #[tokio::test]
-async fn covers_reply_to_durable_text_and_failed_photo_does_not_repeat_on_retry() {
-    let (_dir, bundle) = bundle(2, false);
-    let repo = Arc::new(FakeRepo::default());
-    let ctx = context(bundle.clone(), repo.clone()).with_covers(Arc::new(FixedCovers));
-    let api = FakeTelegram::new();
-    let sel = selection(&bundle, 1, 1);
-    let mut session = session(&sel);
-    api.fail_photo.store(true, Ordering::SeqCst);
-    recommendations::begin(&api.bot(), &ctx, ACTOR, &mut session, &sel)
-        .await
-        .unwrap();
-    let first = api.decoded();
-    let photos: Vec<_> = first
-        .iter()
-        .filter(|(path, _)| path.ends_with("/SendPhoto"))
-        .collect();
-    assert_eq!(photos.len(), 1);
-    let rows = repo.rows.lock().unwrap().clone();
-    assert_eq!(rows.len(), 2);
-    assert!(
-        photos[0]
-            .1
-            .get("reply_parameters")
-            .is_some_and(|value| value.contains(&rows[0].message_id.to_string())),
-        "{:?}",
-        photos[0].1
-    );
-    assert_eq!(
-        first
-            .iter()
-            .filter(|(path, _)| path.ends_with("/SendMessage"))
-            .count(),
-        2
-    );
-    recommendations::begin(&api.bot(), &ctx, ACTOR, &mut session, &sel)
-        .await
-        .unwrap();
-    assert_eq!(
-        api.decoded()
-            .iter()
-            .filter(|(path, _)| path.ends_with("/SendPhoto"))
-            .count(),
-        1
-    );
+async fn rejected_photo_urls_fall_back_to_text_without_repeating_cards() {
+    for mode in 1..=4 {
+        let (_dir, bundle) = bundle(2, false);
+        let repo = Arc::new(FakeRepo::default());
+        let ctx = context(bundle.clone(), repo.clone()).with_covers(Arc::new(FixedCovers));
+        let api = FakeTelegram::new();
+        let sel = selection(&bundle, 1, 1);
+        let mut session = session(&sel);
+        api.photo_failure_mode.store(mode, Ordering::SeqCst);
+        recommendations::begin(&api.bot(), &ctx, ACTOR, &mut session, &sel)
+            .await
+            .unwrap();
+        let rows = repo.rows.lock().unwrap().clone();
+        let sent = api.decoded();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            sent.iter()
+                .filter(|(path, _)| path.ends_with("/SendPhoto"))
+                .count(),
+            2
+        );
+        assert_eq!(
+            sent.iter()
+                .filter(|(path, _)| path.ends_with("/SendMessage"))
+                .count(),
+            1
+        );
+        assert_eq!(rows[0].message_id, 101);
+        assert_eq!(rows[1].message_id, 102);
+        recommendations::begin(&api.bot(), &ctx, ACTOR, &mut session, &sel)
+            .await
+            .unwrap();
+        assert_eq!(
+            api.decoded()
+                .iter()
+                .filter(|(path, _)| path.ends_with("/SendPhoto"))
+                .count(),
+            2
+        );
+    }
 }
 
 #[tokio::test]
@@ -1679,15 +1675,27 @@ async fn five_covers_follow_the_five_durable_cards_in_order() {
         .filter(|(path, _)| path.ends_with("/SendPhoto"))
         .collect();
     assert_eq!(photos.len(), 5);
-    for (photo, row) in photos.iter().zip(rows) {
-        assert!(photo.1["reply_parameters"].contains(&row.message_id.to_string()));
+    for (photo, row) in photos.iter().zip(&rows) {
         assert!(photo.1["photo"].contains(&format!("/{}.jpg", row.mal_id)));
-        assert_eq!(photo.1["disable_notification"], "true");
+        assert!(!photo.1.contains_key("reply_parameters"));
+        assert!(photo.1["caption"].contains("Описание:"));
+        assert!(photo.1["caption"].encode_utf16().count() <= 1024);
     }
     assert_eq!(
         requests
             .iter()
             .filter(|(path, _)| path.ends_with("/SendMessage"))
+            .count(),
+        0
+    );
+    assert_eq!(
+        rows.iter().map(|row| row.message_id).collect::<Vec<_>>(),
+        vec![101, 102, 103, 104, 105]
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|(path, _)| path.ends_with("/EditMessageReplyMarkup"))
             .count(),
         5
     );
@@ -1723,16 +1731,16 @@ async fn real_fallback_covers_reply_to_five_durable_cards_once() {
         rows.iter().map(|row| row.mal_id).collect::<Vec<_>>()
     );
     for (photo, row) in photos.iter().zip(&rows) {
-        assert!(photo.1["reply_parameters"].contains(&row.message_id.to_string()));
         assert!(photo.1["photo"].contains(&format!("/{}.jpg", row.mal_id)));
-        assert_eq!(photo.1["disable_notification"], "true");
-        assert!(!photo.1.contains_key("caption"));
+        assert!(!photo.1.contains_key("reply_parameters"));
+        assert!(photo.1["caption"].contains("Описание:"));
+        assert!(photo.1["caption"].encode_utf16().count() <= 1024);
     }
     assert_eq!(
         sent.iter()
             .filter(|(path, _)| path.ends_with("/SendMessage"))
             .count(),
-        5
+        0
     );
     recommendations::begin(&api.bot(), &ctx, ACTOR, &mut session, &sel)
         .await
@@ -1769,7 +1777,7 @@ async fn slow_cover_lookup_can_still_send_a_photo_after_two_seconds() {
 }
 
 #[tokio::test]
-async fn photo_timeout_is_bounded_and_skips_remaining_photos() {
+async fn photo_timeout_is_bounded_without_text_fallback_or_delivery() {
     let (_dir, bundle) = bundle(2, false);
     let repo = Arc::new(FakeRepo::default());
     let ctx = context(bundle.clone(), repo.clone()).with_covers(Arc::new(FixedCovers));
@@ -1778,9 +1786,11 @@ async fn photo_timeout_is_bounded_and_skips_remaining_photos() {
     let sel = selection(&bundle, 1, 1);
     let mut session = session(&sel);
     let started = std::time::Instant::now();
-    recommendations::begin(&api.bot(), &ctx, ACTOR, &mut session, &sel)
-        .await
-        .unwrap();
+    assert!(
+        recommendations::begin(&api.bot(), &ctx, ACTOR, &mut session, &sel)
+            .await
+            .is_err()
+    );
     assert!(started.elapsed() < Duration::from_secs(10));
     let sent = api.decoded();
     assert_eq!(
@@ -1793,12 +1803,267 @@ async fn photo_timeout_is_bounded_and_skips_remaining_photos() {
         sent.iter()
             .filter(|(path, _)| path.ends_with("/SendMessage"))
             .count(),
-        2
+        1 // The retry notice is not a recommendation card.
     );
-    assert_eq!(repo.rows.lock().unwrap().len(), 2);
+    assert!(repo.rows.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn photo_network_api_and_invalid_success_remain_retryable_without_text_fallback() {
+    for mode in [5, 6, 7] {
+        let (_dir, bundle) = bundle(1, false);
+        let repo = Arc::new(FakeRepo::default());
+        let ctx = context(bundle.clone(), repo.clone()).with_covers(Arc::new(FixedCovers));
+        let api = FakeTelegram::new();
+        let sel = selection(&bundle, 1, 1);
+        let mut session = session(&sel);
+        api.photo_failure_mode.store(mode, Ordering::SeqCst);
+        assert!(
+            recommendations::begin(&api.bot(), &ctx, ACTOR, &mut session, &sel)
+                .await
+                .is_err()
+        );
+        assert!(repo.rows.lock().unwrap().is_empty());
+        assert_eq!(
+            api.decoded()
+                .iter()
+                .filter(|(path, _)| path.ends_with("/SendMessage") && !path.ends_with("/SendPhoto"))
+                .count(),
+            1
+        );
+        recommendations::begin(&api.bot(), &ctx, ACTOR, &mut session, &sel)
+            .await
+            .unwrap();
+        assert_eq!(repo.rows.lock().unwrap().len(), 1);
+        assert_eq!(
+            api.decoded()
+                .iter()
+                .filter(|(path, _)| path.ends_with("/SendPhoto"))
+                .count(),
+            2
+        );
+    }
+}
+
+#[tokio::test]
+async fn no_cover_stays_a_single_text_card() {
+    let (_dir, bundle) = bundle(1, false);
+    let repo = Arc::new(FakeRepo::default());
+    let ctx = context(bundle.clone(), repo.clone());
+    let api = FakeTelegram::new();
+    let sel = selection(&bundle, 1, 1);
+    let mut session = session(&sel);
     recommendations::begin(&api.bot(), &ctx, ACTOR, &mut session, &sel)
         .await
         .unwrap();
+    let sent = api.decoded();
+    assert_eq!(
+        sent.iter()
+            .filter(|(path, _)| path.ends_with("/SendPhoto"))
+            .count(),
+        0
+    );
+    assert_eq!(
+        sent.iter()
+            .filter(|(path, _)| path.ends_with("/SendMessage"))
+            .count(),
+        1
+    );
+    assert!(sent_texts(&api)[0].encode_utf16().count() <= 4000);
+    assert_eq!(repo.rows.lock().unwrap()[0].message_id, 101);
+}
+
+#[tokio::test]
+async fn photo_captions_expand_losslessly_and_preserve_pinned_score() {
+    for original in [
+        "🌸".repeat(1400),
+        format!(
+            "{}. {}! {}? Fourth.",
+            "🌸".repeat(900),
+            "字".repeat(900),
+            "🌸".repeat(900)
+        ),
+    ] {
+        let (_dir, bundle) = bundle_with(1, false, |catalog| {
+            catalog["anime"]["1"]["title"] = json!("🌸".repeat(300));
+            catalog["anime"]["10"]["title"] = json!("🌸".repeat(500));
+            catalog["anime"]["10"]["type"] = json!("T".repeat(200));
+            catalog["anime"]["10"]["genres"] = json!(["Ж".repeat(500)]);
+            catalog["anime"]["10"]["synopsis"] = json!(original.clone());
+        });
+        let repo = Arc::new(FakeRepo::default());
+        let ctx = context(bundle.clone(), repo.clone()).with_covers(Arc::new(FixedCovers));
+        let api = FakeTelegram::new();
+        let sel = selection(&bundle, 1, 1);
+        let mut session = session(&sel);
+        recommendations::begin(&api.bot(), &ctx, ACTOR, &mut session, &sel)
+            .await
+            .unwrap();
+        let row = repo.rows.lock().unwrap()[0].clone();
+        let summary = api
+            .decoded()
+            .into_iter()
+            .find(|(path, _)| path.ends_with("/SendPhoto"))
+            .unwrap()
+            .1["caption"]
+            .clone();
+        assert!(summary.encode_utf16().count() <= 1024);
+        assert!(session.callbacks.values().any(|record| matches!(record.action,
+            Action::RecommendationDescription { position_id, view: DescriptionView::Page(0) } if position_id == row.id)));
+        let score = score_token(&session, row.id, 3);
+        let mut recovered = String::new();
+        for page in 0..20 {
+            if recommendations::on_description(
+                &api.bot(),
+                &ctx,
+                ACTOR,
+                &mut session,
+                &sel,
+                &row,
+                DescriptionView::Page(page),
+            )
+            .await
+            .is_err()
+            {
+                break;
+            }
+            let fields = api
+                .decoded()
+                .into_iter()
+                .rfind(|(path, _)| path.ends_with("/EditMessageCaption"))
+                .unwrap()
+                .1;
+            assert_eq!(fields["message_id"], row.message_id.to_string());
+            assert!(fields["caption"].encode_utf16().count() <= 1024);
+            recovered.push_str(fields["caption"].split_once("):\n").unwrap().1);
+            let markup: Value = serde_json::from_str(&fields["reply_markup"]).unwrap();
+            assert_eq!(markup["inline_keyboard"][0][3]["callback_data"], score);
+        }
+        assert_eq!(recovered, original);
+        recommendations::on_description(
+            &api.bot(),
+            &ctx,
+            ACTOR,
+            &mut session,
+            &sel,
+            &row,
+            DescriptionView::Summary,
+        )
+        .await
+        .unwrap();
+        let collapsed = api
+            .decoded()
+            .into_iter()
+            .rfind(|(path, _)| path.ends_with("/EditMessageCaption"))
+            .unwrap()
+            .1;
+        assert_eq!(collapsed["caption"], summary);
+        let key = session.claim(&score, row.message_id).unwrap().1;
+        recommendations::on_score(
+            &api.bot(),
+            &ctx,
+            ACTOR,
+            &mut session,
+            &sel,
+            recommendations::ScoreAction {
+                position: &row,
+                score: 3,
+                action_key: &key,
+            },
+        )
+        .await
+        .unwrap();
+        session.finish(&score, true);
+        recommendations::on_description(
+            &api.bot(),
+            &ctx,
+            ACTOR,
+            &mut session,
+            &sel,
+            &row,
+            DescriptionView::Page(0),
+        )
+        .await
+        .unwrap();
+        let fields = api
+            .decoded()
+            .into_iter()
+            .rfind(|(path, _)| path.ends_with("/EditMessageCaption"))
+            .unwrap()
+            .1;
+        let markup: Value = serde_json::from_str(&fields["reply_markup"]).unwrap();
+        assert_eq!(markup["inline_keyboard"][0].as_array().unwrap().len(), 1);
+        assert_eq!(markup["inline_keyboard"][0][0]["callback_data"], score);
+        assert_eq!(
+            api.decoded()
+                .iter()
+                .filter(|(path, _)| path.ends_with("/EditMessageText"))
+                .count(),
+            0
+        );
+    }
+}
+
+#[tokio::test]
+async fn photo_pending_persists_after_reset_without_resending() {
+    for failure in [1, 2] {
+        let (_dir, bundle) = bundle(1, false);
+        let repo = Arc::new(FakeRepo::default());
+        let ctx = context(bundle.clone(), repo.clone()).with_covers(Arc::new(FixedCovers));
+        let api = FakeTelegram::new();
+        let sel = selection(&bundle, 1, 1);
+        let mut session = session(&sel);
+        repo.write_failure.store(failure, Ordering::SeqCst);
+        assert!(
+            recommendations::begin(&api.bot(), &ctx, ACTOR, &mut session, &sel)
+                .await
+                .is_err()
+        );
+        session.reset();
+        session.state = State::Selected {
+            intent: AnimeIntent::Recommend,
+            selection: sel.clone(),
+        };
+        recommendations::begin(&api.bot(), &ctx, ACTOR, &mut session, &sel)
+            .await
+            .unwrap();
+        assert_eq!(repo.rows.lock().unwrap().len(), 1);
+        assert_eq!(repo.rows.lock().unwrap()[0].message_id, 101);
+        assert_eq!(
+            api.decoded()
+                .iter()
+                .filter(|(path, _)| path.ends_with("/SendPhoto"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            api.decoded()
+                .iter()
+                .filter(|(path, _)| path.ends_with("/EditMessageReplyMarkup"))
+                .count(),
+            1
+        );
+    }
+}
+
+#[tokio::test]
+async fn photo_markup_failure_retries_same_saved_card() {
+    let (_dir, bundle) = bundle(1, false);
+    let repo = Arc::new(FakeRepo::default());
+    let ctx = context(bundle.clone(), repo.clone()).with_covers(Arc::new(FixedCovers));
+    let api = FakeTelegram::new();
+    let sel = selection(&bundle, 1, 1);
+    let mut session = session(&sel);
+    api.fail_edit.store(true, Ordering::SeqCst);
+    assert!(
+        recommendations::begin(&api.bot(), &ctx, ACTOR, &mut session, &sel)
+            .await
+            .is_err()
+    );
+    recommendations::begin(&api.bot(), &ctx, ACTOR, &mut session, &sel)
+        .await
+        .unwrap();
+    assert_eq!(repo.rows.lock().unwrap().len(), 1);
     assert_eq!(
         api.decoded()
             .iter()
@@ -1806,6 +2071,224 @@ async fn photo_timeout_is_bounded_and_skips_remaining_photos() {
             .count(),
         1
     );
+    assert_eq!(
+        api.decoded()
+            .iter()
+            .filter(|(path, _)| path.ends_with("/EditMessageReplyMarkup"))
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn photo_description_callbacks_are_owned_reusable_and_retry_failed_caption_edits() {
+    use bot::dialogue::storage::CallbackStatus;
+    let (_dir, bundle) = bundle_with(1, false, |catalog| {
+        catalog["anime"]["10"]["synopsis"] = json!("One. Two. Three. Four.");
+    });
+    let repo = Arc::new(FakeRepo::default());
+    let ctx = Arc::new(context(bundle.clone(), repo.clone()).with_covers(Arc::new(FixedCovers)));
+    let api = FakeTelegram::new();
+    let bot = api.bot();
+    let sel = selection(&bundle, 1, 1);
+    let session = ctx.sessions.get(ACTOR);
+    {
+        let mut guard = session.lock().await;
+        guard.state = State::Selected {
+            intent: AnimeIntent::Recommend,
+            selection: sel.clone(),
+        };
+        recommendations::begin(&bot, &ctx, ACTOR, &mut guard, &sel)
+            .await
+            .unwrap();
+    }
+    let row = repo.rows.lock().unwrap()[0].clone();
+    let token = session.lock().await.callbacks.iter().find_map(|(token, record)|
+        matches!(record.action, Action::RecommendationDescription { position_id, view: DescriptionView::Page(0) }
+            if position_id == row.id).then(|| token.clone())).unwrap();
+    for (update_id, chat, user, message_id) in [
+        (2000, ACTOR.chat_id, 999, row.message_id),
+        (
+            2001,
+            ACTOR.chat_id + 1,
+            ACTOR.user_id as u64,
+            row.message_id,
+        ),
+        (
+            2002,
+            ACTOR.chat_id,
+            ACTOR.user_id as u64,
+            row.message_id + 1,
+        ),
+    ] {
+        dispatch(
+            &bot,
+            &ctx,
+            callback(update_id, chat, user, message_id, Some(&token)),
+        )
+        .await;
+    }
+    assert_eq!(
+        api.decoded()
+            .iter()
+            .filter(|(path, _)| path.ends_with("/EditMessageCaption"))
+            .count(),
+        0
+    );
+    api.fail_edit_caption.store(true, Ordering::SeqCst);
+    let failed = bot::handlers::schema()
+        .dispatch(teloxide::dptree::deps![
+            bot.clone(),
+            callback(
+                2003,
+                ACTOR.chat_id,
+                ACTOR.user_id as u64,
+                row.message_id,
+                Some(&token)
+            ),
+            ctx.clone()
+        ])
+        .await;
+    assert!(matches!(failed, std::ops::ControlFlow::Break(Err(_))));
+    assert_eq!(
+        session.lock().await.callbacks[&token].status,
+        CallbackStatus::Active
+    );
+    dispatch(
+        &bot,
+        &ctx,
+        callback(
+            2004,
+            ACTOR.chat_id,
+            ACTOR.user_id as u64,
+            row.message_id,
+            Some(&token),
+        ),
+    )
+    .await;
+    api.edit_not_modified.store(true, Ordering::SeqCst);
+    dispatch(
+        &bot,
+        &ctx,
+        callback(
+            2005,
+            ACTOR.chat_id,
+            ACTOR.user_id as u64,
+            row.message_id,
+            Some(&token),
+        ),
+    )
+    .await;
+    assert_eq!(
+        session.lock().await.callbacks[&token].status,
+        CallbackStatus::Active
+    );
+    assert_eq!(
+        api.decoded()
+            .iter()
+            .filter(|(path, _)| path.ends_with("/EditMessageCaption"))
+            .count(),
+        3
+    );
+    session.lock().await.reset();
+    dispatch(
+        &bot,
+        &ctx,
+        callback(
+            2006,
+            ACTOR.chat_id,
+            ACTOR.user_id as u64,
+            row.message_id,
+            Some(&token),
+        ),
+    )
+    .await;
+    assert_eq!(
+        api.decoded()
+            .iter()
+            .filter(|(path, _)| path.ends_with("/EditMessageCaption"))
+            .count(),
+        3
+    );
+    assert!(repo.scores.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn pending_photo_reconciles_under_original_request_after_new_selection() {
+    let (_dir, bundle) = bundle(2, false);
+    let repo = Arc::new(FakeRepo::default());
+    let ctx = context(bundle.clone(), repo.clone()).with_covers(Arc::new(FixedCovers));
+    let api = FakeTelegram::new();
+    let first = selection(&bundle, 1, 1);
+    let second = selection(&bundle, 2, 2);
+    let mut session = session(&first);
+    repo.write_failure.store(1, Ordering::SeqCst);
+    assert!(
+        recommendations::begin(&api.bot(), &ctx, ACTOR, &mut session, &first)
+            .await
+            .is_err()
+    );
+    session.reset();
+    session.state = State::Selected {
+        intent: AnimeIntent::Recommend,
+        selection: second.clone(),
+    };
+    recommendations::begin(&api.bot(), &ctx, ACTOR, &mut session, &second)
+        .await
+        .unwrap();
+    let rows = repo.rows.lock().unwrap();
+    assert_eq!(rows.iter().filter(|row| row.request_id == 1).count(), 1);
+    assert_eq!(
+        rows.iter()
+            .find(|row| row.request_id == 1)
+            .unwrap()
+            .message_id,
+        101
+    );
+    assert_eq!(rows.iter().filter(|row| row.request_id == 2).count(), 5);
+    assert_eq!(
+        api.decoded()
+            .iter()
+            .filter(|(path, _)| path.ends_with("/SendPhoto"))
+            .count(),
+        6
+    );
+    assert!(repo
+        .resolves
+        .lock()
+        .unwrap()
+        .contains(&(1, 1, first.bundle_id)));
+}
+
+#[tokio::test]
+async fn recorded_photo_without_session_format_fails_closed() {
+    let (_dir, bundle) = bundle(1, false);
+    let repo = Arc::new(FakeRepo::default());
+    let ctx = context(bundle.clone(), repo.clone()).with_covers(Arc::new(FixedCovers));
+    let api = FakeTelegram::new();
+    let sel = selection(&bundle, 1, 1);
+    let mut session = session(&sel);
+    recommendations::begin(&api.bot(), &ctx, ACTOR, &mut session, &sel)
+        .await
+        .unwrap();
+    session.reset();
+    session.state = State::Selected {
+        intent: AnimeIntent::Recommend,
+        selection: sel.clone(),
+    };
+    assert!(
+        recommendations::begin(&api.bot(), &ctx, ACTOR, &mut session, &sel)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        api.decoded()
+            .iter()
+            .filter(|(path, _)| path.ends_with("/SendPhoto"))
+            .count(),
+        1
+    );
+    assert_eq!(repo.rows.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]

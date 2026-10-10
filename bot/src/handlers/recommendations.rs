@@ -6,19 +6,18 @@ use crate::{
         callback::{Action, DescriptionView},
         context::AppContext,
         state::{Actor, AnimeIntent, ResolvedSelection, State},
-        storage::{CallbackStatus, PendingRecommendationDelivery, Session},
+        storage::{CallbackStatus, PendingRecommendationDelivery, RecommendationFormat, Session},
     },
 };
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 use teloxide::prelude::*;
-use teloxide::types::{
-    InlineKeyboardButton, InlineKeyboardMarkup, InputFile, MessageId, ReplyParameters,
-};
+use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Message, MessageId};
 
 const RETRY_NOTICE: &str = "Не удалось завершить выдачу. Нажмите выбранное аниме ещё раз.";
 const EMPTY_NOTICE: &str = "Для этого аниме пока нет рекомендаций. Попробуйте другое: /recommend.";
-const CARD_LIMIT: usize = 4000;
+const TEXT_LIMIT: usize = 4000;
+const PHOTO_LIMIT: usize = 1024;
 
 pub async fn begin(
     bot: &Bot,
@@ -98,6 +97,7 @@ async fn deliver(
             || row.request_id != selection.query.request_id
             || row.chat_id != actor.chat_id
             || row.message_id <= 0
+            || !session.recommendation_formats.contains_key(&row.id)
             || neighbors.get(index).map(|n| n.mal_id) != Some(row.mal_id)
             || !seen_ranks.insert(row.rank)
             || !seen_targets.insert(row.mal_id)
@@ -110,7 +110,6 @@ async fn deliver(
             .await?;
         return Ok(());
     }
-    let mut photos_available = true;
     for (index, neighbor) in neighbors.iter().enumerate() {
         let rank = i16::try_from(index + 1).map_err(|_| DbError::Conflict)?;
         if let Some(row) = recorded.iter().find(|row| row.rank == rank) {
@@ -127,23 +126,13 @@ async fn deliver(
             .catalog()
             .get(neighbor.mal_id)
             .ok_or(DbError::Conflict)?;
-        let sent = bot
-            .send_message(
-                ChatId(actor.chat_id),
-                render_card(
-                    &titles,
-                    rank,
-                    neighbors.len(),
-                    neighbor.mal_id,
-                    anime,
-                    &DescriptionView::Summary,
-                )
-                .0,
-            )
-            .await?;
-        if sent.id.0 <= 0 {
-            return Err(DbError::Conflict.into());
-        }
+        let card = CardSpec {
+            rank,
+            total: neighbors.len(),
+            mal_id: neighbor.mal_id,
+            anime,
+        };
+        let (sent, format) = send_card(bot, ctx, actor, &titles, card).await?;
         session.pending_recommendation_delivery = Some(PendingRecommendationDelivery {
             actor,
             selection: selection.clone(),
@@ -153,12 +142,10 @@ async fn deliver(
                 chat_id: sent.chat.id.0,
                 message_id: sent.id.0,
             },
+            format,
         });
         let row = persist_pending(ctx, session).await?;
         attach_scores(bot, actor, session, &row, &titles, neighbors.len(), anime).await?;
-        if photos_available {
-            photos_available = send_cover(bot, ctx, actor, neighbor.mal_id, sent.id).await;
-        }
     }
     Ok(())
 }
@@ -175,6 +162,10 @@ async fn attach_scores(
     if position.chat_id != actor.chat_id || position.id <= 0 || position.message_id <= 0 {
         return Err(DbError::Conflict.into());
     }
+    let format = *session
+        .recommendation_formats
+        .get(&position.id)
+        .ok_or(DbError::Conflict)?;
     if session.callbacks.values().any(|record| {
         record.generation == session.generation
             && record.message_id == Some(position.message_id)
@@ -210,6 +201,7 @@ async fn attach_scores(
         position.mal_id,
         anime,
         &DescriptionView::Summary,
+        format,
     )
     .1
     {
@@ -273,6 +265,7 @@ async fn persist_pending(
         chat_id: pending.input.chat_id,
         message_id: pending.input.message_id,
     };
+    session.recommendation_formats.insert(id, pending.format);
     session.pending_recommendation_delivery = None;
     Ok(row)
 }
@@ -284,32 +277,58 @@ fn render_card(
     mal_id: MalId,
     anime: &Anime,
     view: &DescriptionView,
+    format: RecommendationFormat,
 ) -> (String, bool) {
-    let seed_title = ui::bounded(titles.seed_title(), 160);
-    let title = ui::bounded(titles.recommendation_title(anime), 240);
     let score = anime
         .score
         .map_or_else(|| "нет данных".to_owned(), |v| v.to_string());
     let year = anime
         .year
         .map_or_else(|| "нет данных".to_owned(), |v| v.to_string());
-    let kind = ui::bounded(anime.anime_type.as_deref().unwrap_or("нет данных"), 32);
-    let episodes = ui::bounded(
-        anime.episodes.as_ref().map_or("нет данных", |v| v.as_str()),
-        32,
-    );
-    let genres = if anime.genres.is_empty() {
-        "нет данных".to_owned()
-    } else {
-        ui::bounded(&anime.genres.join(", "), 256)
+    let (header, page_header, limit) = match format {
+        RecommendationFormat::Text => {
+            let seed_title = ui::bounded(titles.seed_title(), 160);
+            let title = ui::bounded(titles.recommendation_title(anime), 240);
+            let kind = ui::bounded(anime.anime_type.as_deref().unwrap_or("нет данных"), 32);
+            let episodes = ui::bounded(
+                anime.episodes.as_ref().map_or("нет данных", |v| v.as_str()),
+                32,
+            );
+            let genres = if anime.genres.is_empty() {
+                "нет данных".to_owned()
+            } else {
+                ui::bounded(&anime.genres.join(", "), 256)
+            };
+            let header = format!(
+                "Рекомендация {rank}/{total}\nПо запросу: {seed_title}\nНазвание: {title}\nMAL ID: {mal_id}\nОценка MAL: {score}\nГод: {year}\nТип: {kind}\nЭпизоды: {episodes}\nЖанры: {genres}\nПолезность рекомендации: 0 — не полезна, 5 — очень полезна.\n"
+            );
+            (header.clone(), header, TEXT_LIMIT)
+        }
+        RecommendationFormat::Photo => {
+            let seed_title = ui::bounded(titles.seed_title(), 64);
+            let title = ui::bounded(titles.recommendation_title(anime), 120);
+            let kind = ui::bounded(anime.anime_type.as_deref().unwrap_or("нет данных"), 16);
+            let episodes = ui::bounded(
+                anime.episodes.as_ref().map_or("нет данных", |v| v.as_str()),
+                16,
+            );
+            let genres = if anime.genres.is_empty() {
+                "нет данных".to_owned()
+            } else {
+                ui::bounded(&anime.genres.join(", "), 64)
+            };
+            let header = format!(
+                "Рекомендация {rank}/{total}\nПо запросу: {seed_title}\nНазвание: {title}\nMAL ID: {mal_id} · Оценка MAL: {score} · Год: {year}\nТип: {kind} · Эпизоды: {episodes}\nЖанры: {genres}\nПолезность: 0 — не полезна, 5 — очень полезна.\n"
+            );
+            let page_header =
+                format!("Рекомендация {rank}/{total}\nНазвание: {title}\nMAL ID: {mal_id}\n");
+            (header, page_header, PHOTO_LIMIT)
+        }
     };
-    let header = format!(
-        "Рекомендация {rank}/{total}\nПо запросу: {seed_title}\nНазвание: {title}\nMAL ID: {mal_id}\nОценка MAL: {score}\nГод: {year}\nТип: {kind}\nЭпизоды: {episodes}\nЖанры: {genres}\nПолезность рекомендации: 0 — не полезна, 5 — очень полезна.\n"
-    );
     let description = anime.synopsis.as_deref().unwrap_or("Описание отсутствует.");
     let summary_end = synopsis::preview_end(description);
     let prefix = format!("{header}Описание: ");
-    let budget = CARD_LIMIT.saturating_sub(prefix.encode_utf16().count());
+    let budget = limit.saturating_sub(prefix.encode_utf16().count());
     let preview = &description[..summary_end];
     let expandable = anime.synopsis.is_some()
         && (summary_end < description.len() || preview.encode_utf16().count() > budget);
@@ -319,8 +338,8 @@ fn render_card(
         return (card, expandable);
     }
     // The reserved space covers any plausible decimal page count, keeping page boundaries stable.
-    let page_budget = CARD_LIMIT
-        .saturating_sub(header.encode_utf16().count() + 80)
+    let page_budget = limit
+        .saturating_sub(page_header.encode_utf16().count() + 80)
         .max(1);
     let pages = synopsis::pages(description, page_budget);
     let DescriptionView::Page(page) = view else {
@@ -330,7 +349,7 @@ fn render_card(
         return (String::new(), expandable);
     };
     let mut card = format!(
-        "{header}Описание (страница {}/{}):\n",
+        "{page_header}Описание (страница {}/{}):\n",
         page + 1,
         pages.len()
     );
@@ -394,6 +413,10 @@ pub async fn on_description(
         selection.seed_mal_id,
         seed,
     );
+    let format = *session
+        .recommendation_formats
+        .get(&position.id)
+        .ok_or(DbError::Conflict)?;
     let (text, expandable) = render_card(
         &titles,
         position.rank,
@@ -401,6 +424,7 @@ pub async fn on_description(
         position.mal_id,
         anime,
         &view,
+        format,
     );
     if !expandable || text.is_empty() {
         return Err(DbError::Conflict.into());
@@ -469,6 +493,7 @@ pub async fn on_description(
                 position.mal_id,
                 anime,
                 &DescriptionView::Page(page + 1),
+                format,
             )
             .0
             .is_empty()
@@ -496,15 +521,24 @@ pub async fn on_description(
         }
     }
     session.activate(&tokens, position.message_id);
-    match bot
-        .edit_message_text(
-            ChatId(position.chat_id),
-            MessageId(position.message_id),
-            text,
-        )
-        .reply_markup(InlineKeyboardMarkup::new(rows))
-        .await
-    {
+    let edited = match format {
+        RecommendationFormat::Text => {
+            bot.edit_message_text(
+                ChatId(position.chat_id),
+                MessageId(position.message_id),
+                text,
+            )
+            .reply_markup(InlineKeyboardMarkup::new(rows))
+            .await
+        }
+        RecommendationFormat::Photo => {
+            bot.edit_message_caption(ChatId(position.chat_id), MessageId(position.message_id))
+                .caption(text)
+                .reply_markup(InlineKeyboardMarkup::new(rows))
+                .await
+        }
+    };
+    match edited {
         Ok(message)
             if message.chat.id.0 == position.chat_id && message.id.0 == position.message_id =>
         {
@@ -516,31 +550,71 @@ pub async fn on_description(
     }
 }
 
-async fn send_cover(
+#[derive(Clone, Copy)]
+struct CardSpec<'a> {
+    rank: i16,
+    total: usize,
+    mal_id: MalId,
+    anime: &'a Anime,
+}
+
+async fn send_card(
     bot: &Bot,
     ctx: &AppContext,
     actor: Actor,
-    mal_id: MalId,
-    message_id: MessageId,
-) -> bool {
-    let Some(url) = ctx.covers.lookup(mal_id).await else {
-        return true;
+    titles: &ResponseTitles,
+    card: CardSpec<'_>,
+) -> Result<(Message, RecommendationFormat), Box<dyn std::error::Error + Send + Sync>> {
+    let Some(url) = ctx.covers.lookup(card.mal_id).await else {
+        return send_text_card(bot, actor, titles, card).await;
     };
+    let caption = render_card(
+        titles,
+        card.rank,
+        card.total,
+        card.mal_id,
+        card.anime,
+        &DescriptionView::Summary,
+        RecommendationFormat::Photo,
+    )
+    .0;
     let started = Instant::now();
     let result = tokio::time::timeout(
         Duration::from_secs(5),
         bot.send_photo(ChatId(actor.chat_id), InputFile::url(url))
-            .reply_parameters(ReplyParameters::new(message_id))
-            .disable_notification(true),
+            .caption(caption),
     )
     .await;
     match result {
-        Ok(Ok(_)) => {
+        Ok(Ok(message))
+            if message.chat.id.0 == actor.chat_id
+                && message.id.0 > 0
+                && message.photo().is_some_and(|photos| !photos.is_empty()) =>
+        {
             log::debug!(
-                "cover stage=photo reason=success duration_ms={}",
+                "cover stage=send reason=success duration_ms={}",
                 started.elapsed().as_millis()
             );
-            true
+            Ok((message, RecommendationFormat::Photo))
+        }
+        Ok(Ok(_)) => {
+            log::warn!(
+                "cover stage=send reason=invalid_response duration_ms={}",
+                started.elapsed().as_millis()
+            );
+            Err(DbError::Conflict.into())
+        }
+        Ok(Err(teloxide::RequestError::Api(
+            teloxide::ApiError::WrongFileId
+            | teloxide::ApiError::WrongFileIdOrUrl
+            | teloxide::ApiError::FailedToGetUrlContent
+            | teloxide::ApiError::ImageProcessFailed,
+        ))) => {
+            log::warn!(
+                "cover stage=send reason=media_rejected duration_ms={}",
+                started.elapsed().as_millis()
+            );
+            send_text_card(bot, actor, titles, card).await
         }
         Ok(Err(error)) => {
             let reason = if matches!(error, teloxide::RequestError::Api(_)) {
@@ -549,19 +623,46 @@ async fn send_cover(
                 "network"
             };
             log::warn!(
-                "cover stage=photo reason={reason} duration_ms={}",
+                "cover stage=send reason={reason} duration_ms={}",
                 started.elapsed().as_millis()
             );
-            false
+            Err(error.into())
         }
         Err(_) => {
             log::warn!(
-                "cover stage=photo reason=timeout duration_ms={}",
+                "cover stage=send reason=timeout duration_ms={}",
                 started.elapsed().as_millis()
             );
-            false
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "Telegram photo send timed out",
+            )
+            .into())
         }
     }
+}
+
+async fn send_text_card(
+    bot: &Bot,
+    actor: Actor,
+    titles: &ResponseTitles,
+    card: CardSpec<'_>,
+) -> Result<(Message, RecommendationFormat), Box<dyn std::error::Error + Send + Sync>> {
+    let text = render_card(
+        titles,
+        card.rank,
+        card.total,
+        card.mal_id,
+        card.anime,
+        &DescriptionView::Summary,
+        RecommendationFormat::Text,
+    )
+    .0;
+    let message = bot.send_message(ChatId(actor.chat_id), text).await?;
+    if message.chat.id.0 != actor.chat_id || message.id.0 <= 0 || message.text().is_none() {
+        return Err(DbError::Conflict.into());
+    }
+    Ok((message, RecommendationFormat::Text))
 }
 
 pub struct ScoreAction<'a> {
