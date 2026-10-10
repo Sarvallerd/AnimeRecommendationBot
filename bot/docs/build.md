@@ -18,7 +18,7 @@ The bot reads environment variables directly. It does not load `.env` automatica
 
 `RUST_LOG` is optional and defaults to `info`. It accepts `off`, `error`, `warn`, `info`, `debug`, or `trace`, optionally followed by comma-separated module overrides such as `info,teloxide=warn,bot::db=debug`. Regex filters are unsupported.
 
-`COVERS_ENABLED` is optional and accepts exactly `true` or `false` (default `true`). Normal startup constructs a shared Jikan cover client when enabled. Configuration checking and `--prepare` do not contact or construct the cover service. A cover lookup failure does not stop text recommendations.
+`COVERS_ENABLED` is optional and accepts exactly `true` or `false` (default `true`). Normal startup constructs shared Jikan and AniList cover clients when enabled. A failed Jikan lookup falls back to AniList using the same MAL ID. Configuration checking and `--prepare` do not contact or construct the cover services. Cover lookup and photo failures do not stop text recommendations.
 
 To validate configuration without contacting PostgreSQL or Telegram, run:
 

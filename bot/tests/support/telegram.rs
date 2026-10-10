@@ -7,7 +7,7 @@ use std::{
     io::{Read, Write},
     net::TcpListener,
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc, Mutex,
     },
     thread,
@@ -28,6 +28,7 @@ pub struct FakeTelegram {
     pub fail_edit_text: Arc<AtomicBool>,
     pub edit_not_modified: Arc<AtomicBool>,
     pub fail_photo: Arc<AtomicBool>,
+    pub photo_delay_ms: Arc<AtomicU64>,
     pub fail_ack: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
@@ -43,6 +44,7 @@ impl FakeTelegram {
         let fail_edit_text = Arc::new(AtomicBool::new(false));
         let edit_not_modified = Arc::new(AtomicBool::new(false));
         let fail_photo = Arc::new(AtomicBool::new(false));
+        let photo_delay_ms = Arc::new(AtomicU64::new(0));
         let fail_ack = Arc::new(AtomicBool::new(false));
         listener.set_nonblocking(true).unwrap();
         let stop = Arc::new(AtomicBool::new(false));
@@ -54,6 +56,7 @@ impl FakeTelegram {
         let text_failure = fail_edit_text.clone();
         let not_modified = edit_not_modified.clone();
         let photo_failure = fail_photo.clone();
+        let photo_delay = photo_delay_ms.clone();
         let ack_failure = fail_ack.clone();
         let thread = thread::spawn(move || {
             let mut next_id = 100;
@@ -132,6 +135,7 @@ impl FakeTelegram {
                         json!({"ok":true,"result":{"message_id":message_id,"date":1,"chat":{"id":chat_id,"type":"private","first_name":"Test"},"text":fields.get("text").cloned().unwrap_or_default()}})
                     }
                 } else if path.ends_with("/SendPhoto") {
+                    thread::sleep(Duration::from_millis(photo_delay.swap(0, Ordering::SeqCst)));
                     if photo_failure.swap(false, Ordering::SeqCst) {
                         json!({"ok":false,"error_code":500,"description":"failed"})
                     } else {
@@ -156,7 +160,7 @@ impl FakeTelegram {
                 };
                 let body = response.to_string();
                 let wire=format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body);
-                stream.write_all(wire.as_bytes()).unwrap();
+                let _ = stream.write_all(wire.as_bytes());
             }
         });
         Self {
@@ -168,6 +172,7 @@ impl FakeTelegram {
             fail_edit_text,
             edit_not_modified,
             fail_photo,
+            photo_delay_ms,
             fail_ack,
             stop,
             thread: Some(thread),

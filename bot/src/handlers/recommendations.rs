@@ -10,7 +10,7 @@ use crate::{
     },
 };
 use std::collections::HashSet;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use teloxide::prelude::*;
 use teloxide::types::{
     InlineKeyboardButton, InlineKeyboardMarkup, InputFile, MessageId, ReplyParameters,
@@ -523,18 +523,45 @@ async fn send_cover(
     mal_id: MalId,
     message_id: MessageId,
 ) -> bool {
-    tokio::time::timeout(Duration::from_secs(2), async {
-        let Some(url) = ctx.covers.lookup(mal_id).await else {
-            return true;
-        };
+    let Some(url) = ctx.covers.lookup(mal_id).await else {
+        return true;
+    };
+    let started = Instant::now();
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
         bot.send_photo(ChatId(actor.chat_id), InputFile::url(url))
             .reply_parameters(ReplyParameters::new(message_id))
-            .disable_notification(true)
-            .await
-            .is_ok()
-    })
-    .await
-    .unwrap_or_default()
+            .disable_notification(true),
+    )
+    .await;
+    match result {
+        Ok(Ok(_)) => {
+            log::debug!(
+                "cover stage=photo reason=success duration_ms={}",
+                started.elapsed().as_millis()
+            );
+            true
+        }
+        Ok(Err(error)) => {
+            let reason = if matches!(error, teloxide::RequestError::Api(_)) {
+                "api"
+            } else {
+                "network"
+            };
+            log::warn!(
+                "cover stage=photo reason={reason} duration_ms={}",
+                started.elapsed().as_millis()
+            );
+            false
+        }
+        Err(_) => {
+            log::warn!(
+                "cover stage=photo reason=timeout duration_ms={}",
+                started.elapsed().as_millis()
+            );
+            false
+        }
+    }
 }
 
 pub struct ScoreAction<'a> {
