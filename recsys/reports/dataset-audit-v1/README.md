@@ -39,12 +39,32 @@ python3 "$METHOD_DIR/audit_neelagiri_ratings.py"
 python3 "$METHOD_DIR/group_neelagiri_pairs.py"
 python3 "$METHOD_DIR/cohorts_neelagiri.py"
 python3 "$METHOD_DIR/audit_neelagiri_glove.py"
+```
+
+The assembler also consumes aggregate outputs for the three rejected sources. For a full four-source rerun, prepare their pinned inputs and run these steps as well; the independent source scans may run in either order:
+
+```sh
+python3 "$METHOD_DIR/audit_shikimori.py"
+python3 "$METHOD_DIR/audit_shikimori_pairs.py"
+python3 "$METHOD_DIR/audit_kaggle_metadata.py"
+python3 "$METHOD_DIR/audit_kaggle_ratings.py"
+python3 "$METHOD_DIR/group_kaggle_pairs.py"
+python3 "$METHOD_DIR/cohorts_kaggle.py"
+python3 "$METHOD_DIR/coordinator_nafiul_probe.py"
+python3 "$METHOD_DIR/check_nafiul_duckdb.py" > "$METHOD_DIR/nafiul_unique_join_aggregate.json"
+python3 "$METHOD_DIR/audit_alias_enrichment.py"
+```
+
+To **verify the committed report**, regenerate the aggregates and run the comparator against `source-audit.json` *before* running the assembler. It compares measured fields, all 15 aggregate/receipt SHA-256 pins, and the hashes of the assembler, comparator, validator, and scan methods. Validation checks structure and internal arithmetic. These commands do not rewrite the report:
+
+```sh
+python3 "$METHOD_DIR/compare_report_aggregates.py"
 python3 "$METHOD_DIR/validate_report.py"
 ```
 
-The scripts and full data are intentionally **not shipped**. Their hashes are recorded in the JSON; the commands require the private method files and the same pinned GloVe input. The artifact pins and algorithm description support an independent implementation, but this repository report alone is not a self-contained rerun. No live bot or database was needed for the audit.
+To **create or intentionally update** the report after inspecting any comparison failure, run `python3 "$METHOD_DIR/assemble_report.py"`, then rerun the comparator and validator before reviewing the diff. Assembly writes `source-audit.json`, so running it first would conceal a difference from the previously committed report. The scripts and full data are intentionally **not shipped**. Their hashes are recorded in the JSON; these commands require the private method files, all source inputs, and the same pinned GloVe input. The artifact pins and algorithm description support an independent implementation, but this repository report alone is not a self-contained rerun. No live bot or database was needed for the audit.
 
-For the selected source, read `username`, `anime_id`, `status`, and `score` from all ratings rows. Reject blank usernames and scores outside 0–10. Build the **raw explicit-pair** set from distinct `(username, anime_id)` where score is 1–10 *before* mapping exclusions: 69,606,111 pairs. Build an order-independent group over **all** rows for each `(username, anime_id)`, inspecting score minima/maxima and row count. Three rows repeat an explicit rating triple; no pair has two different explicit scores, while one pair combines zero and a nonzero score and is quarantined. Inner-join raw explicit pairs to unique `details.mal_id`: 69,459,967 map; 146,144 do not. The one additional mixed-state quarantine leaves 69,459,966 accepted pairs. Count users, distinct rated MAL items, and per-user distinct items rated ≥8 from that accepted set. First-release cohorts extract the calendar date from `details.start_date` (equivalent to `CAST(start_date AS DATE) <= DATE '2025-10-31'`) and require `status IN ('Finished Airing', 'Currently Airing')`, excluding unreleased and missing-date rows. This is a static preference snapshot, so do not use rating-file order as time.
+For the selected source, read `username`, `anime_id`, `status`, and `score` from all ratings rows. Reject blank usernames and scores outside 0–10. Build the **raw explicit-pair** set from distinct `(username, anime_id)` where score is 1–10 *before* mapping exclusions: 69,606,111 pairs. Build an order-independent group over **all** rows for each `(username, anime_id)`, inspecting score minima/maxima and row count. Three rows repeat an explicit rating triple; no pair has two different explicit scores, while one pair combines zero and a nonzero score and is quarantined. Inner-join raw explicit pairs to unique `details.mal_id`: 69,459,967 map; 146,144 do not. The one additional mixed-state quarantine leaves 69,459,966 accepted pairs. Count users, distinct rated MAL items, and per-user distinct items rated ≥8 from that accepted set. First-release cohorts extract the calendar date from `details.start_date` with `TRY_CAST(SUBSTR(start_date,1,10) AS DATE)` and compare it through `DATE '2025-10-31'`; they require `status IN ('Finished Airing', 'Currently Airing')`, excluding unreleased and missing-date rows. This is a static preference snapshot, so do not use rating-file order as time.
 
 The other candidates use the same explicit-score, deduplication, and pre-mapping denominator rules where their source semantics allow. Ramazan `animeID` is an internal 1–20,237 index; `mal_url` in `animes.csv` supplies the syntactic MAL mapping. Its 2026-year titles already have nonzero scores in a file updated September 2025; the cause is unknown. The author model-loading code injects timestamp `978300760`, which is synthetic, not rating event time. Shikimori's `anime` rating field is an embedded Python-literal object containing a Shikimori ID, not a MAL ID. Nafiul's 145 extra metadata rows span 134 duplicate MAL IDs; all ambiguous rows were quarantined in the join calculation. Reproduction details, exact counts, source URLs, limitations, and local-method SHA-256 values are in the JSON.
 

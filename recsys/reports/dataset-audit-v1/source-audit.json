@@ -1777,19 +1777,19 @@
           "threshold": "verified"
         },
         {
-          "denominator": 253949,
+          "denominator": 246873,
           "evidence_refs": [
             "nafiul_anime_csv"
           ],
           "id": "mal_mapping",
           "numerator": 246873,
           "observed": {
-            "denominator": 253949,
+            "denominator": 246873,
             "numerator": 246873,
-            "ratio": 0.9721361375709296
+            "ratio": 1.0
           },
-          "reason": "145 metadata duplicate IDs and 6,741 missing-metadata pairs require quarantine.",
-          "status": "FAIL",
+          "reason": "All accepted pairs map uniquely to MAL_ID after quarantining 335 ambiguous and 6,741 missing-metadata pairs. Raw coverage is evaluated separately.",
+          "status": "PASS",
           "threshold": "verified"
         },
         {
@@ -2136,10 +2136,29 @@
   "schema_version": 1,
   "task_id": "ARB-027",
   "verification": {
+    "aggregate_output_sha256": {
+      "alias_enrichment_aggregate.json": "4c8f4eb555ae14991fa53871f261621f7bd90436c65822605099c76e5292a85a",
+      "coordinator_nafiul_aggregate.json": "5979f4ef1d2db0bb4f3ab2a34da73bf1e9a374b7d7bc09966d3adf9155ab94f0",
+      "kaggle_cohorts_aggregate.json": "410f672e04a522d8dcf4eff9e1cdec5537557493ab7a4916a468bcb0b9f9ab7f",
+      "kaggle_metadata_aggregate.json": "881226134fa96d844ba774bf4f5b7da136d1724f9dcccbfe805b1f749b732de9",
+      "kaggle_ratings_aggregate.json": "03131c76d1a4db5d777ca45d00061ff7e5e87d17c172056184c53711f69345c1",
+      "nafiul_unique_join_aggregate.json": "c635897709182cc5141b50b98ee05af2461281ebbc76e907776238f3b25a6eef",
+      "neelagiri-v1/details.receipt.json": "e7087f061ff73eaa6f7c593e22e3815ec5dda893cdebc8cdf319d9b41ea3d15e",
+      "neelagiri-v1/ratings.receipt.json": "8b7f5c0513b34806def97b71e12b1a52aa6bf4ecfb08edcbe161e4f638a4d130",
+      "neelagiri_cohorts_aggregate.json": "37b69efbe04a09ee10325eabc4fcfb4229dac4f7c22307b2382bd97bf6ad82aa",
+      "neelagiri_glove_aggregate.json": "e4fedaa7424b9b37863835e1ac11d7414c8bbeb8cc5bd60dd2a6bcfef5cace12",
+      "neelagiri_metadata_aggregate.json": "b982649145848738797e27504a213ae00e7d393622cf1d1c06cca5e295f4f8c7",
+      "neelagiri_pairs_aggregate.json": "3ced636f4ffcdf217f205d365e57f02d4991a1725922e9c336f315de560cd846",
+      "neelagiri_ratings_aggregate.json": "a0a2ef35de83a2f12f070bf023d2f8157b2e114e24d1d81846518cd997d68ef9",
+      "shikimori_aggregate.json": "d047ca7df43c0583099e166e58351e7d8f1f698839d7a7243e1a5632d53cb2d3",
+      "shikimori_pairs_aggregate.json": "6130cf9164e2d52d5894a57b9301ede939cef3fe0f153805382ba259ccfb2dda"
+    },
     "audit_method_sha256": {
+      "assemble_report.py": "7ece75d9e1b2ebfb589439b339dcbcaa120d7c0da9e28c1208bad96cafe0781d",
       "audit_alias_enrichment.py": "673611c1b35e968aa1ea85a2e0de2ad51f191189c64bfe312d444f89c0d228b6",
       "audit_kaggle_metadata.py": "83ab689d9d3ab35709c54f9ee96a19536acb1ed49c57ee64ab0be2c695de9764",
       "audit_kaggle_ratings.py": "3bc7a74e6c20355528183bc4da9dc2c37b01557fb959011ab9a476f0f694f0db",
+      "audit_kaggle_stream.py": "7b86681a7b20acdd01c3f1649f6721968d44a169efea9ee66bb6b0103c9d4b82",
       "audit_neelagiri_glove.py": "6b25c5e91047a59b645ad0e07ece5f41c0d24de0e3fcc95d49e341a4e6d2be07",
       "audit_neelagiri_metadata.py": "b57e3033bec093b5df59c36b77455847477b39d81850efbd662837629e2299f3",
       "audit_neelagiri_ratings.py": "1d60c13c7b208dd40731a746ea1050eb371e3224d0e66871525929d32d724481",
@@ -2147,14 +2166,20 @@
       "audit_shikimori_pairs.py": "a6aaff0eb8411e694742b6ff8d136ea3fa458fabc7064f34642f9474c80b8078",
       "check_nafiul_duckdb.py": "792d576179c0794d58c83f3bbacda3b789b6b3fc6056f9c57040de7d42dedc82",
       "cohorts_kaggle.py": "48955bb63d6133eec6cfa751caa49518fc00fe435e720c4d719adfad08768af2",
-      "cohorts_neelagiri.py": "dba0d57864f49d3a4f734b24fe973593d101f10f5cb062b9b520b706741cf8ac",
+      "cohorts_neelagiri.py": "754f55388c411a7bf76903b9d0caf03756ca79c5ba3996a434494212e8aaae97",
+      "compare_report_aggregates.py": "e88e9d8a86c89251ef81d708a691c21c4ac5ea672a7329e415920ef44a9da0bb",
+      "coordinator_nafiul_probe.py": "9fcb4c8c8276788f78849594cd157486522bcc367e90bae024c302ca0639a367",
+      "coordinator_neelagiri_check.py": "7f3ab99ee15c6c2dec0492fbb044c118eb1245d163e99eed0ade145a9d656c77",
+      "coordinator_shikimori_check.py": "a8990819c0cbe6c3d2ec4985c05b0e9478fa1cde3aade6059b95bcd34f4069bf",
       "group_kaggle_pairs.py": "9581f614ed0e3fea5b4be14a037d192bea88bb44dcfe90473c47d900afee9812",
-      "group_neelagiri_pairs.py": "8b12be09f02cc7afc3dc7da3372145ea3834654549b9d1b99b8c71cc7d08080d"
+      "group_neelagiri_pairs.py": "8b12be09f02cc7afc3dc7da3372145ea3834654549b9d1b99b8c71cc7d08080d",
+      "validate_report.py": "844b50ac3ee40fefc7f914c0c443452041d069c1ac6cb671a181c72d74e89f33"
     },
     "completed_checks": [
       "Full bytes and SHA-256 on all consumed CSVs; GloVe matched current source registry pin.",
       "Exact pair dedup/conflicts and score/status distributions computed on all candidate ratings files.",
       "Neelagiri first-release gates require aired/airing status and date at most 2025-10-31.",
+      "Hash-pinned comparator matched measured aggregate fields to the report and rejected a changed measured cohort even after its aggregate SHA pin was refreshed.",
       "Manifest/schema/coverage/arithmetic/privacy checks run on final two files."
     ],
     "environment": {
