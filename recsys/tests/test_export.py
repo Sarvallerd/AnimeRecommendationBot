@@ -76,6 +76,12 @@ class ExportTests(unittest.TestCase):
         self.assertEqual(json.loads(self.report.read_bytes())["algorithm"], ALGORITHM)
         self.assertEqual(json.loads(self.report.read_bytes())["producer"]["package_version"], __version__)
 
+    def test_legacy_export_rejects_release_report_shape(self):
+        self.mutate(self.report, lambda value: value.update(
+            schema_version=2, kind="arb-release-build", builder_version="arb031-v1"))
+        with self.assertRaises(ContractError):
+            self.export()
+
     def test_determinism_byte_preservation_and_existing_target(self):
         first = self.export("a")
         second = self.export("b")

@@ -53,6 +53,26 @@ def build_parser() -> argparse.ArgumentParser:
     aliases_validate.add_argument("--base-dir", required=True)
     aliases_validate.add_argument("--base-identity", required=True)
     aliases_validate.add_argument("--expected-identity")
+    release_parser = commands.add_parser("release", help="compose, build, and export a catalog release")
+    release_commands = release_parser.add_subparsers(dest="release_command", required=True)
+    release_compose = release_commands.add_parser("compose")
+    for flag in ("base-dir", "base-identity", "aliases-dir", "alias-identity",
+                 "alias-data-dir", "output-dir"):
+        release_compose.add_argument(f"--{flag}", required=True)
+    release_validate = release_commands.add_parser("validate")
+    release_validate.add_argument("release_dir")
+    for flag in ("release-identity", "base-dir", "aliases-dir", "alias-data-dir"):
+        release_validate.add_argument(f"--{flag}", required=True)
+    release_build = release_commands.add_parser("build")
+    release_export = release_commands.add_parser("export")
+    for command in (release_build, release_export):
+        for flag in ("release-dir", "release-identity", "base-dir", "aliases-dir",
+                     "alias-data-dir", "output-dir"):
+            command.add_argument(f"--{flag}", required=True)
+    release_build.add_argument("--glove", required=True)
+    release_build.add_argument("--block-size", type=int, default=256)
+    release_export.add_argument("--neighbors", required=True)
+    release_export.add_argument("--build-report", required=True)
     build_parser = commands.add_parser("build", help="build pinned GloVe cosine neighbors")
     build_parser.add_argument("--catalog", required=True, help="path to normalized catalog.json")
     build_parser.add_argument("--normalization-report", required=True, help="path to normalization-report.json")
@@ -181,6 +201,50 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"recsys aliases: {code}", file=sys.stderr)
             return 1
         print(f"{identity} items={items} aliases={aliases} english={english} main={main}")
+    elif parsed.command == "release":
+        from pathlib import Path
+        import hashlib
+        from .release import ReleaseError, compose_release, validate_release
+        from .release_build import ReleaseBuildError, build_release, export_release_bundle
+        try:
+            if parsed.release_command == "compose":
+                manifest = compose_release(
+                    Path(parsed.base_dir), Path(parsed.aliases_dir), Path(parsed.alias_data_dir),
+                    Path(parsed.output_dir), expected_base_identity=parsed.base_identity,
+                    expected_alias_identity=parsed.alias_identity)
+                identity = "sha256:" + hashlib.sha256(manifest.read_bytes()).hexdigest()
+                import json
+                counts = json.loads(manifest.read_bytes())["counts"]
+                print(f"{identity} catalog={counts['catalog_count']} "
+                      f"enrichment={counts['enrichment_items']} "
+                      f"changed={counts['catalog_aliases_changed_items']}")
+            elif parsed.release_command == "validate":
+                summary = validate_release(
+                    Path(parsed.release_dir), expected_identity=parsed.release_identity,
+                    base_dir=Path(parsed.base_dir), aliases_dir=Path(parsed.aliases_dir),
+                    alias_data_dir=Path(parsed.alias_data_dir))
+                print(f"{summary.identity} catalog={summary.catalog_count} "
+                      f"enrichment={summary.enrichment_items} changed={summary.catalog_aliases_changed_items}")
+            elif parsed.release_command == "build":
+                report = build_release(
+                    Path(parsed.release_dir), Path(parsed.glove), Path(parsed.output_dir),
+                    expected_release_identity=parsed.release_identity,
+                    base_dir=Path(parsed.base_dir), aliases_dir=Path(parsed.aliases_dir),
+                    alias_data_dir=Path(parsed.alias_data_dir), block_size=parsed.block_size)
+                print(f"{report} release={parsed.release_identity}")
+            else:
+                path = export_release_bundle(
+                    Path(parsed.release_dir), Path(parsed.neighbors), Path(parsed.build_report),
+                    Path(parsed.output_dir), expected_release_identity=parsed.release_identity,
+                    base_dir=Path(parsed.base_dir), aliases_dir=Path(parsed.aliases_dir),
+                    alias_data_dir=Path(parsed.alias_data_dir))
+                from .bundle import check_bundle
+                identity, count = check_bundle(path)
+                print(f"{path} {identity} records={count}")
+        except (ReleaseError, ReleaseBuildError, OSError, ValueError) as exc:
+            code = str(exc) if isinstance(exc, (ReleaseError, ReleaseBuildError)) else "release_integrity_error"
+            print(f"recsys release: {code}", file=sys.stderr)
+            return 1
     elif parsed.command == "build":
         from pathlib import Path
 
