@@ -442,7 +442,7 @@ def _prepare(data_dir: Path, base_dir: Path, expected_base_identity: str,
     aliases, qa = _derive(raw, base)
     _check_expectations(qa, expectations)
     return (loaded_spec, registry, registry_sha, expectations_sha, base_descriptor,
-            aliases, qa)
+            len(base), aliases, qa)
 
 
 def normalize_aliases(data_dir: Path, base_dir: Path, output_dir: Path, *, snapshot: str,
@@ -455,7 +455,7 @@ def normalize_aliases(data_dir: Path, base_dir: Path, output_dir: Path, *, snaps
         raise AliasError("alias_integrity_error")
     data_dir, base_dir, output_dir = map(Path, (data_dir, base_dir, output_dir))
     _safe_paths(data_dir, base_dir, output_dir)
-    spec, registry, registry_sha, expectations_sha, base_descriptor, aliases, qa = _prepare(
+    spec, registry, registry_sha, expectations_sha, base_descriptor, base_count, aliases, qa = _prepare(
         data_dir, base_dir, expected_base_identity, _spec, _base_spec)
     if snapshot != spec.snapshot_id:
         raise AliasError("alias_integrity_error")
@@ -473,7 +473,7 @@ def normalize_aliases(data_dir: Path, base_dir: Path, output_dir: Path, *, snaps
         manifest = {
             "schema_version": 1, "kind": "arb-title-aliases", "snapshot_id": spec.snapshot_id,
             "base": {"snapshot_id": "neelagiri-2025-v1", "identity": expected_base_identity,
-                     "catalog": base_descriptor},
+                     "catalog": base_descriptor, "catalog_items": base_count},
             "registry_sha256": registry_sha, "provenance": registry["provenance"],
             "sources": registry["sources"],
             "normalizer": {"name": "nafiul-title-aliases", "version": "1", "policy": POLICY,
@@ -518,12 +518,12 @@ def validate_aliases(aliases_dir: Path, *, data_dir: Path, base_dir: Path,
         identity = "sha256:" + _sha(manifest_raw)
         if expected_identity is not None and identity != expected_identity:
             raise AliasError("alias_integrity_error")
-        spec, registry, registry_sha, expectations_sha, base_descriptor, aliases, qa = _prepare(
+        spec, registry, registry_sha, expectations_sha, base_descriptor, base_count, aliases, qa = _prepare(
             data_dir, base_dir, expected_base_identity, _spec, _base_spec)
         expected_manifest = {
             "schema_version": 1, "kind": "arb-title-aliases", "snapshot_id": spec.snapshot_id,
             "base": {"snapshot_id": "neelagiri-2025-v1", "identity": expected_base_identity,
-                     "catalog": base_descriptor},
+                     "catalog": base_descriptor, "catalog_items": base_count},
             "registry_sha256": registry_sha, "provenance": registry["provenance"],
             "sources": registry["sources"],
         }

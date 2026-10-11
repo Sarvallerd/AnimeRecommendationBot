@@ -97,6 +97,8 @@ class AliasTests(unittest.TestCase):
         summary = self.fixture.validate(a)
         self.assertEqual((summary.items, summary.aliases, summary.english, summary.main),
                          (2, 3, 2, 1))
+        manifest = json.loads((a / "alias-manifest.json").read_bytes())
+        self.assertEqual(manifest["base"]["catalog_items"], 2)
         qa = json.loads((a / "alias-qa.json").read_bytes())
         self.assertEqual({key: qa["counts"][key] for key in (
             "source_rows", "eligible_overlap", "emitted_items", "emitted_strings",
@@ -255,6 +257,10 @@ class AliasTests(unittest.TestCase):
         changed(lambda document: document.__setitem__("schema_version", True))
         changed(lambda document: document["base"]["catalog"].__setitem__(
             "bytes", float(original["base"]["catalog"]["bytes"])))
+        for bad_count in (True, 2.0, 3):
+            with self.subTest(bad_count=bad_count):
+                changed(lambda document: document["base"].__setitem__(
+                    "catalog_items", bad_count))
         changed(lambda document: document["sources"][0].__setitem__(
             "size", float(original["sources"][0]["size"])))
         changed(lambda document: document["provenance"]["dataset"].__setitem__("version", True))
