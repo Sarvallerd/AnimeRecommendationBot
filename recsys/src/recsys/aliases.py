@@ -87,6 +87,14 @@ def _sha(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+def _same_json(left: object, right: object) -> bool:
+    """Compare frozen JSON values without Python's bool/int/float equality coercion."""
+    try:
+        return canonical_bytes(left) == canonical_bytes(right)
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
 def _unique_object(pairs: list[tuple[str, object]]) -> dict:
     result = {}
     for key, value in pairs:
@@ -97,7 +105,11 @@ def _unique_object(pairs: list[tuple[str, object]]) -> dict:
 
 
 def _json_unique(raw: bytes) -> dict:
-    value = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_object)
+    def reject_constant(_value: str):
+        raise ValueError("nonfinite JSON constant")
+
+    value = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_object,
+                       parse_constant=reject_constant)
     if not isinstance(value, dict):
         raise ValueError("expected JSON object")
     return value
@@ -126,7 +138,12 @@ def _load_spec(spec: AliasSpec | None) -> tuple[AliasSpec, dict, dict, str, str]
         expectations = parse_canonical(spec.expectations_bytes, "alias_expectations")
     except (ValueError, TypeError, OSError, UnicodeError, SourceError) as exc:
         raise AliasError("alias_integrity_error") from exc
-    if (not isinstance(expectations, dict)
+    dataset_provenance = registry.get("provenance", {}).get("dataset")
+    if (type(registry.get("schema_version")) is not int
+            or not isinstance(dataset_provenance, dict)
+            or type(dataset_provenance.get("version")) is not int
+            or dataset_provenance["version"] < 1
+            or not isinstance(expectations, dict)
             or set(expectations) != {"schema_version", "snapshot_id", "source_sha256",
                                      "base_identity", "counts", "fields"}
             or type(expectations["schema_version"]) is not int
@@ -135,7 +152,7 @@ def _load_spec(spec: AliasSpec | None) -> tuple[AliasSpec, dict, dict, str, str]
             or not isinstance(expectations["base_identity"], str)
             or not IDENTITY.fullmatch(expectations["base_identity"])
             or spec.expectations_resource != EXPECTATIONS_RESOURCE
-            or registry.get("provenance", {}).get("dataset", {}).get("snapshot_id") != spec.snapshot_id
+            or dataset_provenance.get("snapshot_id") != spec.snapshot_id
             or len(registry["sources"]) != 1
             or registry["sources"][0]["id"] != "nafiul_anime_csv"
             or registry["sources"][0]["filename"] != "anime_info.csv"
@@ -166,7 +183,8 @@ def _read_source(data_dir: Path, registry: dict, registry_sha: str) -> bytes:
     except (OSError, ValueError, UnicodeError) as exc:
         raise AliasError("input_hash_mismatch") from exc
     if (not isinstance(manifest, dict) or set(manifest) != set(expected)
-            or type(manifest.get("schema_version")) is not int or manifest != expected
+            or type(manifest.get("schema_version")) is not int
+            or not _same_json(manifest, expected)
             or len(raw) != descriptor["size"] or _sha(raw) != descriptor["sha256"]):
         raise AliasError("input_hash_mismatch")
     return raw
@@ -510,7 +528,9 @@ def validate_aliases(aliases_dir: Path, *, data_dir: Path, base_dir: Path,
             "sources": registry["sources"],
         }
         if (not isinstance(manifest, dict)
-                or any(manifest.get(key) != value for key, value in expected_manifest.items())
+                or type(manifest.get("schema_version")) is not int
+                or any(not _same_json(manifest.get(key), value)
+                       for key, value in expected_manifest.items())
                 or set(manifest) != set(expected_manifest) | {"normalizer", "producer", "files"}):
             raise AliasError("alias_integrity_error")
         normalizer = manifest["normalizer"]

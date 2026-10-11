@@ -55,7 +55,7 @@ class Fixture:
         source = {"id": "nafiul_anime_csv", "filename": "anime_info.csv", "size": len(raw),
                   "sha256": hashlib.sha256(raw).hexdigest(), "url": "https://example.invalid/data.csv"}
         registry = {"schema_version": 1,
-                    "provenance": {"dataset": {"snapshot_id": "nafiul-2026-v1"}},
+                    "provenance": {"dataset": {"snapshot_id": "nafiul-2026-v1", "version": 1}},
                     "sources": [source]}
         registry_bytes = canonical_bytes(registry)
         manifest = {"schema_version": 1, "registry_sha256": hashlib.sha256(registry_bytes).hexdigest(),
@@ -239,6 +239,53 @@ class AliasTests(unittest.TestCase):
         self.assertNotEqual(self.fixture.validate(output).identity, original)
         with self.assertRaisesRegex(AliasError, "alias_integrity_error"):
             self.fixture.validate(output, expected_identity=original)
+
+    def test_manifest_immutable_json_blocks_reject_equal_python_numeric_values(self):
+        output = self.fixture.run()
+        path = output / "alias-manifest.json"
+        original = json.loads(path.read_bytes())
+
+        def changed(mutator):
+            document = json.loads(canonical_bytes(original))
+            mutator(document)
+            path.write_bytes(canonical_bytes(document))
+            with self.assertRaisesRegex(AliasError, "alias_integrity_error"):
+                self.fixture.validate(output)
+
+        changed(lambda document: document.__setitem__("schema_version", True))
+        changed(lambda document: document["base"]["catalog"].__setitem__(
+            "bytes", float(original["base"]["catalog"]["bytes"])))
+        changed(lambda document: document["sources"][0].__setitem__(
+            "size", float(original["sources"][0]["size"])))
+        changed(lambda document: document["provenance"]["dataset"].__setitem__("version", True))
+        path.write_bytes(canonical_bytes(original))
+        self.assertEqual(self.fixture.validate(output).base_identity, self.fixture.base_identity)
+
+    def test_source_manifest_nested_equal_numeric_tampering_is_rejected(self):
+        path = self.fixture.cache / "source-manifest.json"
+        original = json.loads(path.read_bytes())
+        for nested in ("verified", "provenance"):
+            document = json.loads(canonical_bytes(original))
+            if nested == "verified":
+                document["verified"][0]["size"] = float(document["verified"][0]["size"])
+            else:
+                document["provenance"]["dataset"]["version"] = True
+            path.write_bytes(canonical_bytes(document))
+            with self.subTest(nested=nested), self.assertRaisesRegex(AliasError, "input_hash_mismatch"):
+                self.fixture.run()
+        path.write_bytes(canonical_bytes(original))
+
+    def test_fixture_registry_version_requires_exact_integer_type(self):
+        registry = json.loads(self.fixture.spec.registry_bytes)
+        registry["provenance"]["dataset"]["version"] = True
+        altered = AliasSpec(self.fixture.spec.snapshot_id, canonical_bytes(registry),
+                            self.fixture.spec.expectations_resource,
+                            self.fixture.spec.expectations_bytes)
+        with self.assertRaisesRegex(AliasError, "alias_integrity_error"):
+            normalize_aliases(self.fixture.cache, self.fixture.base, self.fixture.root / "invalid",
+                              snapshot="nafiul-2026-v1", expected_base_identity=self.fixture.base_identity,
+                              _spec=altered, _base_spec=self.fixture.base_fixture.spec)
+        self.assertFalse((self.fixture.root / "invalid").exists())
 
     def test_base_identity_collision_and_permissions(self):
         with self.assertRaisesRegex(AliasError, "base_integrity_error"):
