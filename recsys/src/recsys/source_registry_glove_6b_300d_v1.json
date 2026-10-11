@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "provenance": {
+    "glove": {
+      "project": "https://nlp.stanford.edu/projects/glove/",
+      "pretrained_vectors_license": "PDDL 1.0",
+      "code_license": "Apache 2.0",
+      "download_url": "https://nlp.stanford.edu/data/glove.6B.zip",
+      "observed_redirect": "https://downloads.cs.stanford.edu/nlp/data/glove.6B.zip"
+    }
+  },
+  "sources": [
+    {
+      "id": "glove_zip",
+      "filename": "glove.6B.zip",
+      "size": 862182613,
+      "sha256": "617afb2fe6cbd085c235baf7a465b96f4112bd7f7ccb2b2cbd649fed9cbcf2fb",
+      "url": "https://nlp.stanford.edu/data/glove.6B.zip"
+    },
+    {
+      "id": "glove_300d",
+      "filename": "glove.6B.300d.txt",
+      "size": 1037962819,
+      "sha256": "91125602f730fea7ca768736c6f442e668b49db095682bf2aad375db061c21ed",
+      "archive_id": "glove_zip",
+      "member": "glove.6B.300d.txt"
+    }
+  ]
+}

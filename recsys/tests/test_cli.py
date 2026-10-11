@@ -33,6 +33,14 @@ class CliTests(unittest.TestCase):
                 self.assertIn("usage: recsys", result.stdout)
                 self.assertEqual(result.stderr, "")
 
+    def test_release_commands_require_explicit_trusted_inputs(self) -> None:
+        for command in ("compose", "validate", "build", "export"):
+            with self.subTest(command=command):
+                result = self.run_cli("release", command)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("required", result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+
     def test_version_matches_installed_distribution(self) -> None:
         version = importlib.metadata.version("anime-recommendation-recsys")
         for console in (False, True):

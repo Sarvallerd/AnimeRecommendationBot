@@ -93,6 +93,12 @@ def _validate_report(report, catalog, neighbors, raw, registry, registry_sha, no
     _same(producer["numpy_version"], "2.5.3", "build-report.json.producer.numpy_version")
     _same(producer["code_files"], {name: _code_sha(name) for name in ("build.py", "sources.py")},
           "build-report.json.producer.code_files")
+    _validate_diagnostics(report, catalog, neighbors)
+
+
+def _validate_diagnostics(report, catalog, neighbors):
+    """Check the math diagnostics shared by the two strict report contracts."""
+    count = len(catalog["anime"])
     execution = report["execution"]
     exact_fields(execution, {"requested_block_rows", "effective_block_rows",
                              "similarity_block_budget_bytes"}, "build-report.json.execution")

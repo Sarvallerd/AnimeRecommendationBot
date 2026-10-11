@@ -49,7 +49,8 @@ class SourceTests(unittest.TestCase):
         registry, digest = load_registry()
         self.assertEqual(digest, "49bb399935f0ac7ec649fe2f4bd7715444c09c8513704866fa90b9bea29d182f")
         self.assertEqual(DEFAULT_SNAPSHOT, "mal-2020-glove-v1")
-        self.assertEqual(SNAPSHOT_IDS, (DEFAULT_SNAPSHOT, "neelagiri-2025-v1", "nafiul-2026-v1"))
+        self.assertEqual(SNAPSHOT_IDS, (DEFAULT_SNAPSHOT, "neelagiri-2025-v1", "nafiul-2026-v1",
+                                        "glove-6b-300d-v1"))
         self.assertEqual(
             [(item["filename"], item["size"]) for item in registry["sources"]],
             [
@@ -61,6 +62,13 @@ class SourceTests(unittest.TestCase):
         )
         self.assertEqual(registry["provenance"]["mal"]["commit"],
                          "9a1d7f56482accbde99e24cd7cfcad65e2d24b1f")
+
+    def test_glove_selector_is_exact_legacy_projection(self):
+        legacy, _ = load_registry()
+        selected, _ = load_registry("glove-6b-300d-v1")
+        self.assertEqual(selected, {"schema_version": 1,
+                                    "provenance": {"glove": legacy["provenance"]["glove"]},
+                                    "sources": legacy["sources"][2:]})
 
     def test_new_packaged_registry_matches_audit_pins(self):
         registry, digest = load_registry("neelagiri-2025-v1")
