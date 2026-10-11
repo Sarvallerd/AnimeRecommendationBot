@@ -71,6 +71,25 @@ def guarded(path, *, directory=False):
     return path
 
 
+def primary_root(checkout=ROOT):
+    result = subprocess.run(['git', '-c', f'safe.directory={checkout}', 'rev-parse',
+                             '--path-format=absolute', '--git-common-dir'], cwd=checkout,
+                            capture_output=True, text=True, timeout=20, check=False)
+    need(result.returncode == 0, 'SOURCE_CHANGED')
+    common = guarded(Path(result.stdout.strip()), directory=True)
+    need(common.name == '.git' and common.parent.is_dir(), 'SOURCE_CHANGED')
+    return common.parent
+
+
+def private_roots(checkout=ROOT):
+    primary = primary_root(checkout)
+    return (primary/'.arb', primary/'.tools'/'arb033-acceptance')
+
+
+def project_lock_dir(checkout=ROOT):
+    return primary_root(checkout)/'.arb'/'acceptance-locks'
+
+
 def private_file(path, raw):
     need(not path.exists() and not path.is_symlink() and path.parent.is_dir() and
          stat.S_IMODE(path.parent.stat().st_mode) & 0o077 == 0, 'UNSAFE_PATH')
@@ -231,19 +250,24 @@ def probe_code():
 names=('build.py','bundle.py','export.py','release.py','release_build.py')
 files={name:hashlib.sha256(r.files('recsys').joinpath(name).read_bytes()).hexdigest() for name in names}
 lock=hashlib.sha256(r.files('recsys').joinpath('release_neelagiri_2025_nafiul_2026_v1.json').read_bytes()).hexdigest()
-print(json.dumps({'python_version':platform.python_version(),'numpy_version':numpy.__version__,'package_version':recsys.__version__,'code_files_sha256':files,'lock_sha256':lock},sort_keys=True))"""
+registry=hashlib.sha256(r.files('recsys').joinpath('source_registry_glove_6b_300d_v1.json').read_bytes()).hexdigest()
+print(json.dumps({'python_version':platform.python_version(),'numpy_version':numpy.__version__,'package_version':recsys.__version__,'code_files_sha256':files,'lock_sha256':lock,'registry_sha256':registry},sort_keys=True))"""
 
 
 def check_probe(probe, profile):
     ref = profile.reference['producer']
     need(type(probe) is dict and set(probe) == {'python_version','numpy_version',
-         'package_version','code_files_sha256','lock_sha256'}, 'BUILD_MISMATCH')
+         'package_version','code_files_sha256','lock_sha256','registry_sha256'}, 'BUILD_MISMATCH')
     need(all(probe[key] == ref[key] for key in
              ('python_version','numpy_version','package_version')) and
          probe['code_files_sha256'] == ref['code_files_sha256'] and
-         probe['lock_sha256'] == profile.lock_sha256, 'BUILD_MISMATCH')
+         probe['lock_sha256'] == profile.lock_sha256 and
+         probe['registry_sha256'] == profile.inputs['embeddings']['registry_sha256'],
+         'BUILD_MISMATCH')
     need(all(file_sha(ROOT/'recsys/src/recsys'/name) == digest for name,digest in
-             ref['code_files_sha256'].items()), 'BUILD_MISMATCH')
+             ref['code_files_sha256'].items()) and
+         file_sha(ROOT/'recsys/src/recsys/source_registry_glove_6b_300d_v1.json') ==
+             profile.inputs['embeddings']['registry_sha256'], 'BUILD_MISMATCH')
 
 
 def check_report(report, report_raw, summary, profile, block):
@@ -289,7 +313,18 @@ def bundle_files(bundle):
     return {name: descriptor(bundle/name) for name in ('catalog.json','neighbors.json','manifest.json')}
 
 
-def snapshot_phase(t, evidence, label, settings, baseline, expected, previous_id, bot_image, pg0):
+def check_retained(retained, old_path):
+    need(retained['input_files'] == files_under(retained['input_paths']) and
+         retained['old_files'] == bundle_files(old_path), 'INPUT_CHANGED')
+
+
+def phase_time(previous_capture, started_at, captured_at):
+    need(e.utc(previous_capture) < e.utc(started_at) <= e.utc(captured_at),
+         'PHASE_MISMATCH')
+
+
+def snapshot_phase(t, evidence, label, settings, baseline, expected, previous_id,
+                   previous_capture, bot_image, pg0):
     t.settings = settings
     quiescent(t)
     t.compose('up','-d','--no-deps','--force-recreate','prepare')
@@ -310,22 +345,47 @@ def snapshot_phase(t, evidence, label, settings, baseline, expected, previous_id
     need(all(pg[key] == pg0[key] for key in ('id','image_id','database_volume','started_at')),
          'DATABASE_HISTORY')
     shot = e.snapshot(t.project, settings)
+    phase_time(previous_capture,current['started_at'],shot['captured_at'])
     need(shot['runtime']['bot'] is None or not shot['runtime']['bot']['running'], 'BOT_RUNNING')
     need(shot['database'] == baseline['database'], 'DATABASE_HISTORY')
     e.validate_database(shot['database'])
     evidence_file = save_json(evidence/f'snapshot-{label}.json', shot)
     return {'label':label,'bundle_identity':expected['identity'],
             'settings':{'file':settings.name,'sha256':file_sha(settings)},
-            'snapshot':evidence_file}, current['id']
+            'snapshot':evidence_file}, current['id'], shot['captured_at']
 
 
-def restore_old(t, settings, original_state, old_settings, old_path, old):
+def run_prepare_sequence(t, evidence, settings, original_state, head, baseline, selected,
+                         settings_by_label, bot_image, pg0, retained, old_path, switch_state):
+    sequence = []
+    previous = e.container(t.project,settings,'prepare')
+    previous_id = previous['id'] if previous else None
+    previous_capture = baseline['captured_at']
+    for label in LABELS:
+        selection = selected['old' if label.startswith('old') else
+                             'new-B' if label == 'new-B' else 'new-A']
+        need((sha(settings.read_bytes()),settings.stat().st_uid,settings.stat().st_gid,
+              stat.S_IMODE(settings.stat().st_mode)) == original_state, 'UNSAFE_SETTINGS')
+        clean(head)
+        check_retained(retained,old_path)
+        switch_state['begun'] = True
+        entry,previous_id,previous_capture = snapshot_phase(
+            t,evidence,label,settings_by_label[label],baseline,selection,previous_id,
+            previous_capture,bot_image,pg0)
+        sequence.append(entry)
+    return sequence
+
+
+def restore_old(t, settings, original_state, old_settings, old_path, old, pg0, retained):
     try:
         t.settings = settings
         need((sha(settings.read_bytes()),settings.stat().st_uid,settings.stat().st_gid,
               stat.S_IMODE(settings.stat().st_mode)) == original_state,
              'RESTORE_PENDING')
-        quiescent(t)
+        pg = quiescent(t)
+        need(all(pg[key] == pg0[key] for key in
+                 ('id','image_id','database_volume','started_at')), 'RESTORE_PENDING')
+        check_retained(retained,old_path)
     except Exception:
         return 'PENDING'
     try:
@@ -401,7 +461,9 @@ def verify_record(evidence):
     need(all(probe.get(key) == ref[key] for key in
              ('python_version','numpy_version','package_version')) and
          probe.get('code_files_sha256') == ref['code_files_sha256'] and
-         probe.get('lock_sha256') == profile.lock_sha256, 'EVIDENCE_INVALID')
+         probe.get('lock_sha256') == profile.lock_sha256 and
+         probe.get('registry_sha256') ==
+             profile.inputs['embeddings']['registry_sha256'], 'EVIDENCE_INVALID')
     input_files = saved_json(evidence,records['input_files'])
     layout = saved_json(evidence,records['input_layout'])
     need(set(layout) == {'base','aliases','release','alias_raw','glove'}, 'EVIDENCE_INVALID')
@@ -509,6 +571,7 @@ def verify_record(evidence):
     need(type(sequence) is list and len(sequence) == 5 and
          [item['label'] for item in sequence] == list(LABELS), 'EVIDENCE_INVALID')
     last_id = None
+    previous_capture = baseline['captured_at']
     for item in sequence:
         need(set(item) == {'label','bundle_identity','settings','snapshot'}, 'EVIDENCE_INVALID')
         label = item['label']
@@ -530,6 +593,7 @@ def verify_record(evidence):
         bot = shot['runtime']['bot']
         pg = shot['runtime']['postgres']
         prepare = shot['runtime']['prepare']
+        phase_time(previous_capture,prepare['started_at'],shot['captured_at'])
         need((bot is None or not bot['running']) and pg is not None and pg['running'] and
              all(pg[key] == pg0[key] for key in ('id','image_id','database_volume','started_at')) and
              prepare is not None and prepare['id'] != last_id and
@@ -541,6 +605,7 @@ def verify_record(evidence):
              prepare['bundle_id'] == expected.identity and
              prepare['bundle_count'] == expected.count, 'EVIDENCE_INVALID')
         last_id = prepare['id']
+        previous_capture = shot['captured_at']
     need(report['checks'] == {key:'PASS' for key in CHECKS}, 'EVIDENCE_INVALID')
     return report
 
@@ -552,8 +617,7 @@ def run(args):
     data = guarded(args.data_dir,directory=True)
     settings = guarded(args.settings)
     evidence = Path(args.evidence_dir)
-    private_roots = (ROOT.parents[1]/'.arb',
-                     ROOT.parents[1]/'.tools'/'arb033-acceptance')
+    allowed_private_roots = private_roots()
     need(evidence.is_absolute() and '..' not in evidence.parts and
          not evidence.exists() and
          not evidence.is_symlink() and evidence.parent.is_dir() and
@@ -563,7 +627,7 @@ def run(args):
          not evidence.is_relative_to(data) and not data.is_relative_to(evidence),
          'UNSAFE_PATH')
     need(any(all(item.is_relative_to(private_root) for item in
-                 (data,evidence,settings)) for private_root in private_roots), 'UNSAFE_PATH')
+                 (data,evidence,settings)) for private_root in allowed_private_roots), 'UNSAFE_PATH')
     need(e.PROJECT.fullmatch(args.project) is not None and
          e.IDENTITY.fullmatch(args.old_identity) is not None, 'INVALID_ARGUMENT')
     values = e.read_settings(settings)
@@ -588,10 +652,12 @@ def run(args):
     glove = paths['glove']
     need(file_sha(glove) == profile.inputs['embeddings']['text_sha256'] and
          glove.stat().st_size == profile.inputs['embeddings']['text_size'], 'INPUT_CHANGED')
-    lock_dir = ROOT.parents[1]/'.arb'/'acceptance-locks'
-    need(lock_dir.parent.is_dir() and not lock_dir.parent.is_symlink(), 'UNSAFE_PATH')
+    lock_dir = project_lock_dir()
+    guarded(lock_dir.parent,directory=True)
     lock_dir.mkdir(mode=0o700,exist_ok=True)
-    need(stat.S_IMODE(lock_dir.stat().st_mode) == 0o700, 'UNSAFE_PATH')
+    lock_dir_stat = guarded(lock_dir,directory=True).stat()
+    need(stat.S_IMODE(lock_dir_stat.st_mode) == 0o700 and
+         lock_dir_stat.st_uid == os.getuid(), 'UNSAFE_PATH')
     lock_path = lock_dir/(args.project+'.lock')
     lock_fd = os.open(lock_path,os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW|os.O_NONBLOCK,0o600)
     try:
@@ -635,9 +701,10 @@ def _run_locked(args,head,data,settings,evidence,values,old_path,old,profile,pat
     saved_records['input_layout'] = save_json(evidence/'input-layout.json',
         {key:str(paths[key]) for key in ('base','aliases','release','alias_raw','glove')})
     old_files = bundle_files(old_path)
+    retained = {'input_files':before_files,'input_paths':input_paths,'old_files':old_files}
     t = Transport(args.project,settings)
     t.evidence()
-    begun = False
+    switch_state = {'begun':False}
     baseline = None
     old_settings = None
     try:
@@ -720,8 +787,7 @@ def _run_locked(args,head,data,settings,evidence,values,old_path,old,profile,pat
              summaries['A'].hashes['catalog.json'] == ref['catalog_sha256'] and
              summaries['A'].hashes['neighbors.json'] == ref['neighbors_sha256'],
              'BUILD_MISMATCH')
-        need(before_files == files_under(input_paths) and old_files == bundle_files(old_path),
-             'INPUT_CHANGED')
+        check_retained(retained,old_path)
         settings_by_label = {}
         selected = {'old':{'path':old_path,'identity':old.identity,'count':old.count},
                     'new-A':{'path':Path(builds['A']['path']),
@@ -742,19 +808,8 @@ def _run_locked(args,head,data,settings,evidence,values,old_path,old,profile,pat
             need(rust.strip().splitlines()[-1] ==
                  selection['identity']+' records='+str(selection['count']), 'BUILD_MISMATCH')
         t.settings = settings
-        sequence = []
-        previous_id = e.container(args.project,settings,'prepare')
-        previous_id = previous_id['id'] if previous_id else None
-        for label in LABELS:
-            selection = selected['old' if label.startswith('old') else
-                                 'new-B' if label == 'new-B' else 'new-A']
-            need((sha(settings.read_bytes()),settings.stat().st_uid,settings.stat().st_gid,
-                  stat.S_IMODE(settings.stat().st_mode)) == original_state, 'UNSAFE_SETTINGS')
-            clean(head)
-            begun = True
-            entry,previous_id = snapshot_phase(t,evidence,label,settings_by_label[label],
-                                               baseline,selection,previous_id,bot_image,pg0)
-            sequence.append(entry)
+        sequence = run_prepare_sequence(t,evidence,settings,original_state,head,baseline,
+                    selected,settings_by_label,bot_image,pg0,retained,old_path,switch_state)
         t.settings = settings
         need((sha(settings.read_bytes()),settings.stat().st_uid,settings.stat().st_gid,
               stat.S_IMODE(settings.stat().st_mode)) == original_state and
@@ -796,8 +851,9 @@ def _run_locked(args,head,data,settings,evidence,values,old_path,old,profile,pat
     except BaseException as exc:
         reason = exc.code if isinstance(exc,(ReleaseError,p.ProfileError,e.EvidenceError)) else 'BUILD_FAILED'
         restoration = 'PENDING'
-        if begun and old_settings is not None:
-            restoration = restore_old(t,settings,original_state,old_settings,old_path,old)
+        if switch_state['begun'] and old_settings is not None:
+            restoration = restore_old(t,settings,original_state,old_settings,old_path,old,
+                                      pg0,retained)
         try:
             save_json(evidence/'failure-status.json',{'schema_version':1,'status':'FAIL',
                       'reason':reason if reason in REASON else 'BUILD_FAILED',
