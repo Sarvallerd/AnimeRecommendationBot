@@ -63,11 +63,11 @@ ARB_POSTGRES_ENV=/absolute/path/to/.arb/local/secrets/postgres.env
 ```bash
 compose() { docker compose --env-file "$SETTINGS" -p "$PROJECT" -f "$COMPOSE_FILE" "$@"; }
 compose --profile tools build builder bot
-compose --profile tools run --rm --no-deps builder obtain --data-dir /data/raw
+compose --profile tools run --rm --no-deps builder obtain --snapshot nafiul-2026-v1 --data-dir /data/raw/nafiul-2026-v1
 compose --profile tools run --rm --no-deps --entrypoint /usr/local/bin/prepare-artifacts builder
 ```
 
-Последняя команда повторно проверяет источники без сети, нормализует каталог, строит top-5, экспортирует пакет и печатает его каталог `sha256-...`. Обновите только `ARB_BUNDLE_DIR` в `compose.env` на абсолютный путь к этому каталогу. Пакет содержит `catalog.json`, `neighbors.json`, `manifest.json`; рабочие отчёты остаются в `data/work`.
+Последняя команда запускает `recsys release prepare --release current --data-dir /data`. До запуска разместите проверенные immutable base и aliases в `/data/datasets/sha256-...` и `/data/aliases/sha256-...`, кэш Nafiul в `/data/raw/nafiul-2026-v1`, текст GloVe в `/data/raw/glove-6b-300d-v1`. Команда работает offline, проверяет lock и печатает путь проверенного пакета и подсказку `ARB_BUNDLE_DIR`. Выбор работающего пакета в `compose.env` остаётся отдельным шагом.
 
 ```bash
 compose --profile tools run --rm --no-deps builder validate /data/bundles/sha256-<digest>

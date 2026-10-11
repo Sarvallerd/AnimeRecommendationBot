@@ -93,8 +93,8 @@ bot_id=$(compose ps -a -q bot 2>"$evidence_dir/logs/compose-ps.stderr") || fail 
 }
 phase build-images compose --profile tools build builder bot
 builder() { compose --profile tools run --rm --no-deps builder "$@"; }
-if ((offline)); then phase obtain builder obtain --offline --data-dir /data/raw
-else phase obtain builder obtain --data-dir /data/raw; fi
+if ((offline)); then phase obtain builder obtain --snapshot mal-2020-glove-v1 --offline --data-dir /data/raw
+else phase obtain builder obtain --snapshot mal-2020-glove-v1 --data-dir /data/raw; fi
 phase normalize builder normalize --anime-csv /data/raw/anime.csv --synopsis-csv /data/raw/anime_with_synopsis.csv --output-dir /data/work/arb020-normalized
 for label in A B; do
     block=256; [[ $label == B ]] && block=128

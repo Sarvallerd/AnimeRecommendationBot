@@ -17,14 +17,14 @@ compose.env:   ARB_DATA_DIR=/absolute/path/to/data
                ARB_LOG=info
 ```
 
-Raw Compose env files preserve dollar signs and quotes literally. Do not add shell quoting around their values. Percent encode reserved URL characters in the database password (`$` → `%24`, `@` → `%40`, `/` → `%2F`). The bot accepts `NoTls`; use `sslmode=disable` for this Compose network. The builder never receives the token or database credentials. Its build stage uses the root uv/maturin package and a Rust toolchain to compile the installed commands. The final Python builder image contains those commands, without a Rust compiler or the full dataset; the polling bot image is Rust-only. For normal operation, use the [root setup guide](../README.md); `prepare-artifacts` verifies cached sources, normalizes, builds, exports, validates, and publishes one bundle. `bot --prepare` checks the selected full bundle and applies migration 1 without contacting Telegram. `bot --check-config` checks only configuration and the artifact directory. Normal bot startup repeats the bundle/database checks before polling.
+Raw Compose env files preserve dollar signs and quotes literally. Do not add shell quoting around their values. Percent encode reserved URL characters in the database password (`$` → `%24`, `@` → `%40`, `/` → `%2F`). The bot accepts `NoTls`; use `sslmode=disable` for this Compose network. The builder never receives the token or database credentials. Its build stage uses the root uv/maturin package and a Rust toolchain to compile the installed commands. The final Python builder image contains those commands, without a Rust compiler or the full dataset; the polling bot image is Rust-only. For normal operation, use the [root setup guide](../README.md); `prepare-artifacts` runs the pinned offline `recsys release prepare` flow, defaulting to `current`. `ARB_RELEASE=mal-2020-glove-v1` selects the historical pipeline. Prepare requires verified frozen inputs already placed in `/data`; it prints a validated bundle path and does not change settings. `bot --prepare` checks the selected full bundle and applies migration 1 without contacting Telegram. `bot --check-config` checks only configuration and the artifact directory. Normal bot startup repeats the bundle/database checks before polling.
 
 Pass the settings file on **every** Compose command. From the checkout root, set `PROJECT`, `SETTINGS`, and `COMPOSE_FILE` to the chosen stable paths and use:
 
 ```bash
 compose() { docker compose --env-file "$SETTINGS" -p "$PROJECT" -f "$COMPOSE_FILE" "$@"; }
 compose --profile tools build builder bot
-compose --profile tools run --rm builder obtain --data-dir /data/raw
+compose --profile tools run --rm builder obtain --snapshot nafiul-2026-v1 --data-dir /data/raw/nafiul-2026-v1
 compose --profile tools run --rm --no-deps --entrypoint /usr/local/bin/prepare-artifacts builder
 # Copy the validated printed basename into ARB_BUNDLE_DIR in SETTINGS.
 compose up -d bot

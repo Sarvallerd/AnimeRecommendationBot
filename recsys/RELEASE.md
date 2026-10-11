@@ -1,5 +1,15 @@
 # Composite research catalog release
 
+New offline preparations use the immutable `neelagiri-2025-nafiul-2026-v1` lock. `current` is a local alias for that release; it does not fetch or select a newer release. Place the verified frozen base, aliases, Nafiul cache, and GloVe text under one data directory, then run:
+
+```sh
+recsys release info
+recsys release prepare --data-dir DATA
+recsys release prepare --release mal-2020-glove-v1 --data-dir DATA
+```
+
+The current selector requires `DATA/datasets/sha256-BASE`, `DATA/aliases/sha256-ALIASES`, `DATA/raw/nafiul-2026-v1`, and `DATA/raw/glove-6b-300d-v1/glove.6B.300d.txt`. It validates the release and either reuses a checked immutable bundle or builds against the exact accepted Python 3.12.14, NumPy 2.5.3, package and five producer files. A different producer requires a new reference or the original fixed producer. The historical selector uses its own `DATA/raw/mal-2020-glove-v1` cache and legacy pipeline. Both print a verified path and `ARB_BUNDLE_DIR` suggestion; neither changes bot settings or PostgreSQL. A selected live bundle stays selected until a separate rollout.
+
 ARB-031 composes the accepted Neelagiri dataset with the accepted Nafiul title-alias artifact. A release binds both immutable upstream identities and contains only `catalog.json` and `release-manifest.json`. The overlay prepends stored alias texts in their existing order, removes exact duplicates, then retains the base aliases. Every other catalog field and every MAL_ID stays unchanged. This work does not import ratings or profiles into the bot database.
 
 Use a verified base, aliases, the pinned Nafiul cache, and explicit trusted identities:

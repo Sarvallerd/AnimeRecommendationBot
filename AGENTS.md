@@ -3,7 +3,7 @@
 ## Product and data
 
 - The bot is a Russian-language, private-chat anime recommendation bot. The runtime is Rust; one process polls each Telegram token.
-- Recommendation preparation runs offline in Python using the pinned MAL 2020 dataset and GloVe. Runtime recommendations come from generated JSON `catalog.json`, `neighbors.json`, and `manifest.json` keyed by stable `MAL_ID`.
+- New recommendation preparation runs offline in Python from the pinned Neelagiri 2025 base, Nafiul 2026 aliases, and GloVe through the immutable named release lock. The historical MAL 2020 preparation remains explicitly selectable. Runtime recommendations come from generated JSON `catalog.json`, `neighbors.json`, and `manifest.json` keyed by stable `MAL_ID`.
 - PostgreSQL stores requests, delivered positions, anime scores 1–10, recommendation feedback 0–5, and full text. Preserve legacy rows and migration history. Do not add personalization unless a task explicitly authorizes it.
 - Keep generated data, credentials, private acceptance evidence, and local tools out of commits. Use small fixtures for routine checks.
 
