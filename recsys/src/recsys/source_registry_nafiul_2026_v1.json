@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "provenance": {
+    "dataset": {
+      "snapshot_id": "nafiul-2026-v1",
+      "provider": "Kaggle",
+      "slug": "nafiulislam490/comprehensive-myanimelist-mal-dataset-2026",
+      "version": 1,
+      "page_url": "https://www.kaggle.com/datasets/nafiulislam490/comprehensive-myanimelist-mal-dataset-2026",
+      "declared_license": "CC BY-NC-SA 4.0",
+      "intake_scope": "noncommercial-research",
+      "exact_collection_date": null,
+      "artifact_scope": "anime-info-only"
+    }
+  },
+  "sources": [
+    {
+      "id": "nafiul_anime_csv",
+      "filename": "anime_info.csv",
+      "size": 22314208,
+      "sha256": "e833476c0da3eadd4c033889e1e8defb2808baf95b0ae38b55009f45d5d72c35",
+      "url": "https://www.kaggle.com/api/v1/datasets/download/nafiulislam490/comprehensive-myanimelist-mal-dataset-2026/anime_info.csv?datasetVersionNumber=1"
+    }
+  ]
+}

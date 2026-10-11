@@ -39,6 +39,20 @@ def build_parser() -> argparse.ArgumentParser:
     dataset_normalize.add_argument("--spill-limit-mib", type=int, default=32768)
     dataset_validate = dataset_commands.add_parser("validate", help="validate an immutable research dataset")
     dataset_validate.add_argument("dataset_dir")
+    aliases_parser = commands.add_parser("aliases", help="normalize or validate pinned title aliases")
+    aliases_commands = aliases_parser.add_subparsers(dest="aliases_command", required=True)
+    aliases_normalize = aliases_commands.add_parser("normalize", help="create an immutable alias overlay")
+    aliases_normalize.add_argument("--snapshot", required=True, choices=("nafiul-2026-v1",))
+    aliases_normalize.add_argument("--data-dir", required=True)
+    aliases_normalize.add_argument("--base-dir", required=True)
+    aliases_normalize.add_argument("--base-identity", required=True)
+    aliases_normalize.add_argument("--output-dir", required=True)
+    aliases_validate = aliases_commands.add_parser("validate", help="revalidate pinned alias inputs and output")
+    aliases_validate.add_argument("aliases_dir")
+    aliases_validate.add_argument("--data-dir", required=True)
+    aliases_validate.add_argument("--base-dir", required=True)
+    aliases_validate.add_argument("--base-identity", required=True)
+    aliases_validate.add_argument("--expected-identity")
     build_parser = commands.add_parser("build", help="build pinned GloVe cosine neighbors")
     build_parser.add_argument("--catalog", required=True, help="path to normalized catalog.json")
     build_parser.add_argument("--normalization-report", required=True, help="path to normalization-report.json")
@@ -139,6 +153,34 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"{identity} catalog={catalog_items} "
               f"interactions={interactions} users={users} "
               f"positive_users_ge_15={positive_users}")
+    elif parsed.command == "aliases":
+        from pathlib import Path
+        import hashlib
+
+        from .aliases import AliasError, normalize_aliases, validate_aliases
+
+        try:
+            if parsed.aliases_command == "normalize":
+                manifest = normalize_aliases(
+                    Path(parsed.data_dir), Path(parsed.base_dir), Path(parsed.output_dir),
+                    snapshot=parsed.snapshot, expected_base_identity=parsed.base_identity)
+                identity = "sha256:" + hashlib.sha256(manifest.read_bytes()).hexdigest()
+                import json
+                qa = json.loads((manifest.parent / "alias-qa.json").read_bytes())["counts"]
+                items, aliases, english, main = (qa[name] for name in
+                    ("emitted_items", "emitted_strings", "emitted_english", "emitted_main"))
+            else:
+                summary = validate_aliases(
+                    Path(parsed.aliases_dir), data_dir=Path(parsed.data_dir),
+                    base_dir=Path(parsed.base_dir), expected_base_identity=parsed.base_identity,
+                    expected_identity=parsed.expected_identity)
+                identity, items, aliases, english, main = (
+                    summary.identity, summary.items, summary.aliases, summary.english, summary.main)
+        except (AliasError, OSError) as exc:
+            code = str(exc) if isinstance(exc, AliasError) else "alias_integrity_error"
+            print(f"recsys aliases: {code}", file=sys.stderr)
+            return 1
+        print(f"{identity} items={items} aliases={aliases} english={english} main={main}")
     elif parsed.command == "build":
         from pathlib import Path
 

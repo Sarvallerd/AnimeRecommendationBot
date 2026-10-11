@@ -49,7 +49,7 @@ class SourceTests(unittest.TestCase):
         registry, digest = load_registry()
         self.assertEqual(digest, "49bb399935f0ac7ec649fe2f4bd7715444c09c8513704866fa90b9bea29d182f")
         self.assertEqual(DEFAULT_SNAPSHOT, "mal-2020-glove-v1")
-        self.assertEqual(SNAPSHOT_IDS, (DEFAULT_SNAPSHOT, "neelagiri-2025-v1"))
+        self.assertEqual(SNAPSHOT_IDS, (DEFAULT_SNAPSHOT, "neelagiri-2025-v1", "nafiul-2026-v1"))
         self.assertEqual(
             [(item["filename"], item["size"]) for item in registry["sources"]],
             [
@@ -90,6 +90,20 @@ class SourceTests(unittest.TestCase):
                              (pin["stable_url"], pin["observed_bytes"], pin["observed_sha256"]))
         instructions = (root / "reports/dataset-audit-v1/README.md").read_text()
         self.assert_documented_download_pins(instructions, registry)
+
+    def test_nafiul_metadata_only_registry_and_unchanged_legacy_pin(self):
+        registry, digest = load_registry("nafiul-2026-v1")
+        self.assertEqual(digest, "56383b6fca667d1352ff9df7034b2d01415ef3a08aad1a82734f537defb26879")
+        self.assertEqual(registry["sources"], [{
+            "id": "nafiul_anime_csv", "filename": "anime_info.csv", "size": 22314208,
+            "sha256": "e833476c0da3eadd4c033889e1e8defb2808baf95b0ae38b55009f45d5d72c35",
+            "url": "https://www.kaggle.com/api/v1/datasets/download/nafiulislam490/"
+                   "comprehensive-myanimelist-mal-dataset-2026/anime_info.csv?datasetVersionNumber=1",
+        }])
+        self.assertEqual(registry["provenance"]["dataset"]["artifact_scope"], "anime-info-only")
+        self.assertEqual(registry["provenance"]["dataset"]["exact_collection_date"], None)
+        self.assertEqual(load_registry()[1],
+                         "49bb399935f0ac7ec649fe2f4bd7715444c09c8513704866fa90b9bea29d182f")
 
     def test_documented_pins_reject_hash_suffix_and_changed_version(self):
         registry, _ = load_registry("neelagiri-2025-v1")
