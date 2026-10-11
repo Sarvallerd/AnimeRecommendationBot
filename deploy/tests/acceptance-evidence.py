@@ -294,6 +294,11 @@ def load_bundle(path: Path) -> dict:
 
 def context_from_anchor(before: dict, after: dict, report: dict,
                         before_hash: str, after_hash: str, report_hash: str) -> dict:
+    profile_block = report.get("profile")
+    require(not (report.get("schema_version") == 2 or
+                 report.get("kind") == "arb-offline-release-acceptance" or
+                 (isinstance(profile_block, dict) and profile_block.get("release_id") ==
+                  "neelagiri-2025-nafiul-2026-v1")), "UNSUPPORTED_LIVE_PROFILE")
     require(before["kind"] == after["kind"] == "full", "FULL_SNAPSHOT_REQUIRED")
     require(before["deployment"] == after["deployment"] and
             before["source_commit"] == after["source_commit"], "DEPLOYMENT_CHANGED")

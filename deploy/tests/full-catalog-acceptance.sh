@@ -3,15 +3,16 @@ set -euo pipefail
 umask 077
 repo=$(cd "$(dirname "$0")/../.." && pwd -P)
 cd "$repo"
-usage() { echo 'Usage: full-catalog-acceptance.sh --project NAME --settings FILE --data-dir DIR --evidence-dir NEW_DIR [--offline]' >&2; exit 2; }
-project= settings= data_dir= evidence_dir= offline=0
+usage() { echo 'Usage: full-catalog-acceptance.sh [--release mal-2020-glove-v1|neelagiri-2025-nafiul-2026-v1] --project NAME --settings FILE --data-dir DIR --evidence-dir NEW_DIR [--old-identity sha256:...] [--offline]' >&2; exit 2; }
+project= settings= data_dir= evidence_dir= offline=0 release=mal-2020-glove-v1 old_identity=
 while (($#)); do
     case "$1" in
-        --project|--settings|--data-dir|--evidence-dir)
+        --project|--settings|--data-dir|--evidence-dir|--release|--old-identity)
             (($# >= 2)) || usage
             case "$1" in
                 --project) project=$2 ;; --settings) settings=$2 ;;
                 --data-dir) data_dir=$2 ;; --evidence-dir) evidence_dir=$2 ;;
+                --release) release=$2 ;; --old-identity) old_identity=$2 ;;
             esac
             shift 2 ;;
         --offline) offline=1; shift ;;
@@ -19,6 +20,15 @@ while (($#)); do
     esac
 done
 [[ -n "$project" && -n "$settings" && -n "$data_dir" && -n "$evidence_dir" ]] || usage
+case "$release" in
+    mal-2020-glove-v1) [[ -z "$old_identity" ]] || usage ;;
+    neelagiri-2025-nafiul-2026-v1)
+        [[ $offline == 1 && $old_identity =~ ^sha256:[0-9a-f]{64}$ ]] || usage
+        exec python3 "$repo/deploy/tests/release-acceptance.py" run \
+            --project "$project" --settings "$settings" --data-dir "$data_dir" \
+            --evidence-dir "$evidence_dir" --old-identity "$old_identity" --offline ;;
+    *) usage ;;
+esac
 command -v docker >/dev/null
 command -v python3 >/dev/null
 [[ $(git -c "safe.directory=$repo" rev-parse --show-toplevel) == "$repo" ]] || { echo 'FAIL checkout' >&2; exit 1; }
