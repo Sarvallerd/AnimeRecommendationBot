@@ -2,6 +2,8 @@
 
 import hashlib
 import json
+import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -116,3 +118,69 @@ class ReleaseBuildTests(unittest.TestCase):
         with patch.object(release, "validate_aliases", wraps=real) as call:
             self.export(report)
             self.assertEqual(call.call_count, 1)
+
+    def test_export_store_separation_precedes_validation_and_writes(self):
+        report = self.build("build")
+        neighbor_dir = self.fixture.root / "other-neighbors"
+        neighbor_dir.mkdir()
+        neighbor_path = neighbor_dir / "neighbors.json"
+        shutil.copyfile(report.parent / "neighbors.json", neighbor_path)
+        inputs = (self.release, self.fixture.base, self.aliases, self.fixture.cache,
+                  report.parent, neighbor_dir)
+        forbidden = [*inputs, self.fixture.root,
+                     self.release / "nested-store", self.fixture.base / "nested-store",
+                     self.aliases / "nested-store", self.fixture.cache / "nested-store",
+                     report.parent / "nested-store", neighbor_dir / "nested-store"]
+        for target in forbidden:
+            with self.subTest(target=target):
+                before = {directory: {entry.name for entry in directory.iterdir()}
+                          for directory in (self.fixture.root, *inputs)}
+                with patch("recsys.release_build._verified", side_effect=AssertionError(
+                        "overlapping store reached full validation")):
+                    with self.assertRaisesRegex(ReleaseBuildError, "release_build_integrity_error"):
+                        export_release_bundle(self.release, neighbor_path, report, target,
+                                              **self.common())
+                self.assertEqual(before, {directory: {entry.name for entry in directory.iterdir()}
+                                          for directory in (self.fixture.root, *inputs)})
+                self.assertFalse((target / ".publication.lock").exists())
+
+        special = self.fixture.root / "special-store"
+        os.mkfifo(special)
+        linked = self.fixture.root / "linked-store"
+        linked.symlink_to(self.fixture.root / "separate-store", target_is_directory=True)
+        parent_link = self.fixture.root / "linked-parent"
+        parent_link.symlink_to(self.fixture.root, target_is_directory=True)
+        for target in (special, linked, parent_link / "nested-store"):
+            with self.subTest(target=target):
+                with patch("recsys.release_build._verified", side_effect=AssertionError(
+                        "unsafe store reached full validation")):
+                    with self.assertRaisesRegex(ReleaseBuildError, "release_build_integrity_error"):
+                        export_release_bundle(self.release, neighbor_path, report, target,
+                                              **self.common())
+                self.assertFalse((self.fixture.root / ".publication.lock").exists())
+
+        with tempfile.TemporaryDirectory() as other_root:
+            outside = Path(other_root)
+            report_dir = outside / "report-input"
+            neighbor_dir = outside / "neighbor-input"
+            report_dir.mkdir()
+            neighbor_dir.mkdir()
+            outside_report = report_dir / "build-report.json"
+            outside_neighbor = neighbor_dir / "neighbors.json"
+            shutil.copyfile(report, outside_report)
+            shutil.copyfile(neighbor_path, outside_neighbor)
+            before = {entry.name for entry in outside.iterdir()}
+            with patch("recsys.release_build._verified", side_effect=AssertionError(
+                    "build-parent ancestor reached full validation")):
+                with self.assertRaisesRegex(ReleaseBuildError, "release_build_integrity_error"):
+                    export_release_bundle(self.release, outside_neighbor, outside_report,
+                                          outside, **self.common())
+            self.assertEqual({entry.name for entry in outside.iterdir()}, before)
+            self.assertFalse((outside / ".publication.lock").exists())
+
+        separate = self.fixture.root / "separate-store"
+        first = export_release_bundle(self.release, neighbor_path, report, separate,
+                                      **self.common())
+        self.assertEqual(check_bundle(first)[1], 2)
+        self.assertEqual(export_release_bundle(self.release, neighbor_path, report,
+                                               separate, **self.common()), first)

@@ -122,6 +122,18 @@ def _check_output(output: Path, inputs):
             raise ReleaseBuildError("release_build_integrity_error")
 
 
+def _check_export_store(output: Path, input_dirs) -> None:
+    """Keep publication and its lock outside every immutable input tree."""
+    for component in (output, *output.parents):
+        if component.is_symlink() or (component.exists() and not component.is_dir()):
+            raise ReleaseBuildError("release_build_integrity_error")
+    target = output.resolve(strict=False)
+    for directory in input_dirs:
+        origin = Path(directory).resolve(strict=False)
+        if target == origin or target.is_relative_to(origin) or origin.is_relative_to(target):
+            raise ReleaseBuildError("release_build_integrity_error")
+
+
 def build_release(release_dir, glove_path, output_dir, *, expected_release_identity,
                   base_dir, aliases_dir, alias_data_dir, block_size=256,
                   _base_spec=None, _alias_spec=None, _glove_registry_bytes=None) -> Path:
@@ -237,6 +249,10 @@ def export_release_bundle(release_dir, neighbors_path, build_report_path, output
                           _base_spec=None, _alias_spec=None, _glove_registry_bytes=None) -> Path:
     """Validate every retained input and publish the unchanged v1 runtime wire format."""
     try:
+        output_dir = Path(output_dir)
+        _check_export_store(output_dir, (release_dir, base_dir, aliases_dir,
+                                         alias_data_dir, Path(neighbors_path).parent,
+                                         Path(build_report_path).parent))
         verified = _verified(release_dir, expected_release_identity=expected_release_identity,
                              base_dir=base_dir, aliases_dir=aliases_dir,
                              alias_data_dir=alias_data_dir,
@@ -260,7 +276,7 @@ def export_release_bundle(release_dir, neighbors_path, build_report_path, output
         manifest_raw = canonical_bytes({"schema_version": 1, "algorithm": report["algorithm"],
                                         "sources": sources, "files": report["files"]})
         identity, count = check_bundle_bytes(verified.catalog_raw, neighbors_raw, manifest_raw)
-        return _publish(Path(output_dir), {"catalog.json": verified.catalog_raw,
+        return _publish(output_dir, {"catalog.json": verified.catalog_raw,
                                            "neighbors.json": neighbors_raw,
                                            "manifest.json": manifest_raw}, identity, count)
     except (ReleaseError, ReleaseBuildError, ContractError, SourceError, OSError,
