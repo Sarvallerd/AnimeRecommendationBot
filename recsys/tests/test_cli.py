@@ -186,6 +186,27 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(result.stdout, "")
                 self.assertIn("error:", result.stderr)
 
+    def test_dataset_cli_help_and_safe_failure(self) -> None:
+        for subcommand in ("normalize", "validate"):
+            result = self.run_cli("dataset", subcommand, "--help")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("usage: recsys dataset", result.stdout)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "out"
+            invalid = self.run_cli("dataset", "normalize", "--snapshot", "latest",
+                                   "--data-dir", "missing", "--output-dir", str(output),
+                                   "--scratch-dir", directory)
+            self.assertEqual(invalid.returncode, 2)
+            self.assertFalse(output.exists())
+            failed = self.run_cli("dataset", "normalize", "--snapshot", "neelagiri-2025-v1",
+                                  "--data-dir", "private-canary", "--output-dir", str(output),
+                                  "--scratch-dir", directory)
+            self.assertEqual(failed.returncode, 1)
+            self.assertEqual(failed.stdout, "")
+            self.assertIn("input_hash_mismatch", failed.stderr)
+            self.assertNotIn("private-canary", failed.stderr)
+            self.assertNotIn("Traceback", failed.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
