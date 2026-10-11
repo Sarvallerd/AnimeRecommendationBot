@@ -27,6 +27,18 @@ def build_parser() -> argparse.ArgumentParser:
     normalize_parser.add_argument("--anime-csv", required=True, help="path to anime.csv")
     normalize_parser.add_argument("--synopsis-csv", required=True, help="path to anime_with_synopsis.csv")
     normalize_parser.add_argument("--output-dir", required=True, help="directory for normalization artifacts")
+    dataset_parser = commands.add_parser("dataset", help="normalize or validate a research dataset")
+    dataset_commands = dataset_parser.add_subparsers(dest="dataset_command", required=True)
+    dataset_normalize = dataset_commands.add_parser("normalize", help="normalize a pinned research snapshot")
+    dataset_normalize.add_argument("--snapshot", required=True, choices=("neelagiri-2025-v1",))
+    dataset_normalize.add_argument("--data-dir", required=True)
+    dataset_normalize.add_argument("--output-dir", required=True)
+    dataset_normalize.add_argument("--scratch-dir", required=True)
+    dataset_normalize.add_argument("--memory-limit-mib", type=int, default=2048)
+    dataset_normalize.add_argument("--threads", type=int, default=2)
+    dataset_normalize.add_argument("--spill-limit-mib", type=int, default=32768)
+    dataset_validate = dataset_commands.add_parser("validate", help="validate an immutable research dataset")
+    dataset_validate.add_argument("dataset_dir")
     build_parser = commands.add_parser("build", help="build pinned GloVe cosine neighbors")
     build_parser.add_argument("--catalog", required=True, help="path to normalized catalog.json")
     build_parser.add_argument("--normalization-report", required=True, help="path to normalization-report.json")
@@ -91,6 +103,42 @@ def main(argv: Sequence[str] | None = None) -> int:
         except (SourceError, OSError, ValueError) as exc:
             print(f"recsys normalize: {exc}", file=sys.stderr)
             return 1
+    elif parsed.command == "dataset":
+        from pathlib import Path
+        from .dataset import DatasetError, normalize_dataset, validate_dataset
+
+        try:
+            if parsed.dataset_command == "normalize":
+                import hashlib
+                import json
+
+                manifest = normalize_dataset(
+                    parsed.snapshot, Path(parsed.data_dir), Path(parsed.output_dir),
+                    scratch_dir=Path(parsed.scratch_dir),
+                    memory_limit_mib=parsed.memory_limit_mib, threads=parsed.threads,
+                    spill_limit_mib=parsed.spill_limit_mib)
+                manifest_bytes = manifest.read_bytes()
+                qa = json.loads((manifest.parent / "dataset-qa.json").read_bytes())
+                counts = qa["counts"]
+                identity = "sha256:" + hashlib.sha256(manifest_bytes).hexdigest()
+                catalog_items = counts["catalog_items"]
+                interactions = counts["accepted_pairs"]
+                users = counts["accepted_users"]
+                positive_users = counts["positive_users_ge_15"]
+            else:
+                summary = validate_dataset(Path(parsed.dataset_dir))
+                identity = summary.identity
+                catalog_items = summary.catalog_items
+                interactions = summary.interactions
+                users = summary.users
+                positive_users = summary.positive_users_ge_15
+        except (DatasetError, OSError) as exc:
+            code = str(exc) if isinstance(exc, DatasetError) else "dataset_integrity_error"
+            print(f"recsys dataset: {code}", file=sys.stderr)
+            return 1
+        print(f"{identity} catalog={catalog_items} "
+              f"interactions={interactions} users={users} "
+              f"positive_users_ge_15={positive_users}")
     elif parsed.command == "build":
         from pathlib import Path
 
