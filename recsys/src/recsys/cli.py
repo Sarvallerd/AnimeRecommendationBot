@@ -19,7 +19,7 @@ def build_parser() -> argparse.ArgumentParser:
     obtain_parser = commands.add_parser("obtain", help="download and verify pinned source data")
     from .sources import DEFAULT_SNAPSHOT, SNAPSHOT_IDS
 
-    obtain_parser.add_argument("--snapshot", choices=SNAPSHOT_IDS, default=DEFAULT_SNAPSHOT,
+    obtain_parser.add_argument("--snapshot", choices=SNAPSHOT_IDS, required=True,
                                help="pinned source snapshot")
     obtain_parser.add_argument("--data-dir", help="source cache directory (overrides snapshot default)")
     obtain_parser.add_argument("--offline", action="store_true", help="use verified cached files only")
@@ -55,6 +55,11 @@ def build_parser() -> argparse.ArgumentParser:
     aliases_validate.add_argument("--expected-identity")
     release_parser = commands.add_parser("release", help="compose, build, and export a catalog release")
     release_commands = release_parser.add_subparsers(dest="release_command", required=True)
+    release_info = release_commands.add_parser("info", help="show the pinned current release")
+    release_info.add_argument("--release", default="current", choices=("current", "neelagiri-2025-nafiul-2026-v1"))
+    release_prepare = release_commands.add_parser("prepare", help="prepare a pinned release offline")
+    release_prepare.add_argument("--release", default="current", choices=("current", "neelagiri-2025-nafiul-2026-v1", "mal-2020-glove-v1"))
+    release_prepare.add_argument("--data-dir", required=True)
     release_compose = release_commands.add_parser("compose")
     for flag in ("base-dir", "base-identity", "aliases-dir", "alias-identity",
                  "alias-data-dir", "output-dir"):
@@ -206,8 +211,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         import hashlib
         from .release import ReleaseError, compose_release, validate_release
         from .release_build import ReleaseBuildError, build_release, export_release_bundle
+        from .release_prepare import PrepareError
         try:
-            if parsed.release_command == "compose":
+            if parsed.release_command == "info":
+                from .release_prepare import release_info
+                info = release_info(parsed.release)
+                print(f"{info['release_id']} catalog={info['semantic_expectations']['catalog_count']} "
+                      f"bundle={info['reference']['bundle_identity']}")
+            elif parsed.release_command == "prepare":
+                from .release_prepare import prepare_release
+                path, identity, count = prepare_release(Path(parsed.data_dir), parsed.release)
+                print(f"{path} {identity} records={count}")
+                print(f"ARB_BUNDLE_DIR={path}")
+            elif parsed.release_command == "compose":
                 manifest = compose_release(
                     Path(parsed.base_dir), Path(parsed.aliases_dir), Path(parsed.alias_data_dir),
                     Path(parsed.output_dir), expected_base_identity=parsed.base_identity,
@@ -241,8 +257,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 from .bundle import check_bundle
                 identity, count = check_bundle(path)
                 print(f"{path} {identity} records={count}")
-        except (ReleaseError, ReleaseBuildError, OSError, ValueError) as exc:
-            code = str(exc) if isinstance(exc, (ReleaseError, ReleaseBuildError)) else "release_integrity_error"
+        except (ReleaseError, ReleaseBuildError, PrepareError, OSError, ValueError) as exc:
+            code = str(exc) if isinstance(exc, (ReleaseError, ReleaseBuildError, PrepareError)) else "release_integrity_error"
             print(f"recsys release: {code}", file=sys.stderr)
             return 1
     elif parsed.command == "build":

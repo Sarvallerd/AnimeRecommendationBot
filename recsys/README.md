@@ -16,14 +16,16 @@ Run the package checks with:
 uv run --locked --no-editable --extra quality python -m unittest discover -s recsys/tests -p 'test_*.py' -v
 ```
 
-Acquire the unchanged MAL 2020 and GloVe default inputs into `data/raw` relative to the current directory:
+Acquire the historical MAL 2020 and GloVe inputs with an explicit snapshot selector:
 
 ```sh
-uv run --locked --no-editable recsys obtain
-uv run --locked --no-editable recsys obtain --data-dir /path/to/cache --offline
+uv run --locked --no-editable recsys obtain --snapshot mal-2020-glove-v1 --data-dir data/raw/mal-2020-glove-v1
+uv run --locked --no-editable recsys obtain --snapshot mal-2020-glove-v1 --data-dir /path/to/cache --offline
 ```
 
 The first command downloads about 875 MB and extracts a 1.04 GB text file, so allow at least 2 GB of storage plus temporary download space. Every run verifies all four files by size and SHA256, then writes `source-manifest.json`. Offline mode never downloads; it can extract the text file if the verified ZIP is cached. If a file fails verification, the command reports its path and observed values. Remove that file and rerun to fetch or extract it again. Partial downloads are removed automatically.
+
+The CLI requires `obtain --snapshot`; the Python `load_registry()` API retains its historical default. New preparations use `recsys release prepare --data-dir DATA`, which resolves the local `current` alias to the immutable Neelagiri 2025 and Nafiul 2026 lock. See the [release guide](RELEASE.md) for its frozen input layout and the explicit historical selector. Preparation does not select a live bundle or touch PostgreSQL.
 
 For the separately pinned 2025 research snapshot, run:
 

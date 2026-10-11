@@ -69,11 +69,17 @@ assert_failure_gate() {
 }
 echo 'Building runtime and offline builder images'
 compose --profile tools build bot builder
-bundle=$(compose --profile tools run --rm --no-deps --entrypoint python builder /fixture/build-fixture.py | tail -n 1)
+fixture_output=$(compose --profile tools run --rm --no-deps --entrypoint python builder /fixture/build-fixture.py)
+legacy_bundle=$(printf '%s\n' "$fixture_output" | sed -n 's/^LEGACY_BUNDLE=//p')
+bundle=$(printf '%s\n' "$fixture_output" | sed -n 's/^CURRENT_BUNDLE=//p')
+[[ "$legacy_bundle" == /data/bundles/sha256-* ]]
 [[ "$bundle" == /data/bundles/sha256-* ]]
 export ARB_BUNDLE_DIR="$ARB_DATA_DIR/bundles/${bundle##*/}"
 [[ -d "$ARB_BUNDLE_DIR" ]]
 compose --profile tools run --rm --no-deps builder validate "$bundle" >/dev/null
+compose --profile tools run --rm --no-deps builder validate "$legacy_bundle" >/dev/null
+compose --profile tools run --rm --no-deps --entrypoint /opt/venv/bin/check_bundle builder "$legacy_bundle" >/dev/null
+compose --profile tools run --rm --no-deps --entrypoint /opt/venv/bin/check_bundle builder "$bundle" >/dev/null
 compose run --rm --no-deps --entrypoint /usr/local/bin/check_bundle prepare /artifacts >/dev/null
 compose up --wait -d postgres >/dev/null
 # The old unversioned tables must survive the first migration.

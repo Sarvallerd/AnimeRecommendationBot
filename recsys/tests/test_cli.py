@@ -34,12 +34,31 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(result.stderr, "")
 
     def test_release_commands_require_explicit_trusted_inputs(self) -> None:
-        for command in ("compose", "validate", "build", "export"):
+        for command in ("compose", "validate", "build", "export", "prepare"):
             with self.subTest(command=command):
                 result = self.run_cli("release", command)
                 self.assertEqual(result.returncode, 2)
                 self.assertIn("required", result.stderr)
                 self.assertNotIn("Traceback", result.stderr)
+
+    def test_release_current_info_and_prepare_fail_closed(self) -> None:
+        for console in (False, True):
+            with self.subTest(console=console):
+                result = self.run_cli("release", "info", console=console)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("neelagiri-2025-nafiul-2026-v1 catalog=28955", result.stdout)
+                explicit = self.run_cli("release", "info", "--release",
+                                        "neelagiri-2025-nafiul-2026-v1", console=console)
+                self.assertEqual(explicit.stdout, result.stdout)
+                unknown = self.run_cli("release", "prepare", "--release", "latest",
+                                       "--data-dir", "missing", console=console)
+                self.assertEqual(unknown.returncode, 2)
+                self.assertIn("invalid choice", unknown.stderr)
+                missing = self.run_cli("release", "prepare", "--data-dir", "missing",
+                                       console=console)
+                self.assertEqual(missing.returncode, 1)
+                self.assertIn("release_prerequisite_missing", missing.stderr)
+                self.assertNotIn("Traceback", missing.stderr)
 
     def test_version_matches_installed_distribution(self) -> None:
         version = importlib.metadata.version("anime-recommendation-recsys")
@@ -51,7 +70,7 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(result.stderr, "")
 
     def test_obtain_offline_uses_installed_registry_outside_cwd(self) -> None:
-        result = self.run_cli("obtain", "--offline", "--data-dir", "missing", console=True)
+        result = self.run_cli("obtain", "--snapshot", "mal-2020-glove-v1", "--offline", "--data-dir", "missing", console=True)
         self.assertEqual(result.returncode, 1)
         self.assertEqual(result.stdout, "")
         self.assertIn("missing source", result.stderr)
@@ -61,9 +80,12 @@ class CliTests(unittest.TestCase):
     def test_obtain_snapshot_defaults_and_explicit_directory(self) -> None:
         for console in (False, True):
             with self.subTest(console=console):
-                legacy = self.run_cli("obtain", "--offline", console=console)
+                legacy = self.run_cli("obtain", "--snapshot", "mal-2020-glove-v1", "--offline", console=console)
                 self.assertEqual(legacy.returncode, 1)
                 self.assertIn("data/raw/anime.csv", legacy.stderr)
+                missing_selector = self.run_cli("obtain", "--offline", console=console)
+                self.assertEqual(missing_selector.returncode, 2)
+                self.assertIn("--snapshot", missing_selector.stderr)
                 fresh = self.run_cli("obtain", "--snapshot", "neelagiri-2025-v1",
                                      "--offline", console=console)
                 self.assertEqual(fresh.returncode, 1)
