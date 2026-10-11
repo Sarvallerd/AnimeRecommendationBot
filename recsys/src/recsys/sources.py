@@ -12,10 +12,11 @@ class SourceError(Exception):
 
 
 DEFAULT_SNAPSHOT = "mal-2020-glove-v1"
-SNAPSHOT_IDS = (DEFAULT_SNAPSHOT, "neelagiri-2025-v1")
+SNAPSHOT_IDS = (DEFAULT_SNAPSHOT, "neelagiri-2025-v1", "nafiul-2026-v1")
 _REGISTRY_RESOURCES = {
     DEFAULT_SNAPSHOT: "source_registry.json",
     "neelagiri-2025-v1": "source_registry_neelagiri_2025_v1.json",
+    "nafiul-2026-v1": "source_registry_nafiul_2026_v1.json",
 }
 
 

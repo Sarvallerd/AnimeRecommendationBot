@@ -65,6 +65,10 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(explicit.returncode, 1)
                 self.assertIn("chosen/details.csv", explicit.stderr)
                 self.assertNotIn("chosen/neelagiri-2025-v1", explicit.stderr)
+                aliases = self.run_cli("obtain", "--snapshot", "nafiul-2026-v1",
+                                       "--offline", console=console)
+                self.assertEqual(aliases.returncode, 1)
+                self.assertIn("data/raw/nafiul-2026-v1/anime_info.csv", aliases.stderr)
 
     def test_invalid_snapshot_fails_before_data_directory_creation(self) -> None:
         for console in (False, True):
@@ -206,6 +210,38 @@ class CliTests(unittest.TestCase):
             self.assertIn("input_hash_mismatch", failed.stderr)
             self.assertNotIn("private-canary", failed.stderr)
             self.assertNotIn("Traceback", failed.stderr)
+
+    def test_aliases_cli_requires_explicit_trusted_base_and_installed_resource(self) -> None:
+        for subcommand in ("normalize", "validate"):
+            result = self.run_cli("aliases", subcommand, "--help", console=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("--base-identity", result.stdout)
+            self.assertIn("--base-dir", result.stdout)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "aliases"
+            invalid = self.run_cli("aliases", "normalize", "--snapshot", "latest",
+                                   "--data-dir", "missing", "--base-dir", "missing",
+                                   "--base-identity", "sha256:" + "0" * 64,
+                                   "--output-dir", str(output))
+            self.assertEqual(invalid.returncode, 2)
+            self.assertFalse(output.exists())
+            failed = self.run_cli("aliases", "normalize", "--snapshot", "nafiul-2026-v1",
+                                  "--data-dir", "private-canary", "--base-dir", "missing",
+                                  "--base-identity", "sha256:" + "0" * 64,
+                                  "--output-dir", str(output), console=True)
+            self.assertEqual(failed.returncode, 1)
+            self.assertIn("base_integrity_error", failed.stderr)
+            self.assertNotIn("private-canary", failed.stderr)
+            self.assertNotIn("Traceback", failed.stderr)
+        code = ("from recsys.sources import load_registry; "
+                "from recsys.aliases import _load_spec; "
+                "r,h=load_registry('nafiul-2026-v1'); s,_,e,_,_=_load_spec(None); "
+                "print(len(r['sources']),s.snapshot_id,e['counts']['emitted_items'])")
+        with tempfile.TemporaryDirectory() as directory:
+            isolated = subprocess.run([sys.executable, "-I", "-c", code], cwd=directory,
+                                      capture_output=True, text=True, check=False)
+        self.assertEqual(isolated.returncode, 0, isolated.stderr)
+        self.assertEqual(isolated.stdout, "1 nafiul-2026-v1 12754\n")
 
 
 if __name__ == "__main__":
