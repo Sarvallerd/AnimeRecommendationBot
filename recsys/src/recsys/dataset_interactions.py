@@ -14,6 +14,11 @@ HEADER = b"dataset_user_key\tmal_id\trating\twatch_status\n"
 STATUSES = ("watching", "completed", "on_hold", "dropped", "plan_to_watch", "unknown")
 NAMESPACE = "neelagiri-2025-v1"
 CSV_COLUMNS = ("username", "anime_id", "status", "score", "is_rewatching", "num_watched_episodes")
+WS = "".join(map(chr, (*range(0x09, 0x0E), *range(0x1C, 0x21), 0x85, 0xA0,
+                        0x1680, *range(0x2000, 0x200B), 0x2028, 0x2029, 0x202F,
+                        0x205F, 0x3000)))
+ZERO_SCORE = r"[+]?0+([.]0+)?"
+EXPLICIT_SCORE = r"[+]?0*(10|[1-9])([.]0+)?"
 
 
 @dataclass(frozen=True)
@@ -84,18 +89,20 @@ def build_interactions(ratings_path: Path, metadata: MetadataResult, output_path
         db.execute("SET preserve_insertion_order=false")
         db.execute("PRAGMA disable_progress_bar")
         columns = ",".join(f"'{field}':'VARCHAR'" for field in CSV_COLUMNS)
+        ws = _sql_string(WS)
+        zero_score = _sql_string(ZERO_SCORE)
+        explicit_score = _sql_string(EXPLICIT_SCORE)
         csv_sql = ("read_csv(?, auto_detect=false, header=true, delim=',', quote='\"', "
                    "escape='\"', columns={" + columns + "}, strict_mode=true, "
                    "ignore_errors=false, null_padding=false, encoding='utf-8')")
         db.execute(f"""
             CREATE TABLE raw AS
             WITH parsed AS (
-              SELECT username, anime_id, status,
-                TRY_CAST(TRIM(score) AS DOUBLE) AS numeric_score,
-                score
+              SELECT username, anime_id, status, TRIM(score, {ws}) AS s,
+                username IS NULL OR TRIM(username, {ws})='' AS user_is_blank
               FROM {csv_sql}
             )
-            SELECT username,
+            SELECT username,user_is_blank,
               CASE WHEN regexp_full_match(TRIM(anime_id), '[0-9]+')
                    THEN TRY_CAST(TRIM(anime_id) AS BIGINT) END AS mal_id,
               CASE lower(replace(replace(trim(coalesce(status,'')), ' ', '_'), '-', '_'))
@@ -105,21 +112,21 @@ def build_interactions(ratings_path: Path, metadata: MetadataResult, output_path
                 WHEN 'dropped' THEN 'dropped'
                 WHEN 'plan_to_watch' THEN 'plan_to_watch'
                 ELSE 'unknown' END AS watch_status,
-              CASE WHEN score IS NULL OR TRIM(score)='' OR numeric_score=0 THEN 'unset'
-                   WHEN regexp_full_match(TRIM(score), '[+]?0*(10|[1-9])(\\.0+)?')
+              CASE WHEN s IS NULL OR s='' OR regexp_full_match(s, {zero_score}) THEN 'unset'
+                   WHEN regexp_full_match(s, {explicit_score})
                         THEN 'explicit'
                    ELSE 'invalid' END AS score_kind,
-              CASE WHEN regexp_full_match(TRIM(score), '[+]?0*(10|[1-9])(\\.0+)?')
-                   THEN TRY_CAST(numeric_score AS INTEGER) END AS rating
+              CASE WHEN regexp_full_match(s, {explicit_score})
+                   THEN CAST(regexp_extract(s, {explicit_score}, 1) AS INTEGER) END AS rating
             FROM parsed
         """, [str(ratings_path)])
         base = dict(db.execute("""
             SELECT 'raw_rows',COUNT(*) FROM raw
             UNION ALL SELECT 'blank_user_rows',COUNT(*) FROM raw
-              WHERE username IS NULL OR TRIM(username)=''
+              WHERE user_is_blank
             UNION ALL SELECT 'zero_or_missing_rows',COUNT(*) FROM raw WHERE score_kind='unset'
             UNION ALL SELECT 'valid_explicit_rows',COUNT(*) FROM raw
-              WHERE score_kind='explicit' AND username IS NOT NULL AND TRIM(username)<>''
+              WHERE score_kind='explicit' AND NOT user_is_blank
             UNION ALL SELECT 'invalid_score_rows',COUNT(*) FROM raw WHERE score_kind='invalid'
             UNION ALL SELECT 'invalid_mal_id_rows',COUNT(*) FROM raw
               WHERE mal_id IS NULL OR mal_id<1 OR mal_id>2147483647
@@ -127,7 +134,7 @@ def build_interactions(ratings_path: Path, metadata: MetadataResult, output_path
         base = {key: int(value) for key, value in base.items()}
         base["raw_nonblank_users"] = _scalar(db, """
             SELECT COUNT(DISTINCT username) FROM raw
-            WHERE username IS NOT NULL AND TRIM(username)<>''
+            WHERE NOT user_is_blank
         """)
         raw_status = _hist(db, "SELECT watch_status,COUNT(*) FROM raw GROUP BY 1")
         raw_score = _hist(db, """
@@ -139,8 +146,8 @@ def build_interactions(ratings_path: Path, metadata: MetadataResult, output_path
             SELECT username,mal_id,MIN(rating) AS min_rating,MAX(rating) AS max_rating,
                    COUNT(*) AS explicit_rows,MIN(watch_status) AS min_status,
                    MAX(watch_status) AS max_status
-            FROM raw WHERE score_kind='explicit' AND username IS NOT NULL
-              AND TRIM(username)<>'' AND mal_id BETWEEN 1 AND 2147483647
+            FROM raw WHERE score_kind='explicit' AND NOT user_is_blank
+              AND mal_id BETWEEN 1 AND 2147483647
             GROUP BY username,mal_id
         """)
         db.execute("""
@@ -148,8 +155,8 @@ def build_interactions(ratings_path: Path, metadata: MetadataResult, output_path
             SELECT username,mal_id,
                    COUNT(*) FILTER (WHERE score_kind='unset') AS unset_rows,
                    COUNT(*) FILTER (WHERE score_kind='invalid') AS invalid_rows
-            FROM raw WHERE score_kind<>'explicit' AND username IS NOT NULL
-              AND TRIM(username)<>'' AND mal_id BETWEEN 1 AND 2147483647
+            FROM raw WHERE score_kind<>'explicit' AND NOT user_is_blank
+              AND mal_id BETWEEN 1 AND 2147483647
             GROUP BY username,mal_id
         """)
         db.execute("CREATE TABLE catalog_ids(mal_id BIGINT PRIMARY KEY)")
@@ -186,7 +193,7 @@ def build_interactions(ratings_path: Path, metadata: MetadataResult, output_path
         repeated = _scalar(db, """
             SELECT COALESCE(SUM(n-1),0) FROM (
               SELECT COUNT(*) AS n FROM raw WHERE score_kind='explicit'
-                AND username IS NOT NULL AND TRIM(username)<>''
+                AND NOT user_is_blank
                 AND mal_id BETWEEN 1 AND 2147483647
               GROUP BY username,mal_id,rating HAVING COUNT(*)>1
             )

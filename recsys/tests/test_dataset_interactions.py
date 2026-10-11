@@ -8,7 +8,7 @@ import traceback
 import unittest
 from pathlib import Path
 
-from recsys.dataset_interactions import CSV_COLUMNS, build_interactions, user_key
+from recsys.dataset_interactions import CSV_COLUMNS, WS, build_interactions, user_key
 from recsys.dataset_metadata import MetadataResult
 
 
@@ -84,6 +84,51 @@ class InteractionTests(unittest.TestCase):
         self.assertNotEqual(user_key("A"), user_key("a"))
         self.assertEqual(user_key("A"), "u1_" + hashlib.sha256(
             b"arb-user-v1\0neelagiri-2025-v1\0A").hexdigest())
+
+    def test_all_whitespace_usernames_are_blank_without_normalizing_nonblank_names(self):
+        self.assertEqual(len(WS), 29)
+        self.assertEqual(len(set(WS)), 29)
+        blanks = list(WS) + [WS, None, WS]
+        names = ("A", " A ", "\tA\u3000", "\u200b")
+        rows = [(name, "1", "completed", "8") for name in blanks + list(names)]
+        rows.append(("A", "1", "completed", "8"))
+        result, _, plain = self.run_rows(rows)
+        counts = result.qa["counts"]
+        self.assertEqual(counts["raw_rows"], len(rows))
+        self.assertEqual(counts["blank_user_rows"], len(blanks))
+        self.assertEqual(counts["raw_nonblank_users"], len(names))
+        self.assertEqual(counts["valid_explicit_rows"], len(names) + 1)
+        self.assertEqual(counts["raw_explicit_pairs"], len(names))
+        self.assertEqual(counts["repeated_explicit_triples"], 1)
+        self.assertEqual(counts["accepted_users"], len(names))
+        self.assertEqual(counts["accepted_pairs"], len(names))
+        for name in names:
+            self.assertIn(user_key(name).encode("ascii"), plain)
+        self.assertEqual(len(set(plain.splitlines()[1:])), len(names))
+
+    def test_exact_score_grammar_does_not_underflow_or_coerce_invalid_values(self):
+        unset = (None, "\u00a0\u2003", "+000.000")
+        explicit = ("+0010.000", "\u00a01\u3000")
+        invalid = ("1e-999", "-0", "-0.0", "1e1", "0.0000000001",
+                   "1.0000000001", "11", "NaN", "Inf", ".0", "1.", "2.5")
+        values = unset + explicit + invalid
+        rows = [(f"score-{i}", "1", "completed", value)
+                for i, value in enumerate(values)]
+        rows.append(("score-5", "1", "completed", "8"))
+        result, _, plain = self.run_rows(rows)
+        counts = result.qa["counts"]
+        self.assertEqual(counts["zero_or_missing_rows"], len(unset))
+        self.assertEqual(counts["invalid_score_rows"], len(invalid))
+        self.assertEqual(counts["valid_explicit_rows"], len(explicit) + 1)
+        self.assertEqual(counts["invalid_state_pairs"], 1)
+        self.assertEqual(counts["raw_explicit_pairs"], len(explicit) + 1)
+        self.assertEqual(counts["accepted_pairs"], len(explicit))
+        self.assertEqual(result.qa["distributions"]["raw_score_histogram"],
+                         {"unset": len(unset), "invalid": len(invalid),
+                          "10": 1, "1": 1, "8": 1})
+        self.assertIn(user_key("score-3").encode("ascii") + b"\t1\t10\tcompleted\n", plain)
+        self.assertIn(user_key("score-4").encode("ascii") + b"\t1\t1\tcompleted\n", plain)
+        self.assertNotIn(user_key("score-5").encode("ascii"), plain)
 
     def test_csv_failure_does_not_expose_private_row(self):
         with tempfile.TemporaryDirectory() as directory:
