@@ -1,5 +1,6 @@
 """Small verified inputs exercise the same locked prepare checks as production."""
 import hashlib
+import copy
 import json
 import platform
 import shutil
@@ -95,7 +96,7 @@ class PrepareTests(unittest.TestCase):
                           'bundle_identity': 'sha256:' + sha((candidate / 'manifest.json').read_bytes()),
                           'catalog_sha256': report['files']['catalog.json']['sha256'],
                           'neighbors_sha256': report['files']['neighbors.json']['sha256'],
-                          'producer': {'source_commit': 'fixture', 'package_version': __version__,
+                          'producer': {'source_commit': '0' * 40, 'package_version': __version__,
                                        'python_version': platform.python_version(),
                                        'numpy_version': np.__version__,
                                        'code_files_sha256': {name: sha((code_dir / name).read_bytes())
@@ -121,10 +122,113 @@ class PrepareTests(unittest.TestCase):
         with self.assertRaisesRegex(PrepareError, 'unknown_release'):
             release_info('latest')
 
+    def test_lock_schema_mutations_fail_before_input_access(self):
+        outside = Path(self.temp.name) / 'outside-private'
+        outside.mkdir()
+        sentinel = outside / 'sentinel'
+        sentinel.write_bytes(b'unchanged')
+        cases = [
+            (('schema_version',), True), (('kind',), 1),
+            (('release_id',), '../outside'), (('release_id',), '/tmp/outside'),
+            (('inputs',), []), (('inputs', 'future'), 1),
+            (('inputs', 'base'), []),
+            (('inputs', 'base', 'snapshot_id'), '../outside'),
+            (('inputs', 'base', 'snapshot_id'), 'wrong-snapshot'),
+            (('inputs', 'base', 'identity'), None),
+            (('inputs', 'base', 'identity'), 'sha256:' + 'A' * 64),
+            (('inputs', 'aliases', 'snapshot_id'), str(outside)),
+            (('inputs', 'aliases', 'snapshot_id'), '../../outside-private'),
+            (('inputs', 'embeddings', 'snapshot_id'), str(outside)),
+            (('inputs', 'embeddings', 'registry_sha256'), True),
+            (('inputs', 'embeddings', 'text_sha256'), 'x' * 64),
+            (('inputs', 'embeddings', 'text_size'), False),
+            (('inputs', 'catalog_release', 'catalog_sha256'), 1),
+            (('inputs', 'catalog_release', 'catalog_count'), True),
+            (('inputs', 'algorithm', 'future'), 'bad'),
+            (('inputs', 'algorithm', 'version'), 'future-v2'),
+            (('inputs', 'algorithm', 'parameters', 'token_weight'), True),
+            (('reference',), []), (('reference', 'block_size'), True),
+            (('reference', 'block_size'), 257),
+            (('reference', 'neighbors_sha256'), 123),
+            (('reference', 'neighbors_sha256'), 'A' * 64),
+            (('reference', 'build_report_sha256'), '0' * 63),
+            (('reference', 'bundle_identity'), 'sha256:' + 'g' * 64),
+            (('reference', 'producer'), []),
+            (('reference', 'producer', 'source_commit'), 123),
+            (('reference', 'producer', 'source_commit'), 'A' * 40),
+            (('reference', 'producer', 'package_version'), 'fixture'),
+            (('reference', 'producer', 'python_version'), 3.12),
+            (('reference', 'producer', 'numpy_version'), '2.5'),
+            (('reference', 'producer', 'code_files_sha256'), []),
+            (('reference', 'producer', 'code_files_sha256', 'future.py'), '0' * 64),
+            (('reference', 'producer', 'code_files_sha256', 'build.py'), None),
+            (('semantic_expectations',), []),
+            (('semantic_expectations', 'catalog_count'), False),
+            (('semantic_expectations', 'vector_status_counts'), []),
+            (('semantic_expectations', 'vector_status_counts', 'future'), 0),
+            (('semantic_expectations', 'vector_status_counts', 'ready'), True),
+            (('semantic_expectations', 'zero_vector_ids'), '1'),
+            (('semantic_expectations', 'zero_vector_ids'), [True]),
+            (('semantic_expectations', 'neighbor_count_histogram'), []),
+            (('semantic_expectations', 'neighbor_count_histogram', '6'), 0),
+            (('semantic_expectations', 'neighbor_count_histogram', '0'), True),
+            (('semantic_expectations', 'smoke_seed'), []),
+            (('semantic_expectations', 'smoke_seed', 'mal_id'), False),
+            (('semantic_expectations', 'smoke_seed', 'query'), ' '),
+            (('semantic_expectations', 'smoke_seed', 'neighbor_ids'), '2'),
+            (('semantic_expectations', 'smoke_seed', 'neighbor_ids'), [1]),
+            (('semantic_expectations', 'smoke_seed', 'neighbor_ids'), [2, 2]),
+            (('semantic_expectations', 'empty_seed'), True),
+            (('semantic_expectations', 'empty_seed'), {'mal_id': True, 'query': 'Two'}),
+        ]
+        for path, replacement in cases:
+            with self.subTest(path=path, value=replacement):
+                changed = copy.deepcopy(self.lock)
+                parent = changed
+                for key in path[:-1]:
+                    parent = parent[key]
+                parent[path[-1]] = replacement
+                raw = canonical_bytes(changed)
+                with patch.object(Path, 'read_bytes', return_value=b'') as source_read:
+                    with patch('recsys.release_prepare.tempfile.mkdtemp',
+                               side_effect=AssertionError('publication')) as work_create:
+                        with patch.object(Path, 'mkdir',
+                                          side_effect=AssertionError('mkdir')) as mkdir:
+                            with self.assertRaises(PrepareError) as failure:
+                                prepare_release(self.data, _lock_bytes=raw,
+                                                _base_spec=self.base_spec,
+                                                _alias_spec=self.alias_spec,
+                                                _glove_registry_bytes=self.glove_registry)
+                source_read.assert_not_called()
+                work_create.assert_not_called()
+                mkdir.assert_not_called()
+                self.assertEqual(str(failure.exception), 'release_lock_invalid')
+                self.assertEqual(sentinel.read_bytes(), b'unchanged')
+                self.assertEqual(list((self.data / 'bundles').iterdir()), [])
+
+        for raw in (b'{"secret":1,"secret":2}\n', b'{"secret":"private"}\n', b'[]\n'):
+            with self.subTest(raw=raw):
+                with self.assertRaises(PrepareError) as failure:
+                    _lock(raw)
+                self.assertEqual(str(failure.exception), 'release_lock_invalid')
+
+        for nonready in ([1, 1], [2, 1], [True, 2]):
+            with self.subTest(nonready=nonready):
+                changed = copy.deepcopy(self.lock)
+                semantics = changed['semantic_expectations']
+                semantics['vector_status_counts'] = {
+                    'ready': 0, 'no_tokens': 2, 'oov_only': 0, 'zero_vector': 0}
+                semantics['zero_vector_ids'] = nonready
+                semantics['neighbor_count_histogram'] = {
+                    '0': 2, '1': 0, '2': 0, '3': 0, '4': 0, '5': 0}
+                with self.assertRaises(PrepareError) as failure:
+                    _lock(canonical_bytes(changed))
+                self.assertEqual(str(failure.exception), 'release_lock_invalid')
+
     def test_wrong_semantic_never_publishes(self):
         bad = json.loads(self.lock_bytes)
-        bad['semantic_expectations']['vector_status_counts']['ready'] = 999
-        with self.assertRaisesRegex(PrepareError, 'release_reference_mismatch'):
+        bad['semantic_expectations']['smoke_seed']['query'] = 'Two'
+        with self.assertRaisesRegex(PrepareError, 'release_semantic_mismatch'):
             prepare_release(self.data, _lock_bytes=canonical_bytes(bad),
                             _base_spec=self.base_spec, _alias_spec=self.alias_spec,
                             _glove_registry_bytes=self.glove_registry)

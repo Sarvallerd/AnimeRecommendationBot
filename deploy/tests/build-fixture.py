@@ -266,7 +266,7 @@ fixture_lock = {
         'bundle_identity': 'sha256:' + hashlib.sha256((fixture_candidate / 'manifest.json').read_bytes()).hexdigest(),
         'catalog_sha256': fixture_report['files']['catalog.json']['sha256'],
         'neighbors_sha256': fixture_report['files']['neighbors.json']['sha256'],
-        'producer': {'source_commit': 'fixture', 'package_version': __version__,
+        'producer': {'source_commit': '0' * 40, 'package_version': __version__,
                      'python_version': platform.python_version(), 'numpy_version': __import__('numpy').__version__,
                      'code_files_sha256': {name: hashlib.sha256((package_dir / name).read_bytes()).hexdigest()
                                            for name in ('release.py', 'build.py', 'release_build.py',
