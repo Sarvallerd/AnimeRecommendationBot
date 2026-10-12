@@ -90,6 +90,12 @@ class EvidenceTests(unittest.TestCase):
             callback()
         self.assertEqual(caught.exception.code, code)
 
+    def test_new_offline_report_is_rejected_before_actor_binding(self):
+        report = {'schema_version': 2, 'kind': 'arb-offline-release-acceptance',
+                  'profile': {'release_id': 'neelagiri-2025-nafiul-2026-v1'}}
+        self.assert_rejected('UNSUPPORTED_LIVE_PROFILE',
+            lambda: e.context_from_anchor({}, {}, report, 'a' * 64, 'b' * 64, 'c' * 64))
+
     def recommendation_pair(self):
         before = shot(minute=0)
         after = shot(minute=1)

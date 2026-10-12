@@ -1,4 +1,35 @@
-# ARB-020 full catalog and live acceptance
+# Offline release compatibility and historical live acceptance
+
+## Named Neelagiri 2025 + Nafiul 2026 release (ARB-033)
+
+The opt-in `neelagiri-2025-nafiul-2026-v1` mode uses the committed release lock (SHA-256 `46f3ffd60239675b802026025016ee6719cb0525325e088fbfa248012db3de9b`). It checks the actual 28,955-item catalog, 28,872 five-neighbor lists, 83 empty lists, MAL 1 `Cowboy Bebop` → `37991, 24439, 26443, 8425, 23133`, and empty MAL 29740 `Notteke Explet's`. The builder reports must account for the 83 non-ready vectors. New A matches the accepted lock's reference identities; new B differs only by requested/effective block size 128. The legacy profile remains separate, with 17,562 records and the historical MAL 1/40089 seeds.
+
+The full frozen-input offline run and its separate read-only evidence verification **passed** on 2026-10-12 at source commit `adfe084acb8845b16609ebd62b34076c9919154a` (private preparation report SHA-256 `8fa4d7e97e4ff992e10e1b7b37f3169b69c0ba35f6f55a9e9313c680ebecdb82`). Fresh A matched the lock; B had a distinct bundle identity with byte-identical catalog and neighbors. All five old→A→B→A→old prepare phases exited zero and preserved complete synthetic database rows and migration timestamps. The original old selection, settings, and healthy PostgreSQL volume were retained, with no bot poller. This is an offline compatibility result; live Telegram acceptance and production user-history preservation remain `PENDING` for DATA-06 v2.
+
+Use a clean checkout and a new ignored, operator-owned private directory outside every worktree. The acceptance Compose project needs its **own** credentials, volume, and placeholder bot token. Keep the bot stopped. Before starting the runner, copy the saved old three-file immutable bundle into `DATA/bundles/sha256-...`, set `ARB_BUNDLE_DIR` in the original seven-field settings file to that old path, start only this project's PostgreSQL, apply migration 1 with an old prepare, and seed nonempty synthetic history. The initial PostgreSQL container must be healthy. Do not use a production token, production volume, or production user rows. Keep the preserved old bundle immutable.
+
+Copy the complete pinned inputs into the exact frozen layout under `DATA`: `datasets/sha256-<base identity>` with its five generated files, `aliases/sha256-<alias identity>` with three files, `releases/sha256-<release identity>` with `catalog.json` and `release-manifest.json`, `raw/nafiul-2026-v1` with its CSV and source manifest, and `raw/glove-6b-300d-v1/glove.6B.300d.txt`. Use the identities in the lock and retain the raw upstream files unchanged. The runner validates the full release and installed builder before fresh A/B builds; it does not normalize these inputs. Keep private input, settings, credential, snapshot, probe, and report files out of Git and issue/PR text.
+
+```bash
+CHECKOUT=/absolute/clean/checkout
+PROJECT=arb033-accept-unique
+SETTINGS=/absolute/private/compose.env
+DATA=/absolute/private/data
+EVIDENCE=/absolute/private/evidence/new-run
+OLD_IDENTITY=sha256:<exact-preserved-old-bundle-identity>
+"$CHECKOUT/deploy/tests/full-catalog-acceptance.sh" \
+  --release neelagiri-2025-nafiul-2026-v1 \
+  --project "$PROJECT" --settings "$SETTINGS" --data-dir "$DATA" \
+  --evidence-dir "$EVIDENCE" --old-identity "$OLD_IDENTITY" --offline
+python3 "$CHECKOUT/deploy/tests/release-acceptance.py" verify \
+  --evidence-dir "$EVIDENCE"
+```
+
+The controller must run as the settings/data owner. Where WSL Docker requires privileged API access, prepend the private argv-preserving Docker wrapper to `PATH` for this command only; do not run the whole Python controller as root. The runner builds the pinned images, probes the installed Python/NumPy/package/source bytes, validates the frozen release, builds/exports A and B afresh, runs both Python and Rust bundle checks, and executes old→A→B→A→old using only `prepare`. It saves a full baseline and five full snapshots, compares every database row and timestamp, verifies the retained PostgreSQL container and volume, and checks the original settings bytes, owner and mode. It never starts a poller or rewrites the original settings. On ordinary failure after switching, it attempts an old prepare if the project is quiescent; `failure-status.json` records the fixed failure/restoration status. A power loss or `SIGKILL` needs manual inspection of the private saved original settings and the old bundle before recovery.
+
+The read-only `verify` command reopens the saved source, profile, lock, installed-probe, settings copies, bundle files, reports, and snapshots and recomputes the phase/database checks. It does not use Docker, rebuild, export, or require today's checkout HEAD to equal the historical run SHA. A `PASS` from this mode is scoped to **full-input offline compatibility with synthetic acceptance-project history**. `live_acceptance` and `production_history_preservation` remain `PENDING`; the new actor-bound UI verifier belongs to DATA-06 v2. Do not feed this schema-2 preparation report to the schema-1 `bind-actor` command below. If a new full catalog ever has no empty list, retain the synthetic empty-case test and mark the live empty observation conditional in DATA-06 rather than changing the catalog.
+
+## Historical MAL 2020 live procedure (ARB-020)
 
 This is an opt-in release check on the genuine pinned MAL 2020 catalog, GloVe 6B 300d, one private test bot, and one persistent Compose project. It records actual database and container state. The coordinator keeps raw snapshots, context, settings, credentials, and user observations under ignored private `.arb/` storage. Commit only small code and the public aggregate result after removing any identifying information. An unobserved action stays `PENDING`.
 
