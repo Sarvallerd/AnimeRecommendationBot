@@ -1,5 +1,11 @@
 # Offline release compatibility and historical live acceptance
 
+For the named release's actor-bound DATA-06 v2 procedure on the existing service, use
+[the live release runbook](LIVE_RELEASE_ACCEPTANCE.md). It preserves the original
+bundle/image/settings and PostgreSQL volume through original → target → original →
+target, recomputes private operation and case evidence, and keeps unobserved UI
+steps `PENDING`. The historical schema-1 commands below remain for ARB-020 only.
+
 ## Named Neelagiri 2025 + Nafiul 2026 release (ARB-033)
 
 The opt-in `neelagiri-2025-nafiul-2026-v1` mode uses the committed release lock (SHA-256 `46f3ffd60239675b802026025016ee6719cb0525325e088fbfa248012db3de9b`). It checks the actual 28,955-item catalog, 28,872 five-neighbor lists, 83 empty lists, MAL 1 `Cowboy Bebop` → `37991, 24439, 26443, 8425, 23133`, and empty MAL 29740 `Notteke Explet's`. The builder reports must account for the 83 non-ready vectors. New A matches the accepted lock's reference identities; new B differs only by requested/effective block size 128. The legacy profile remains separate, with 17,562 records and the historical MAL 1/40089 seeds.
