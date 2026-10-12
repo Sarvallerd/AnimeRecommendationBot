@@ -176,6 +176,14 @@ class LiveV2Tests(unittest.TestCase):
                                (bundles[role], None, None)):
             context = v.bind_context(plan(), operation, started, after)
             self.assertEqual(context['actor']['target_anchor_request_id'], 2)
+            stopped_anchor = copy.deepcopy(started)
+            stopped_anchor['state']['runtime']['bot']['running'] = False
+            self.fail_code('BOT_NOT_RUNNING', lambda: v.bind_context(
+                plan(), operation, stopped_anchor, after))
+            unpolled_anchor = copy.deepcopy(after)
+            unpolled_anchor['guards']['pollers']['matching'] = 0
+            self.fail_code('POLLER_COUNT', lambda: v.bind_context(
+                plan(), operation, started, unpolled_anchor))
             result = v.verify_case(plan(), context, 'initial-update', before, after,
                                    operation=operation)
             self.assertEqual(result['counts']['delivered'], 2)
@@ -225,6 +233,93 @@ class LiveV2Tests(unittest.TestCase):
             false_context['plan_sha256'] = v.digest(false_plan)
             self.fail_code('FALSE_EMPTY_NA', lambda: v.verify_case(
                 false_plan, false_context, 'empty', empty_before, empty_after))
+
+    def test_case_windows_require_running_bot_and_one_poller(self):
+        value = plan()
+        context = {'schema_version': 2, 'kind': 'arb-live-context',
+                   'plan_sha256': v.digest(value),
+                   'actor': {'tg_id': 42, 'chat_id': 42}}
+        live_bot = bot(B, 'target', 'target-bot', 2.5)
+        before = shot(4, 'target', bot_item=live_bot)
+        after = shot(6, 'target', bot_item=live_bot)
+        during = copy.deepcopy(before)
+        during['state']['kind'] = 'runtime_only'
+        during['state']['captured_at'] = time(5)
+        during['state']['database'] = None
+        during['state']['runtime']['postgres']['running'] = False
+        during['guards']['postgres_health'] = 'unhealthy'
+        with mock.patch.object(v, '_bundle', return_value=(
+                {'id': B, 'neighbors': {}}, None, None)):
+            self.assertEqual(v.verify_case(value, context, 'navigation-search',
+                                           before, after)['status'], 'PASS')
+            self.assertEqual(v.verify_case(value, context, 'db-outage', before,
+                                           after, during=during)['status'], 'PASS')
+            for endpoint in ('before', 'after'):
+                for field, replacement, code in (
+                        ('running', False, 'BOT_NOT_RUNNING'),
+                        ('matching', 0, 'POLLER_COUNT')):
+                    changed = {'before': copy.deepcopy(before),
+                               'after': copy.deepcopy(after)}
+                    if field == 'running':
+                        changed[endpoint]['state']['runtime']['bot']['running'] = replacement
+                    else:
+                        changed[endpoint]['guards']['pollers']['matching'] = replacement
+                    self.fail_code(code, lambda: v.verify_case(
+                        value, context, 'navigation-search', **changed))
+            for field, replacement, code in (
+                    ('running', False, 'BOT_NOT_RUNNING'),
+                    ('matching', 0, 'POLLER_COUNT')):
+                changed = copy.deepcopy(during)
+                if field == 'running':
+                    changed['state']['runtime']['bot']['running'] = replacement
+                else:
+                    changed['guards']['pollers']['matching'] = replacement
+                self.fail_code(code, lambda: v.verify_case(
+                    value, context, 'db-outage', before, after, during=changed))
+
+    def test_description_coordinates_are_actor_owned_private_delivery(self):
+        value = plan()
+        context = {'schema_version': 2, 'kind': 'arb-live-context',
+                   'plan_sha256': v.digest(value),
+                   'actor': {'tg_id': 42, 'chat_id': 42}}
+        db = database()
+        db['users'].append({'tg_id': 55, 'created_at': time(0),
+                            'updated_at': time(0)})
+        db['requests'].append({'id': 2, 'tg_id': 55, 'action_key': 'msg:55:2',
+                               'raw_query': 'New', 'seed_mal_id': 8,
+                               'bundle_id': B, 'created_at': time(1),
+                               'resolved_at': time(1)})
+        db['delivered'].append({'id': 2, 'request_id': 2, 'tg_id': 55,
+                                'rank': 1, 'mal_id': 9, 'chat_id': 55,
+                                'message_id': 11, 'delivered_at': time(1)})
+        live_bot = bot(B, 'target', 'target-bot', 2.5)
+        def window(rows):
+            return (shot(4, 'target', bot_item=live_bot, db=rows),
+                    shot(5, 'target', bot_item=live_bot, db=rows))
+        with mock.patch.object(v, '_bundle', return_value=(
+                {'id': B, 'neighbors': {'8': [{'mal_id': 9}]}}, None, None)):
+            before, after = window(db)
+            self.fail_code('DESCRIPTION_COORDINATES', lambda: v.verify_case(
+                value, context, 'description-edit', before, after))
+            own = copy.deepcopy(db)
+            own['requests'][-1].update(tg_id=42, action_key='msg:42:2')
+            own['delivered'][-1].update(tg_id=42, chat_id=42)
+            before, after = window(own)
+            self.assertEqual(v.verify_case(value, context, 'description-edit',
+                                           before, after)['status'], 'PASS')
+            public_chat = copy.deepcopy(own)
+            public_chat['delivered'][-1]['chat_id'] = 55
+            before, after = window(public_chat)
+            self.fail_code('DESCRIPTION_COORDINATES', lambda: v.verify_case(
+                value, context, 'description-edit', before, after))
+            foreign_delivery = copy.deepcopy(db)
+            foreign_delivery['requests'].append({
+                'id': 3, 'tg_id': 42, 'action_key': 'msg:42:3',
+                'raw_query': 'New', 'seed_mal_id': 8, 'bundle_id': B,
+                'created_at': time(1), 'resolved_at': time(1)})
+            before, after = window(foreign_delivery)
+            self.fail_code('DESCRIPTION_COORDINATES', lambda: v.verify_case(
+                value, context, 'description-edit', before, after))
 
     def test_history_mutation_and_missing_ui_never_pass(self):
         old = database()

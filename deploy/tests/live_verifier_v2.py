@@ -204,6 +204,13 @@ def _runtime(item, selected, plan, service):
     return item
 
 
+def _live_bot(capture, state, plan, role):
+    bot = _runtime(state['runtime']['bot'], plan['bundles'][role], plan, 'bot')
+    need(bot['running'] is True, 'BOT_NOT_RUNNING')
+    need(capture['guards']['pollers']['matching'] == 1, 'POLLER_COUNT')
+    return bot
+
+
 def verify_operation(plan, operation, before, stopped, prepared, started):
     need(operation in OPERATIONS, 'INVALID_OPERATION')
     src, dst = ('target', 'original') if operation == 'rollback' else (
@@ -362,6 +369,8 @@ def bind_context(plan, initial_operation, before, after):
          initial_operation.get('plan_sha256') == digest(plan), 'OPERATION_REQUIRED')
     before_state = _valid_capture(before, plan, 'target')
     after_state = _valid_capture(after, plan, 'target')
+    _live_bot(before, before_state, plan, 'target')
+    _live_bot(after, after_state, plan, 'target')
     need(digest(before) == initial_operation['input_sha256']['started'] and
          e.utc(before_state['captured_at']) < e.utc(after_state['captured_at']), 'TIME_ORDER')
     request, _ = _flow(before_state, after_state, 'target', plan)
@@ -386,8 +395,9 @@ def verify_case(plan, context, case, before, after, *, during=None, operation=No
                   'original' if case in ('initial-update', 'final-update') else 'target')
     bs = _valid_capture(before, plan, prior_role)
     af = _valid_capture(after, plan, role)
+    _live_bot(before, bs, plan, prior_role)
+    _live_bot(after, af, plan, role)
     need(e.utc(bs['captured_at']) < e.utc(af['captured_at']), 'TIME_ORDER')
-    _runtime(bs['runtime']['bot'], plan['bundles'][prior_role], plan, 'bot')
     if case in ('initial-update', 'rollback', 'final-update'):
         need(operation is not None and operation.get('operation') == case and
              operation.get('status') == 'PASS' and
@@ -427,17 +437,20 @@ def verify_case(plan, context, case, before, after, *, during=None, operation=No
                  not delta['resolved_pending'], 'UNEXPECTED_EFFECTS')
             if case == 'description-edit':
                 probe = plan['ui_probes']['description_edit']
-                need(any(row['seed_mal_id'] == probe['seed_mal_id'] and
+                need(any(row['tg_id'] == actor and
+                         row['seed_mal_id'] == probe['seed_mal_id'] and
                          row['raw_query'] == probe['query'] and
                          row['bundle_id'] == plan['bundles']['target']['identity'] and
                          any(d['request_id'] == row['id'] and
+                             d['tg_id'] == actor and d['chat_id'] == actor and
                              d['mal_id'] == probe['neighbor_mal_id'] for d in
                              bs['database']['delivered']) for row in
                          bs['database']['requests']), 'DESCRIPTION_COORDINATES')
             if case == 'catalog-stale':
                 need(any(row['tg_id'] == actor and
                          row['bundle_id'] == plan['bundles']['original']['identity'] and
-                         any(d['request_id'] == row['id'] and d['tg_id'] == actor for d in
+                         any(d['request_id'] == row['id'] and d['tg_id'] == actor and
+                             d['chat_id'] == actor for d in
                              bs['database']['delivered']) for row in
                          bs['database']['requests']), 'ORIGINAL_CONTROL_MISSING')
         elif case == 'empty':
@@ -492,12 +505,12 @@ def verify_case(plan, context, case, before, after, *, during=None, operation=No
     if case == 'db-outage':
         need(during is not None, 'OUTAGE_NOT_OBSERVED')
         ds = _valid_capture(during, plan, 'target', full=False)
+        _live_bot(during, ds, plan, 'target')
         need(e.utc(bs['captured_at']) < e.utc(ds['captured_at']) < e.utc(af['captured_at']) and
              ds['runtime']['postgres']['running'] is False and
              ds['runtime']['bot']['id'] == bs['runtime']['bot']['id'] and
              ds['runtime']['bot']['started_at'] == bs['runtime']['bot']['started_at'],
              'OUTAGE_NOT_OBSERVED')
-    _runtime(af['runtime']['bot'], plan['bundles'][role], plan, 'bot')
     counts = {key: len(delta[key]) for key in
               ('requests', 'delivered', 'anime_events', 'recommendation_ratings', 'feedback')}
     counts['resolved_pending'] = len(delta['resolved_pending'])
@@ -571,7 +584,8 @@ def summarize_evidence(plan, operations, results, final, context=None, observati
                  row['tg_id'] == actor and
                  row['bundle_id'] == plan['bundles']['original']['identity']]
         need(len(fresh) == 1 and any(row['request_id'] == fresh[0]['id'] and
-             row['tg_id'] == actor for row in stale_before['delivered']),
+             row['tg_id'] == actor and row['chat_id'] == actor for row in
+             stale_before['delivered']),
              'ROLLBACK_CONTROL_MISSING')
     ui = 'PENDING'
     if observations is not None:
