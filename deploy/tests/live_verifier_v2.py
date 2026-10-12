@@ -67,6 +67,15 @@ def _valid_capture(item, plan, role=None, *, full=True):
     inventory = guards.get('pollers', {})
     need(type(inventory.get('matching')) is int and 0 <= inventory['matching'] <= 1,
          'SECOND_POLLER')
+    ids = inventory.get('matching_container_ids_sha256')
+    need(type(ids) is list and len(ids) <= inventory['matching'] and
+         all(type(value) is str and e.HEX.fullmatch(value) for value in ids),
+         'POLLER_IDENTITY')
+    bot = state['runtime'].get('bot')
+    if bot is not None and bot.get('running') is True:
+        need(inventory['matching'] == 1, 'POLLER_COUNT')
+        need(type(bot.get('id')) is str and ids == [sha(bot['id'].encode())],
+             'POLLER_IDENTITY')
     need(inventory.get('scope') == 'docker-daemon-and-known-local-processes',
          'POLLER_SCOPE_PENDING')
     need(inventory.get('scope_complete') is True, 'POLLER_SCOPE_PENDING')
@@ -539,6 +548,49 @@ def summarize_evidence(plan, operations, results, final, context=None, observati
                 final['guards']['pollers']['matching'] == 1)
     operation_status = {key: value['status'] for key, value in operations.items()}
     machine_status = {key: value['status'] for key, value in results.items()}
+    if results or case_inputs is not None:
+        need(type(case_inputs) is dict and set(case_inputs) == set(results),
+             'CASE_INPUTS_REQUIRED')
+    if results:
+        need(context is not None and 'initial-update' in case_inputs and
+             type(plan.get('baseline')) is dict, 'CASE_INPUTS_REQUIRED')
+        anchor = case_inputs['initial-update']['after']
+        need(digest(anchor) == context['anchor_input_sha256']['after'],
+             'ANCHOR_MISMATCH')
+        baseline_time, anchor_time, final_time = (vtime(item) for item in
+            (plan['baseline'], anchor, final))
+        need(baseline_time < anchor_time <= final_time, 'CASE_TIME_ORDER')
+        for case, inputs in case_inputs.items():
+            need(type(inputs) is dict and {'before', 'after'} <= set(inputs) and
+                 set(inputs) <= {'before', 'after', 'during'}, 'CASE_INPUTS_REQUIRED')
+            before_time, after_time = vtime(inputs['before']), vtime(inputs['after'])
+            lower = baseline_time if case == 'initial-update' else anchor_time
+            need(lower <= before_time < after_time <= final_time, 'CASE_TIME_ORDER')
+            if 'during' in inputs:
+                need(before_time < vtime(inputs['during']) < after_time,
+                     'CASE_TIME_ORDER')
+        if operation_inputs is not None and set(operation_inputs) == set(OPERATIONS):
+            initial, rollback, last = (operation_inputs[name] for name in OPERATIONS)
+            rollback_before, rollback_started = (vtime(rollback[name]) for name in
+                ('before', 'started'))
+            final_before, final_started = (vtime(last[name]) for name in
+                ('before', 'started'))
+            need(vtime(initial['started']) < anchor_time <= rollback_before,
+                 'CASE_TIME_ORDER')
+            for case, inputs in case_inputs.items():
+                before_time, after_time = vtime(inputs['before']), vtime(inputs['after'])
+                if case == 'initial-update':
+                    valid = after_time <= rollback_before
+                elif case == 'rollback':
+                    valid = rollback_before <= before_time and rollback_started < after_time <= final_before
+                elif case == 'final-update':
+                    valid = final_before <= before_time and final_started < after_time
+                else:
+                    valid = (anchor_time <= before_time and after_time <= rollback_before or
+                             final_started <= before_time and after_time <= final_time)
+                    if case == 'catalog-stale':
+                        valid = final_started <= before_time and after_time <= final_time
+                need(valid, 'CASE_TIME_ORDER')
     history = 'PENDING'
     if (len(operations) == 3 and context is not None and
             all(value == 'PASS' for value in operation_status.values())):

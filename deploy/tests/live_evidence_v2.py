@@ -233,6 +233,8 @@ def make_plan(project, settings, offline_evidence, baseline_path, target_bundle,
     need(selected is not None and pg is not None and pg['running'] and
          baseline['guards']['postgres_health'] == 'healthy' and
          baseline['guards']['pollers']['matching'] == 1 and
+         baseline['guards']['pollers'].get('matching_container_ids_sha256') ==
+         [e.sha(selected['id'].encode())] and
          baseline['guards']['pollers']['scope_complete'] is True and
          selected['bundle_id'] == old.identity and selected['bundle_count'] == old.count and
          selected['artifact_mount'] == {'source': str(original_path), 'rw': False},

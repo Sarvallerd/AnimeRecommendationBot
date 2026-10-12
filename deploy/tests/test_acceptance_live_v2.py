@@ -104,7 +104,10 @@ def shot(minute, role='original', bot_item=None, prepare=None, settings=None, db
                                              'database_volume': 'real-volume',
                                              'started_at': None},
                        'pollers': {'matching': matching, 'scope_complete': True,
-                                   'scope': 'docker-daemon-and-known-local-processes'}}}
+                                   'scope': 'docker-daemon-and-known-local-processes',
+                                   'matching_container_ids_sha256': (
+                                       [v.sha(bot_item['id'].encode())]
+                                       if matching and bot_item is not None else [])}}}
 
 
 def sequence():
@@ -154,6 +157,31 @@ class LiveV2Tests(unittest.TestCase):
         self.fail_code('BOT_NOT_RECREATED', lambda: v.verify_operation(plan(),
                                                                   'initial-update', *changed))
 
+    def test_poller_inventory_identifies_the_selected_bot(self):
+        value = plan()
+        running = shot(4, 'target', bot_item=bot(B, 'target', 'accepted-bot', 2.5))
+        self.assertIs(v._valid_capture(running, value, 'target'), running['state'])
+        for hashes in ([v.sha(b'different-container')], []):
+            changed = copy.deepcopy(running)
+            changed['guards']['pollers']['matching_container_ids_sha256'] = hashes
+            self.fail_code('POLLER_IDENTITY', lambda: v._valid_capture(
+                changed, value, 'target'))
+        zero = shot(1, bot_item=None, matching=0)
+        self.assertIs(v._valid_capture(zero, value, 'original'), zero['state'])
+        zero['guards']['pollers']['matching_container_ids_sha256'] = [
+            v.sha(b'unrelated-container')]
+        self.fail_code('POLLER_IDENTITY', lambda: v._valid_capture(
+            zero, value, 'original'))
+        values = list(sequence())
+        values[3]['guards']['pollers']['matching_container_ids_sha256'] = [
+            v.sha(b'different-container')]
+        self.fail_code('POLLER_IDENTITY', lambda: v.verify_operation(
+            value, 'initial-update', *values))
+        final = shot(4, 'target', bot_item=bot(B, 'target', 'accepted-bot', 2.5))
+        final['guards']['pollers']['matching_container_ids_sha256'] = []
+        self.fail_code('POLLER_IDENTITY', lambda: v.summarize_evidence(
+            value, {}, {}, final))
+
     def test_real_flow_actor_order_and_private_chat(self):
         before, stopped, prepared, started = sequence()
         operation = v.verify_operation(plan(), 'initial-update', before, stopped,
@@ -182,8 +210,14 @@ class LiveV2Tests(unittest.TestCase):
                 plan(), operation, stopped_anchor, after))
             unpolled_anchor = copy.deepcopy(after)
             unpolled_anchor['guards']['pollers']['matching'] = 0
+            unpolled_anchor['guards']['pollers']['matching_container_ids_sha256'] = []
             self.fail_code('POLLER_COUNT', lambda: v.bind_context(
                 plan(), operation, started, unpolled_anchor))
+            mismatched_anchor = copy.deepcopy(after)
+            mismatched_anchor['guards']['pollers']['matching_container_ids_sha256'] = [
+                v.sha(b'different-container')]
+            self.fail_code('POLLER_IDENTITY', lambda: v.bind_context(
+                plan(), operation, started, mismatched_anchor))
             result = v.verify_case(plan(), context, 'initial-update', before, after,
                                    operation=operation)
             self.assertEqual(result['counts']['delivered'], 2)
@@ -264,8 +298,15 @@ class LiveV2Tests(unittest.TestCase):
                         changed[endpoint]['state']['runtime']['bot']['running'] = replacement
                     else:
                         changed[endpoint]['guards']['pollers']['matching'] = replacement
+                        changed[endpoint]['guards']['pollers']['matching_container_ids_sha256'] = []
                     self.fail_code(code, lambda: v.verify_case(
                         value, context, 'navigation-search', **changed))
+                wrong_identity = {'before': copy.deepcopy(before),
+                                  'after': copy.deepcopy(after)}
+                wrong_identity[endpoint]['guards']['pollers'][
+                    'matching_container_ids_sha256'] = [v.sha(b'other-container')]
+                self.fail_code('POLLER_IDENTITY', lambda: v.verify_case(
+                    value, context, 'navigation-search', **wrong_identity))
             for field, replacement, code in (
                     ('running', False, 'BOT_NOT_RUNNING'),
                     ('matching', 0, 'POLLER_COUNT')):
@@ -274,8 +315,13 @@ class LiveV2Tests(unittest.TestCase):
                     changed['state']['runtime']['bot']['running'] = replacement
                 else:
                     changed['guards']['pollers']['matching'] = replacement
+                    changed['guards']['pollers']['matching_container_ids_sha256'] = []
                 self.fail_code(code, lambda: v.verify_case(
                     value, context, 'db-outage', before, after, during=changed))
+            local_only = copy.deepcopy(during)
+            local_only['guards']['pollers']['matching_container_ids_sha256'] = []
+            self.fail_code('POLLER_IDENTITY', lambda: v.verify_case(
+                value, context, 'db-outage', before, after, during=local_only))
 
     def test_description_coordinates_are_actor_owned_private_delivery(self):
         value = plan()
@@ -405,6 +451,11 @@ class LiveV2Tests(unittest.TestCase):
                 self.assertIs(v.validate_plan(value), value)
                 self.assertNotEqual(report['source']['commit'], value['source']['commit'])
                 alternate = copy.deepcopy(value)
+                alternate['baseline']['guards']['pollers'][
+                    'matching_container_ids_sha256'] = [v.sha(b'other-container')]
+                alternate['baseline_sha256'] = v.digest(alternate['baseline'])
+                self.fail_code('POLLER_IDENTITY', lambda: v.validate_plan(alternate))
+                alternate = copy.deepcopy(value)
                 alternate['bundles']['target']['identity'] = 'sha256:' + 'c' * 64
                 self.fail_code('REFERENCE_MISMATCH', lambda: v.validate_plan(alternate))
                 alternate = copy.deepcopy(value)
@@ -463,33 +514,89 @@ class LiveV2Tests(unittest.TestCase):
         self.fail_code('OPERATION_CHAIN', lambda: v.summarize_evidence(
             value, ops, {}, final, context, operation_inputs=changed))
 
+    def test_summary_bounds_every_saved_case_window(self):
+        value = plan()
+        baseline = shot(0, bot_item=bot(A, 'original', 'old-bot', -1))
+        value['baseline'] = baseline
+        anchor = shot(4, 'target', bot_item=bot(B, 'target', 'target-bot', 2.5))
+        final = shot(13, 'target', bot_item=bot(B, 'target', 'final-bot', 11.5))
+        context = {'actor': {'tg_id': 42},
+                   'anchor_input_sha256': {'after': v.digest(anchor)}}
+        results = {'initial-update': {'status': 'PASS'},
+                   'navigation-search': {'status': 'PASS'}}
+        inputs = {'initial-update': {'before': baseline, 'after': anchor},
+                  'navigation-search': {
+                      'before': shot(5, 'target', bot_item=bot(B, 'target', 'target-bot', 2.5)),
+                      'after': shot(6, 'target', bot_item=bot(B, 'target', 'target-bot', 2.5))}}
+        operations = {'initial-update': {'started': shot(3, 'target')},
+                      'rollback': {'before': shot(8, 'target'),
+                                   'started': shot(10, 'original')},
+                      'final-update': {'before': shot(11, 'original'),
+                                       'started': shot(12, 'target')}}
+        def summarize(current_inputs, current_operations=operations):
+            return v.summarize_evidence(value, {}, results, final, context,
+                                        operation_inputs=current_operations,
+                                        case_inputs=current_inputs)
+        self.assertEqual(summarize(inputs)['live_acceptance'], 'PENDING')
+        missing = copy.deepcopy(inputs)
+        del missing['navigation-search']
+        self.fail_code('CASE_INPUTS_REQUIRED', lambda: summarize(missing))
+        extra = copy.deepcopy(inputs)
+        extra['description-edit'] = copy.deepcopy(inputs['navigation-search'])
+        self.fail_code('CASE_INPUTS_REQUIRED', lambda: summarize(extra))
+        after_final = copy.deepcopy(inputs)
+        after_final['navigation-search']['after']['state']['captured_at'] = time(14)
+        self.fail_code('CASE_TIME_ORDER', lambda: summarize(after_final))
+        during_after_final = copy.deepcopy(inputs)
+        during_after_final['navigation-search']['during'] = shot(14, 'target')
+        self.fail_code('CASE_TIME_ORDER', lambda: summarize(during_after_final))
+        pre_anchor = copy.deepcopy(inputs)
+        pre_anchor['navigation-search']['before']['state']['captured_at'] = time(3.5)
+        self.fail_code('CASE_TIME_ORDER', lambda: summarize(pre_anchor))
+        rollback_phase = copy.deepcopy(inputs)
+        rollback_phase['navigation-search']['before']['state']['captured_at'] = time(9)
+        rollback_phase['navigation-search']['after']['state']['captured_at'] = time(10)
+        self.fail_code('CASE_TIME_ORDER', lambda: summarize(rollback_phase))
+        late_anchor = copy.deepcopy(inputs)
+        late_anchor['initial-update']['after']['state']['captured_at'] = time(9)
+        late_context = copy.deepcopy(context)
+        late_context['anchor_input_sha256']['after'] = v.digest(
+            late_anchor['initial-update']['after'])
+        self.fail_code('CASE_TIME_ORDER', lambda: v.summarize_evidence(
+            value, {}, results, final, late_context,
+            operation_inputs=operations, case_inputs=late_anchor))
+
     def test_ui_pass_needs_observation_and_verified_case_reference(self):
         value = plan()
-        context = {'actor': {'tg_id': 42}, 'plan_sha256': v.digest(value)}
+        baseline = shot(0, bot_item=bot(A, 'original', 'old-bot', -1))
+        anchor = shot(3, 'target', bot_item=bot(B, 'target', 'new-bot', 2.5))
+        value['baseline'] = baseline
+        context = {'actor': {'tg_id': 42}, 'plan_sha256': v.digest(value),
+                   'anchor_input_sha256': {'after': v.digest(anchor)}}
         result = {'case': 'initial-update', 'status': 'PASS'}
         cases = {'initial-update': result}
+        case_inputs = {'initial-update': {'before': baseline, 'after': anchor}}
         final = shot(4, 'target', bot_item=bot(B, 'target', 'new-bot', 2.5))
         entries = [{'id': identifier, 'status': 'PENDING', 'observed_at': None,
                     'observation': '', 'case_sha256': []} for identifier in v.UI_IDS]
         observations = {'schema_version': 2, 'kind': 'arb-live-observations',
                         'plan_sha256': v.digest(value),
                         'context_sha256': v.digest(context), 'scenarios': entries}
-        summary = v.summarize_evidence(value, {}, cases, final, context, observations)
+        def summarize():
+            return v.summarize_evidence(value, {}, cases, final, context, observations,
+                                        case_inputs=case_inputs)
+        summary = summarize()
         self.assertEqual(summary['live_ui_acceptance'], 'PENDING')
         entries[0].update(status='PASS', observation='One target search was observed',
                           case_sha256=[v.digest(result)])
-        self.fail_code('UNOBSERVED_UI_PASS', lambda: v.summarize_evidence(
-            value, {}, cases, final, context, observations))
+        self.fail_code('UNOBSERVED_UI_PASS', summarize)
         entries[0]['observed_at'] = time(3)
         entries[0]['case_sha256'] = ['0' * 64]
-        self.fail_code('INVALID_OBSERVATIONS', lambda: v.summarize_evidence(
-            value, {}, cases, final, context, observations))
+        self.fail_code('INVALID_OBSERVATIONS', summarize)
         entries[0]['case_sha256'] = [v.digest(result)]
-        self.assertEqual(v.summarize_evidence(value, {}, cases, final, context,
-                                               observations)['live_acceptance'], 'PENDING')
+        self.assertEqual(summarize()['live_acceptance'], 'PENDING')
         entries[-1]['id'] = entries[0]['id']
-        self.fail_code('INVALID_OBSERVATIONS', lambda: v.summarize_evidence(
-            value, {}, cases, final, context, observations))
+        self.fail_code('INVALID_OBSERVATIONS', summarize)
 
     def test_ui_probe_must_be_actual_alias_and_described_neighbor(self):
         with tempfile.TemporaryDirectory() as directory:
