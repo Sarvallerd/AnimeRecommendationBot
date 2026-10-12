@@ -617,6 +617,13 @@ def parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    requested = sys.argv[1:] if argv is None else argv
+    if requested and requested[0] == "live-v2":
+        module_path = Path(__file__).with_name("live_evidence_v2.py")
+        spec = importlib.util.spec_from_file_location("arb034_live_v2", module_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.main(requested[1:])
     args = parser().parse_args(argv)
     if args.command == "canary":
         print(CANARIES[args.name], end="")

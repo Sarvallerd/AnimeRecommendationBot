@@ -52,6 +52,13 @@ Rollback repeats the same sequence with the old immutable path. Historical reque
 
 The named release's full frozen-input offline run and read-only evidence verification passed on 2026-10-12. Its synthetic database history was unchanged across all five prepare phases, and the old bundle was restored. Live Telegram acceptance and preservation of production user history remain `PENDING` for DATA-06 v2.
 
+The [DATA-06 live runbook](LIVE_RELEASE_ACCEPTANCE.md) and
+[public status report](../recsys/reports/live-release-acceptance-v2/README.md) describe
+the separate actor-bound verifier for the existing service. The `live-v2` prefix on
+`tests/acceptance-evidence.py` selects that contract explicitly; the historical
+schema-1 commands above keep their original behavior. No live observation is
+inferred from the offline report.
+
 If Docker is installed in WSL and only root can access its socket, use the authorized per-command form without changing host socket or group membership:
 
 ```bash

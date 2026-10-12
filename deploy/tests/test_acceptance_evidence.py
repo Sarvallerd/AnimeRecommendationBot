@@ -2,7 +2,9 @@
 
 import copy
 import datetime as dt
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import pathlib
@@ -85,6 +87,15 @@ def check(case, before, after, *, identity=A, during=None):
 
 
 class EvidenceTests(unittest.TestCase):
+    def test_explicit_live_v2_dispatch_preserves_v1_parser(self):
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            with self.assertRaises(SystemExit) as caught:
+                e.main(['live-v2', '--help'])
+        self.assertEqual(caught.exception.code, 0)
+        self.assertIn('verify-operation', output.getvalue())
+        self.assertIn('bind-actor', e.parser().format_help())
+        self.assertNotIn('live-v2', e.parser().format_help())
+
     def assert_rejected(self, code, callback):
         with self.assertRaises(e.EvidenceError) as caught:
             callback()
