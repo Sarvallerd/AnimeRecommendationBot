@@ -50,6 +50,8 @@ compose logs --since 5m bot
 
 Rollback repeats the same sequence with the old immutable path. Historical requests retain their original bundle identities. The full-data acceptance harness in [`tests/full-catalog-acceptance.sh`](tests/full-catalog-acceptance.sh) defaults to the historical MAL 2020 A→B→A check. Its explicit `--release neelagiri-2025-nafiul-2026-v1` mode checks fresh A/B builds and the retained old→new A→new B→new A→old prepare sequence in an isolated acceptance project. That mode leaves the original settings and selected old bundle unchanged, and records live acceptance and production history as `PENDING`. The [acceptance runbook](ACCEPTANCE.md) gives the private setup and verification commands.
 
+The named release's full frozen-input offline run and read-only evidence verification passed on 2026-10-12. Its synthetic database history was unchanged across all five prepare phases, and the old bundle was restored. Live Telegram acceptance and preservation of production user history remain `PENDING` for DATA-06 v2.
+
 If Docker is installed in WSL and only root can access its socket, use the authorized per-command form without changing host socket or group membership:
 
 ```bash
