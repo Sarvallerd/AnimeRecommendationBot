@@ -43,20 +43,6 @@ jobs:
   rust:
     runs-on: ubuntu-24.04
     timeout-minutes: 35
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: arb_ci
-          POSTGRES_PASSWORD: arb_ci
-          POSTGRES_DB: arb_ci_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U arb_ci -d arb_ci_test"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -78,12 +64,8 @@ jobs:
         run: cargo +1.95.0 build --locked --all-targets
       - name: Lint Rust targets
         run: cargo +1.95.0 clippy --locked --all-targets -- -D warnings
-      - name: Test Rust
-        run: cargo +1.95.0 test --locked
-      - name: Test PostgreSQL integration
-        env:
-          ARB_TEST_DATABASE_URL: postgresql://arb_ci:arb_ci@127.0.0.1:5432/arb_ci_test?sslmode=disable
-        run: cargo +1.95.0 test --locked -- --ignored
+      - name: Test dialogue with FakeTelegram and disposable PostgreSQL
+        run: python3 deploy/tests/level1-acceptance.py --scope dialogue
       - name: Compare bundle contract checkers
         run: |
           python contracts/check_bundle.py tests/fixtures/bundle > "$RUNNER_TEMP/python-bundle.txt"

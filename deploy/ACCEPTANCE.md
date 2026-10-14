@@ -1,5 +1,7 @@
 # Offline release compatibility and historical live acceptance
 
+The current automated local workflow is [level-1 acceptance](LEVEL1_ACCEPTANCE.md): `python3 deploy/tests/level1-acceptance.py`. It exercises FakeTelegram, a disposable PostgreSQL, and synthetic A→B→A Compose without manual Telegram actions. This is separate from the full pinned catalog and the opt-in live service procedure below; unobserved live UI remains `PENDING`.
+
 For the named release's actor-bound DATA-06 v2 procedure on the existing service, use
 [the live release runbook](LIVE_RELEASE_ACCEPTANCE.md). It preserves the original
 bundle/image/settings and PostgreSQL volume through original → target → original →

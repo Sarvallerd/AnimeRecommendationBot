@@ -1,4 +1,8 @@
 services:
+  postgres:
+    networks: [level1]
+  prepare:
+    networks: [level1]
   builder:
     network_mode: none
     volumes:
@@ -6,5 +10,9 @@ services:
   bot:
     command: ["--prepare"]
     restart: "no"
+    networks: [level1]
     environment:
       TELOXIDE_TOKEN: 0:ci
+networks:
+  level1:
+    internal: true

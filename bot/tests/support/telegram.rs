@@ -22,6 +22,7 @@ use teloxide::{
 pub struct FakeTelegram {
     url: String,
     requests: Arc<Mutex<Vec<(String, String)>>>,
+    exchanges: Arc<Mutex<Vec<Exchange>>>,
     pub fail_send: Arc<AtomicBool>,
     pub fail_send_count: Arc<AtomicUsize>,
     pub fail_edit: Arc<AtomicBool>,
@@ -34,11 +35,19 @@ pub struct FakeTelegram {
     stop: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
 }
+#[allow(dead_code)]
+#[derive(Clone, Debug)]
+pub struct Exchange {
+    pub path: String,
+    pub fields: std::collections::HashMap<String, String>,
+    pub response: serde_json::Value,
+}
 impl FakeTelegram {
     pub fn new() -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
+        let exchanges = Arc::new(Mutex::new(Vec::new()));
         let fail_send = Arc::new(AtomicBool::new(false));
         let fail_send_count = Arc::new(AtomicUsize::new(0));
         let fail_edit = Arc::new(AtomicBool::new(false));
@@ -52,6 +61,7 @@ impl FakeTelegram {
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = stop.clone();
         let seen = requests.clone();
+        let recorded = exchanges.clone();
         let failure = fail_send.clone();
         let counted_failures = fail_send_count.clone();
         let edit_failure = fail_edit.clone();
@@ -189,6 +199,11 @@ impl FakeTelegram {
                 } else {
                     json!({"ok":false,"error_code":404,"description":"unexpected method"})
                 };
+                recorded.lock().unwrap().push(Exchange {
+                    path,
+                    fields,
+                    response: response.clone(),
+                });
                 let body = response.to_string();
                 let wire=format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body);
                 let _ = stream.write_all(wire.as_bytes());
@@ -197,6 +212,7 @@ impl FakeTelegram {
         Self {
             url,
             requests,
+            exchanges,
             fail_send,
             fail_send_count,
             fail_edit,
@@ -221,7 +237,18 @@ impl FakeTelegram {
             .collect()
     }
     pub fn bot(&self) -> Bot {
-        Bot::new("123:test").set_api_url(self.url.parse().unwrap())
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(Duration::from_secs(2))
+            .timeout(Duration::from_secs(8))
+            .build()
+            .unwrap();
+        Bot::with_client("123:test", client).set_api_url(self.url.parse().unwrap())
+    }
+    #[allow(dead_code)]
+    pub fn exchanges(&self) -> Vec<Exchange> {
+        self.exchanges.lock().unwrap().clone()
     }
     pub fn snapshot(&self) -> Vec<(String, String)> {
         self.requests.lock().unwrap().clone()
@@ -270,6 +297,7 @@ pub fn callback(id: u32, chat: i64, user: u64, message_id: i32, data: Option<&st
         ),
     }
 }
+#[allow(dead_code)]
 pub async fn dispatch(bot: &Bot, ctx: &Arc<AppContext>, update: Update) {
     let result = handlers::schema()
         .dispatch(dptree::deps![bot.clone(), update, ctx.clone()])

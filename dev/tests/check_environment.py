@@ -65,8 +65,8 @@ def assert_manifest(root: Path, env: dict[str, str]) -> None:
     assert targets[("check_bundle", ("bin",))] == root / "bot/src/bin/check_bundle.rs", targets
     tests = {name: path for (name, kind), path in targets.items() if kind == ("test",)}
     expected = {path.stem: path.resolve() for path in (root / "bot/tests").glob("*.rs")}
-    assert len(tests) == 7 and tests == expected, (tests, expected)
-    assert len(targets) == 10, targets
+    assert len(tests) == 8 and tests == expected, (tests, expected)
+    assert len(targets) == 11, targets
 
 
 def assert_install(root: Path, env: dict[str, str], *, editable: bool, extra: bool = False) -> None:

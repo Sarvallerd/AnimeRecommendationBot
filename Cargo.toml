@@ -65,3 +65,7 @@ path = "bot/tests/search.rs"
 [[test]]
 name = "startup"
 path = "bot/tests/startup.rs"
+
+[[test]]
+name = "level1"
+path = "bot/tests/level1.rs"

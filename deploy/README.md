@@ -69,4 +69,4 @@ wsl.exe --user root --exec docker \
 
 For a script that calls `docker` internally, use `wsl.exe --user root --exec env DOCKER_CONFIG=/home/wozata/projects/AnimeRecommendationBot/.tools/docker/config bash ...`. Keep `SETTINGS` and `COMPOSE_FILE` as absolute paths in that invocation.
 
-The small synthetic `bash deploy/tests/compose-acceptance.sh` checks image build, migration/persistence, startup guards, and scale refusal without a real token or full dataset. It does not establish live acceptance.
+The standard [level-1 acceptance](LEVEL1_ACCEPTANCE.md) runs with `python3 deploy/tests/level1-acceptance.py`. Its synthetic Compose phase checks image build, actual small-fixture legacy A → current B → legacy A switches, migration/persistence, startup guards and scale refusal. It uses no real token or full dataset and does not establish live acceptance.
