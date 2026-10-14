@@ -3,8 +3,11 @@ mod level1_support;
 mod support;
 
 use bot::dialogue::state::{Actor, State};
-use level1_support::{changed_bundle, fixture_bundle, DbFixture, Stand, CHAT, USER};
-use serde_json::json;
+use level1_support::{
+    assert_only_actor_timestamp_changed, changed_bundle, fixture_bundle, DbFixture, Stand, CHAT,
+    USER,
+};
+use serde_json::{json, Value};
 use std::{sync::atomic::Ordering, time::Duration};
 use support::message;
 use teloxide::prelude::*;
@@ -35,6 +38,75 @@ async fn stale(stand: &mut Stand, button: &(i32, String), db: &DbFixture) {
         "Эта кнопка устарела. Начните заново: /start"
     );
     assert_eq!(db.business_snapshot().await, before);
+}
+
+fn assert_only_empty_request_added(before: &Value, after: &Value, bundle_id: &str) {
+    let mut after = after.clone();
+    let requests = after["requests"].as_array_mut().expect("request rows");
+    assert_eq!(
+        requests.len(),
+        before["requests"].as_array().unwrap().len() + 1
+    );
+    let added = requests.pop().unwrap();
+    assert_eq!(added["tg_id"], USER);
+    assert_eq!(added["action_key"], format!("msg:{CHAT}:3"));
+    assert_eq!(added["raw_query"], "Тихий ноль");
+    assert_eq!(added["seed_mal_id"], 99);
+    assert_eq!(added["bundle_id"], bundle_id);
+    assert!(added["id"].as_i64().is_some());
+    assert!(added["created_at"].as_str().is_some());
+    assert!(added["resolved_at"].as_str().is_some());
+    assert_only_actor_timestamp_changed(before, &after);
+}
+
+#[test]
+fn level1_snapshot_guard_rejects_profile_and_history_mutations() {
+    let before = json!({
+        "users": [
+            {"tg_id": 42, "first_name": "Мария", "updated_at": "2026-01-01T00:00:00Z"},
+            {"tg_id": USER, "first_name": "Actor", "updated_at": "2026-01-01T00:00:00Z"}
+        ],
+        "legacy_requests": [{"tg_id": 42, "msg": "old"}],
+        "requests": [{"id": 1, "tg_id": 42, "raw_query": "old"}],
+        "anime_events": [{"id": 1, "tg_id": 42, "score": 9}],
+        "feedback": [{"id": 1, "tg_id": 42, "body": "old"}]
+    });
+    let mut valid = before.clone();
+    valid["users"][1]["updated_at"] = json!("2026-01-02T00:00:00Z");
+    valid["requests"].as_array_mut().unwrap().push(json!({
+        "id": 2, "tg_id": USER, "action_key": format!("msg:{CHAT}:3"),
+        "raw_query": "Тихий ноль", "seed_mal_id": 99, "bundle_id": "bundle",
+        "created_at": "2026-01-02T00:00:00Z", "resolved_at": "2026-01-02T00:00:00Z"
+    }));
+    assert_only_empty_request_added(&before, &valid, "bundle");
+    let mut mutations = Vec::new();
+    let mut changed = valid.clone();
+    changed["users"][1]["first_name"] = json!("wrong");
+    mutations.push(("actor profile", changed));
+    let mut changed = valid.clone();
+    changed["users"][0]["updated_at"] = json!("2026-01-02T00:00:00Z");
+    mutations.push(("other profile", changed));
+    let mut changed = valid.clone();
+    changed["requests"][0]["raw_query"] = json!("wrong");
+    mutations.push(("old request", changed));
+    let mut changed = valid.clone();
+    changed["legacy_requests"][0]["msg"] = json!("wrong");
+    mutations.push(("legacy history", changed));
+    let mut changed = valid.clone();
+    changed["anime_events"][0]["score"] = json!(1);
+    mutations.push(("rating history", changed));
+    let mut changed = valid.clone();
+    changed["feedback"][0]["body"] = json!("wrong");
+    mutations.push(("feedback history", changed));
+    for (label, snapshot) in mutations {
+        assert!(
+            std::panic::catch_unwind(|| {
+                assert_only_empty_request_added(&before, &snapshot, "bundle")
+            })
+            .is_err(),
+            "{label} mutation escaped snapshot guard"
+        );
+    }
 }
 
 #[tokio::test]
@@ -94,22 +166,18 @@ async fn level1_recommendations_alias() {
 async fn level1_empty() {
     let db = DbFixture::new("empty").await;
     let mut stand = Stand::new(db.db.clone(), fixture_bundle());
+    assert!(stand.say("/start").await);
+    let before = db.business_snapshot().await;
     stand.recommend("Тихий ноль", 99).await;
     assert_eq!(
         stand.last_text(),
         "Для этого аниме пока нет рекомендаций. Попробуйте другое: /recommend."
     );
-    let row = db
-        .direct
-        .query_one(
-            "SELECT raw_query,seed_mal_id,bundle_id FROM arb_requests WHERE tg_id=$1",
-            &[&(USER as i64)],
-        )
-        .await
-        .unwrap();
-    assert_eq!(row.get::<_, String>(0), "Тихий ноль");
-    assert_eq!(row.get::<_, Option<i32>>(1), Some(99));
-    assert_eq!(row.get::<_, String>(2), stand.ctx.bundle.identity());
+    assert_only_empty_request_added(
+        &before,
+        &db.business_snapshot().await,
+        stand.ctx.bundle.identity(),
+    );
     assert_eq!(count(&db, "arb_delivered_positions").await, 0);
     drop(stand);
     db.close().await;
@@ -231,6 +299,9 @@ async fn setup_stage(stand: &mut Stand, stage: &str) -> Option<(i32, String)> {
 #[ignore = "requires isolated ARB_TEST_DATABASE_URL"]
 async fn level1_navigation_all_stages() {
     let db = DbFixture::new("navigation").await;
+    let mut initial = Stand::new(db.db.clone(), fixture_bundle());
+    assert!(initial.say("/start").await);
+    drop(initial);
     for stage in ["query", "choice", "grade", "feedback"] {
         for reset in ["/cancel", "/start"] {
             let mut stand = Stand::new(db.db.clone(), fixture_bundle());
@@ -252,7 +323,11 @@ async fn level1_navigation_all_stages() {
                     .any(|(label, _, _)| label == "Рекомендации"));
             }
             assert_eq!(state(&stand).await, State::Idle);
-            assert_eq!(db.business_snapshot().await, before);
+            if reset == "/start" {
+                assert_only_actor_timestamp_changed(&before, &db.business_snapshot().await);
+            } else {
+                assert_eq!(db.business_snapshot().await, before);
+            }
             if let Some(button) = old {
                 stale(&mut stand, &button, &db).await;
             }

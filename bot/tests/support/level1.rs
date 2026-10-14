@@ -71,11 +71,12 @@ impl DbFixture {
             schema,
         }
     }
-    pub async fn business_snapshot(&self) -> String {
-        self.direct.query_one("SELECT jsonb_build_object(
+    pub async fn business_snapshot(&self) -> Value {
+        let snapshot: String = self.direct.query_one("SELECT jsonb_build_object(
           'legacy_users',(SELECT jsonb_agg(to_jsonb(t) ORDER BY tg_id) FROM test_users t),
           'legacy_requests',(SELECT jsonb_agg(to_jsonb(t) ORDER BY tg_id,msg) FROM test_request t),
           'legacy_feedback',(SELECT jsonb_agg(to_jsonb(t) ORDER BY tg_id,msg) FROM test_feedback t),
+          'users',(SELECT jsonb_agg(to_jsonb(t) ORDER BY tg_id) FROM arb_users t),
           'requests',(SELECT jsonb_agg(to_jsonb(t) ORDER BY id) FROM arb_requests t),
           'delivered',(SELECT jsonb_agg(to_jsonb(t) ORDER BY id) FROM arb_delivered_positions t),
           'anime_events',(SELECT jsonb_agg(to_jsonb(t) ORDER BY id) FROM arb_anime_rating_events t),
@@ -83,7 +84,8 @@ impl DbFixture {
           'recommendation_ratings',(SELECT jsonb_agg(to_jsonb(t) ORDER BY position_id) FROM arb_recommendation_ratings t),
           'feedback',(SELECT jsonb_agg(to_jsonb(t) ORDER BY id) FROM arb_feedback t),
           'migrations',(SELECT jsonb_agg(to_jsonb(t) ORDER BY version) FROM arb_schema_migrations t)
-          )::text", &[]).await.unwrap().get(0)
+          )::text", &[]).await.unwrap().get(0);
+        serde_json::from_str(&snapshot).unwrap()
     }
     pub async fn close(self) {
         let schema = self.schema.clone();
@@ -94,6 +96,39 @@ impl DbFixture {
             .await
             .unwrap();
     }
+}
+
+// Call only around an operation that legitimately upserts the test actor.
+// Every other column and every row of every table must still match exactly.
+pub fn assert_only_actor_timestamp_changed(before: &Value, after: &Value) {
+    let mut before = before.clone();
+    let mut after = after.clone();
+    let mut timestamps = Vec::new();
+    for snapshot in [&mut before, &mut after] {
+        let users = snapshot["users"].as_array_mut().expect("profile rows");
+        let actors: Vec<_> = users
+            .iter_mut()
+            .filter(|user| user["tg_id"] == USER)
+            .collect();
+        assert_eq!(actors.len(), 1, "expected one test actor profile");
+        let timestamp = actors.into_iter().next().unwrap()["updated_at"]
+            .as_str()
+            .expect("actor updated_at");
+        assert!(!timestamp.is_empty());
+        timestamps.push(timestamp.to_owned());
+        users
+            .iter_mut()
+            .find(|user| user["tg_id"] == USER)
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove("updated_at");
+    }
+    assert!(
+        timestamps[1] >= timestamps[0],
+        "actor timestamp moved backward"
+    );
+    assert_eq!(after, before, "unexpected business data change");
 }
 
 pub fn fixture_bundle() -> Arc<Bundle> {
