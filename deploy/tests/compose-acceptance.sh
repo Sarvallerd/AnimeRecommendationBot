@@ -14,9 +14,12 @@ PY
 project="arb019-ci-$(date +%s)-$RANDOM"
 temp=$(mktemp -d)
 chmod 755 "$temp"
+output="${ARB_LEVEL1_OUTPUT:-$temp}"
+mkdir -p "$output"
 export ARB_DATA_DIR="$temp/data" ARB_BOT_ENV="$temp/bot.env" ARB_POSTGRES_ENV="$temp/postgres.env"
 export ARB_UID="$(id -u)" ARB_GID="$(id -g)"
-mkdir -p "$ARB_DATA_DIR"
+export ARB_BUNDLE_DIR="$temp/not-selected"
+mkdir -p "$ARB_DATA_DIR" "$ARB_BUNDLE_DIR"
 cat > "$ARB_BOT_ENV" <<'ENV'
 TELOXIDE_TOKEN=0:ci
 DATABASE_URL=postgresql://anime_bot:a%24%40%2Fb@postgres:5432/anime_bot?sslmode=disable
@@ -25,12 +28,50 @@ cat > "$ARB_POSTGRES_ENV" <<'ENV'
 POSTGRES_PASSWORD=a$@/b
 ENV
 chmod 600 "$ARB_BOT_ENV" "$ARB_POSTGRES_ENV"
-compose() { docker compose --env-file deploy/compose.env.example -p "$project" -f compose.yaml -f deploy/tests/compose.ci.yaml "$@"; }
+compose() {
+    # The scoped WSL Docker wrapper does not inherit this shell's exported values.
+    # Pass only explicit disposable paths through Compose's own env file.
+    cat > "$temp/compose.env.next" <<ENV
+ARB_DATA_DIR=$ARB_DATA_DIR
+ARB_BUNDLE_DIR=$ARB_BUNDLE_DIR
+ARB_BOT_ENV=$ARB_BOT_ENV
+ARB_POSTGRES_ENV=$ARB_POSTGRES_ENV
+ARB_UID=$ARB_UID
+ARB_GID=$ARB_GID
+ARB_LOG=info
+ENV
+    chmod 600 "$temp/compose.env.next"
+    mv "$temp/compose.env.next" "$temp/compose.env"
+    docker compose --env-file "$temp/compose.env" -p "$project" -f compose.yaml -f deploy/tests/compose.ci.yaml "$@"
+}
 cleanup() {
-    compose down --volumes --remove-orphans >/dev/null 2>&1 || true
+    local original=$?
+    trap - EXIT INT TERM
+    set +e
+    compose --profile tools down --volumes --remove-orphans --rmi local --timeout 10 >/dev/null 2>&1
+    local down=$?
+    local remaining
+    remaining=$(compose ps -a -q 2>/dev/null)
+    docker image rm "${project}-bot:local" "${project}-builder:local" >/dev/null 2>&1 || true
+    local volume=0
+    docker volume inspect "${project}_postgres_data" >/dev/null 2>&1 && volume=1
+    local network=0 images=0
+    docker network inspect "${project}_level1" >/dev/null 2>&1 && network=1
+    docker image inspect "${project}-bot:local" >/dev/null 2>&1 && images=1
+    docker image inspect "${project}-builder:local" >/dev/null 2>&1 && images=1
+    if [[ $down -ne 0 || -n "$remaining" || $volume -ne 0 || $network -ne 0 || $images -ne 0 ]]; then
+        echo 'Owned synthetic Compose cleanup failed' >&2
+        exit 1
+    fi
     rm -rf "$temp"
+    if [[ $original -eq 0 ]]; then
+        echo LEVEL1_COMPOSE_CLEANUP_PASS
+    fi
+    exit "$original"
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 wait_exit_zero() {
     local service="$1" id state code
     for _ in {1..120}; do
@@ -69,13 +110,16 @@ assert_failure_gate() {
 }
 echo 'Building runtime and offline builder images'
 compose --profile tools build bot builder
+echo LEVEL1_COMPOSE_BUILD_PASS
 fixture_output=$(compose --profile tools run --rm --no-deps --entrypoint python builder /fixture/build-fixture.py)
 legacy_bundle=$(printf '%s\n' "$fixture_output" | sed -n 's/^LEGACY_BUNDLE=//p')
 bundle=$(printf '%s\n' "$fixture_output" | sed -n 's/^CURRENT_BUNDLE=//p')
 [[ "$legacy_bundle" == /data/bundles/sha256-* ]]
 [[ "$bundle" == /data/bundles/sha256-* ]]
-export ARB_BUNDLE_DIR="$ARB_DATA_DIR/bundles/${bundle##*/}"
-[[ -d "$ARB_BUNDLE_DIR" ]]
+legacy_dir="$ARB_DATA_DIR/bundles/${legacy_bundle##*/}"
+current_dir="$ARB_DATA_DIR/bundles/${bundle##*/}"
+export ARB_BUNDLE_DIR="$legacy_dir"
+[[ -d "$legacy_dir" && -d "$current_dir" && "$legacy_dir" != "$current_dir" ]]
 compose --profile tools run --rm --no-deps builder validate "$bundle" >/dev/null
 compose --profile tools run --rm --no-deps builder validate "$legacy_bundle" >/dev/null
 compose --profile tools run --rm --no-deps --entrypoint /opt/venv/bin/check_bundle builder "$legacy_bundle" >/dev/null
@@ -87,9 +131,27 @@ compose exec -T postgres psql -v ON_ERROR_STOP=1 -U anime_bot anime_bot < deploy
 compose up -d bot >/dev/null
 wait_exit_zero prepare
 wait_exit_zero bot
+assert_selection() {
+    local expected="$1" bot_id prepare_id source command
+    expected="sha256:${expected##*sha256-}"
+    [[ "$(docker network inspect "${project}_level1" --format '{{.Internal}}')" == true ]]
+    bot_id=$(compose ps -a -q bot)
+    prepare_id=$(compose ps -a -q prepare)
+    [[ -n "$bot_id" && -n "$prepare_id" ]]
+    source=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/artifacts"}}{{.Source}}{{end}}{{end}}' "$bot_id")
+    [[ "$source" == "$ARB_BUNDLE_DIR" ]]
+    [[ "$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/artifacts"}}{{.RW}}{{end}}{{end}}' "$bot_id")" == false ]]
+    [[ "$(docker inspect --format '{{.Config.User}}' "$bot_id")" == 10001:10001 ]]
+    command=$(docker inspect --format '{{json .Config.Cmd}}' "$bot_id")
+    [[ "$command" == '["--prepare"]' ]]
+    compose logs --no-color prepare | grep -F "Loaded recommendation bundle $expected (" >/dev/null
+    compose logs --no-color bot | grep -F "Loaded recommendation bundle $expected (" >/dev/null
+}
+assert_selection "$legacy_bundle"
 [[ "$(compose exec -T postgres psql -At -U anime_bot anime_bot -c 'SELECT string_agg(version::text, chr(44) ORDER BY version) FROM arb_schema_migrations')" == 1 ]]
 compose exec -T postgres psql -v ON_ERROR_STOP=1 -U anime_bot anime_bot < deploy/tests/history.sql >/dev/null
-compose exec -T postgres psql -At -U anime_bot anime_bot < deploy/tests/snapshot.sql > "$temp/before.json"
+compose exec -T postgres psql -At -U anime_bot anime_bot < deploy/tests/snapshot.sql > "$output/before.json"
+echo LEVEL1_COMPOSE_LEGACY_A_PASS
 # Inspect the actual mount and process credentials, then attempt a write as the runtime user.
 bot_id=$(compose ps -a -q bot)
 [[ "$(docker inspect --format '{{.Config.User}}' "$bot_id")" == 10001:10001 ]]
@@ -102,9 +164,32 @@ compose down >/dev/null
 compose up -d bot >/dev/null
 wait_exit_zero prepare
 wait_exit_zero bot
-compose exec -T postgres psql -At -U anime_bot anime_bot < deploy/tests/snapshot.sql > "$temp/after.json"
-diff -u "$temp/before.json" "$temp/after.json"
+assert_selection "$legacy_bundle"
+compose exec -T postgres psql -At -U anime_bot anime_bot < deploy/tests/snapshot.sql > "$output/after-restart.json"
+diff -u "$output/before.json" "$output/after-restart.json"
 [[ "$(compose exec -T postgres psql -At -U anime_bot anime_bot -c 'SELECT count(*) FROM arb_schema_migrations')" == 1 ]]
+postgres_id=$(compose ps -a -q postgres)
+postgres_volume=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Name}}{{end}}{{end}}' "$postgres_id")
+[[ -n "$postgres_id" && -n "$postgres_volume" ]]
+echo LEVEL1_COMPOSE_PERSISTENCE_PASS
+switch_bundle() {
+    local target="$1" expected="$2" label="$3"
+    compose stop bot >/dev/null
+    export ARB_BUNDLE_DIR="$target"
+    compose up -d --no-deps --no-build --force-recreate prepare >/dev/null
+    wait_exit_zero prepare
+    compose up -d --no-deps --no-build --force-recreate bot >/dev/null
+    wait_exit_zero bot
+    assert_selection "$expected"
+    [[ "$(compose ps -a -q postgres)" == "$postgres_id" ]]
+    [[ "$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Name}}{{end}}{{end}}' "$postgres_id")" == "$postgres_volume" ]]
+    compose exec -T postgres psql -At -U anime_bot anime_bot < deploy/tests/snapshot.sql > "$output/$label.json"
+    diff -u "$output/before.json" "$output/$label.json"
+}
+switch_bundle "$current_dir" "$bundle" current-B
+echo LEVEL1_COMPOSE_CURRENT_B_PASS
+switch_bundle "$legacy_dir" "$legacy_bundle" rollback-A
+echo LEVEL1_COMPOSE_ROLLBACK_A_PASS
 # Fail closed on a corrupt bundle before a database or Telegram connection is attempted.
 cp -a "$ARB_BUNDLE_DIR" "$temp/corrupt"
 chmod u+w "$temp/corrupt/manifest.json"
@@ -120,10 +205,11 @@ compose rm -sf bot prepare >/dev/null
 compose up -d bot >/dev/null
 wait_exit_zero prepare
 wait_exit_zero bot
-compose exec -T postgres psql -At -U anime_bot anime_bot < deploy/tests/snapshot.sql > "$temp/recovered.json"
-diff -u "$temp/before.json" "$temp/recovered.json"
+assert_selection "$legacy_bundle"
+compose exec -T postgres psql -At -U anime_bot anime_bot < deploy/tests/snapshot.sql > "$output/recovered.json"
+diff -u "$output/before.json" "$output/recovered.json"
 if compose up -d --scale bot=2 bot >/dev/null 2>&1; then
     echo 'Scaling the polling bot unexpectedly succeeded' >&2
     exit 1
 fi
-echo 'Compose acceptance passed: offline build, migrations, persistence, guards, and scale refusal'
+echo LEVEL1_COMPOSE_GUARDS_PASS

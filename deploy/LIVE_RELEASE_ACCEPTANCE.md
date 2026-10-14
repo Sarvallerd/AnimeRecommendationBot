@@ -1,5 +1,7 @@
 # Named release live acceptance (ARB-034)
 
+This is an optional historical live-service procedure. The standard automated stand is [level-1 acceptance](LEVEL1_ACCEPTANCE.md); its synthetic results do not count as the human UI observations required below. Unobserved live cases remain `PENDING`.
+
 This is the private, opt-in procedure for the existing user service. Run it only after ARB-034 has merged and the required checks on integrated `master` are green. The ARB-033 `preparation-report.json` proves full-input offline compatibility against synthetic history; it does not prove production history or Telegram UI. The ARB-034 verifier is read-only. The coordinator performs each service transition and records observations. Missing access or UI observation remains `PENDING`.
 
 Use the genuine existing Compose project and PostgreSQL volume. Retain the original immutable bundle, original bot image, original settings bytes, private credentials and database volume throughout. Never run the ARB-033 acceptance project's bot or put a real token in that project. One Telegram token has at most one poller. Local Docker and known local process inventory cannot exclude an unknown remote poller. Do not use `getUpdates` as a probe. A Telegram send and PostgreSQL write are not exactly once.
