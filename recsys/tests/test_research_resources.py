@@ -45,6 +45,103 @@ class ResourceSupervisorTests(unittest.TestCase):
                 return
         self.fail("worker handshake missing")
 
+    def launch_held(self, supervisor):
+        ready = self.root / f"ready-{self.number + 1}"
+        release = self.root / f"release-{self.number + 1}"
+        code = ("from pathlib import Path\nimport sys,time\n"
+                "Path(sys.argv[1]).write_text('ready')\n"
+                "while not Path(sys.argv[2]).exists():\n time.sleep(.01)\n")
+        handle = self.launch(supervisor, code, args=(str(ready), str(release)))
+        deadline = time.monotonic() + 5
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(.01)
+        self.assertTrue(ready.exists(), "worker handshake missing")
+        return handle, release
+
+    def test_initial_transient_proc_read_accepts_late_identity(self):
+        for missing in (FileNotFoundError, ProcessLookupError):
+            with self.subTest(missing=missing.__name__):
+                with resources.ResourceSupervisor() as supervisor:
+                    with mock.patch.object(resources, "_stat_fields", side_effect=missing("transient")) as stat:
+                        handle, release = self.launch_held(supervisor)
+                    self.assertEqual(stat.call_count, 1)
+                    job = supervisor._jobs[handle]
+                    self.assertIsNone(job.starttime)
+                    self.assertIsNone(job.outcome)
+                    self.assertIsNone(job.term_at)
+                    self.assertIsNone(supervisor.result(handle))
+
+                    self.assertEqual(supervisor.poll(wait_seconds=0).completed, ())
+                    self.assertIsNotNone(job.starttime)
+                    self.assertIsNone(job.outcome)
+                    self.assertIsNone(job.term_at)
+                    self.assertIsNone(supervisor.result(handle))
+                    release.write_text("go")
+                    result, completed = self.await_result(supervisor, handle)
+                    self.assertEqual((result.outcome, result.returncode, result.cleanup_complete),
+                                     ("ok", 0, True))
+                    self.assertEqual(completed, [handle])
+                    self.assertEqual(supervisor.poll(wait_seconds=0).completed, ())
+
+    def test_initial_nontransient_read_or_wrong_identity_remains_failed(self):
+        real_stat = resources._stat_fields
+        for wrong in ("group", "session", "io"):
+            with self.subTest(wrong=wrong):
+                def wrong_initial(pid):
+                    if wrong == "io":
+                        raise OSError("nontransient")
+                    fields = list(real_stat(pid))
+                    fields[2 if wrong == "group" else 3] += 1
+                    return tuple(fields)
+
+                with resources.ResourceSupervisor() as supervisor:
+                    with mock.patch.object(resources, "_stat_fields", side_effect=wrong_initial) as stat:
+                        handle, _release = self.launch_held(supervisor)
+                    self.assertEqual(stat.call_count, 1)
+                    job = supervisor._jobs[handle]
+                    self.assertEqual(job.outcome, "monitor_failed")
+                    self.assertIsNone(job.starttime)
+                    supervisor.poll(wait_seconds=0)
+                    self.assertEqual(job.outcome, "monitor_failed")
+                    self.assertIsNotNone(job.starttime)
+                    result, completed = self.await_result(supervisor, handle)
+                    self.assertEqual((result.outcome, result.returncode, result.cleanup_complete),
+                                     ("monitor_failed", -signal.SIGTERM, True))
+                    self.assertEqual(completed, [handle])
+
+    def test_inconsistent_late_identity_cannot_signal_unverified_group(self):
+        real_stat = resources._stat_fields
+        for wrong in ("birth", "session"):
+            with self.subTest(wrong=wrong):
+                with resources.ResourceSupervisor() as supervisor:
+                    with mock.patch.object(resources, "_stat_fields", side_effect=FileNotFoundError("transient")):
+                        handle, release = self.launch_held(supervisor)
+                    job = supervisor._jobs[handle]
+                    leader_reads = 0
+
+                    def inconsistent_second_read(pid):
+                        nonlocal leader_reads
+                        fields = list(real_stat(pid))
+                        if pid == job.pid:
+                            leader_reads += 1
+                            if leader_reads == 2:
+                                fields[4 if wrong == "birth" else 3] += 1
+                        return tuple(fields)
+
+                    with mock.patch.object(resources, "_stat_fields", side_effect=inconsistent_second_read):
+                        with mock.patch.object(resources.os, "killpg", side_effect=AssertionError("unverified killpg")) as kill:
+                            supervisor.poll(wait_seconds=0)
+                    self.assertGreaterEqual(leader_reads, 2)
+                    kill.assert_not_called()
+                    self.assertIsNone(job.starttime)
+                    self.assertEqual(job.outcome, "monitor_failed")
+                    self.assertIsNone(supervisor.result(handle))
+                    release.write_text("go")
+                    result, completed = self.await_result(supervisor, handle)
+                    self.assertEqual((result.outcome, result.returncode, result.cleanup_complete),
+                                     ("monitor_failed", 0, True))
+                    self.assertEqual(completed, [handle])
+
     def test_success_nonzero_signal_and_literal_argv(self):
         with resources.ResourceSupervisor() as supervisor:
             literal = "; touch should-not-exist"
