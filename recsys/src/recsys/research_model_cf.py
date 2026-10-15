@@ -240,13 +240,15 @@ def _seed_columns(seed_mal_ids, columns):
     return tuple(sorted(columns[item] for item in seed_mal_ids))
 
 
-def load(model_dir, manifest, inputs):
+def load(model_dir, manifest, inputs, *, backend="cpu"):
     import numpy as np
     from threadpoolctl import threadpool_limits
 
     kind = manifest["variant_id"]
     if kind not in ("itemknn", "puresvd") or _parameters(manifest["parameters"]) != kind:
         fail("research_model_invalid")
+    if backend not in ("cpu", "gpu") or (backend == "gpu" and kind != "puresvd"):
+        fail("research_backend_unsupported")
     positive = _validate_metadata(manifest["metadata"], kind, inputs)
     m = len(inputs.mal_ids)
     columns = {item: col for col, item in enumerate(inputs.mal_ids)}
@@ -300,19 +302,60 @@ def load(model_dir, manifest, inputs):
         fail("research_model_invalid")
     supported_items = positive > 0
     supported_items.setflags(write=False)
+    dots = None
+    if backend == "gpu" and rank:
+        from .research_gpu import CupyDenseDots
+        dots = CupyDenseDots(np.ascontiguousarray(np.asarray(factors), dtype=np.float64))
 
     class PureSVDScorer:
+        def __init__(self):
+            self.dots = dots
+            self.closed = False
+
+        def close(self):
+            if self.closed:
+                return
+            self.closed = True
+            if self.dots is not None:
+                owned, self.dots = self.dots, None
+                owned.close()
+
         def score(self, seed_mal_ids):
-            seeds = _seed_columns(seed_mal_ids, columns)
-            supported = sum(positive[col] > 0 for col in seeds)
-            if not seeds or not supported or rank == 0:
-                return ScoreVector(zeros, unavailable, 0)
-            with threadpool_limits(limits=1, user_api="blas"):
+            return self.score_many((seed_mal_ids,))[0]
+
+        def score_many(self, seed_sets):
+            if backend == "gpu" and self.closed:
+                fail("research_gpu_closed")
+            if type(seed_sets) is not tuple or len(seed_sets) > 128:
+                fail("research_model_invalid")
+            answer = [None] * len(seed_sets)
+            positions, profiles, supports = [], [], []
+            for position, seed_mal_ids in enumerate(seed_sets):
+                seeds = _seed_columns(seed_mal_ids, columns)
+                supported = sum(positive[col] > 0 for col in seeds)
+                if not seeds or not supported or rank == 0:
+                    answer[position] = ScoreVector(zeros, unavailable, 0)
+                    continue
+                # The CPU fold-in and the denominator are identical for both backends.
                 profile = np.asarray(factors[list(seeds)].sum(axis=0) / len(seeds),
                                      dtype=np.float64)
-                values = np.asarray(factors @ profile, dtype=np.float64)
-            if not np.isfinite(values).all():
-                fail("research_model_invalid")
-            return ScoreVector(values, supported_items, int(supported))
+                positions.append(position)
+                profiles.append(profile)
+                supports.append(int(supported))
+            if profiles:
+                if backend == "gpu":
+                    if self.dots is None:
+                        fail("research_gpu_closed")
+                    block = np.ascontiguousarray(np.asarray(profiles), dtype=np.float64)
+                    rows = self.dots.dot(block)
+                else:
+                    with threadpool_limits(limits=1, user_api="blas"):
+                        rows = tuple(np.asarray(factors @ profile, dtype=np.float64)
+                                     for profile in profiles)
+                for position, values, supported in zip(positions, rows, supports, strict=True):
+                    if not np.isfinite(values).all():
+                        fail("research_model_invalid")
+                    answer[position] = ScoreVector(values, supported_items, supported)
+            return tuple(answer)
 
     return PureSVDScorer()
