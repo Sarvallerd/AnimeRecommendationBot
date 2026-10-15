@@ -1,5 +1,9 @@
 # AnimeRecommendationBot agent guide
 
+## Reading order and durable context
+
+Start with [README.md](README.md) for task routes, then [docs/architecture.md](docs/architecture.md) for active boundaries and [docs/development.md](docs/development.md) for the verification map. Read the task specification and status in Notion before editing. For data, release, research, deployment and bundle contracts, follow the canonical guides linked from those pages. A chat transcript is not a durable specification or shared project memory; record accepted decisions, dependencies, reviewed SHA and evidence in the task and repository documentation. Existing artifacts bind source filenames and raw bytes, so a code move or regenerated manifest needs an explicit versioned migration, not a rewritten historical hash.
+
 ## Product and data
 
 - The bot is a Russian-language, private-chat anime recommendation bot. The runtime is Rust; one process polls each Telegram token.
