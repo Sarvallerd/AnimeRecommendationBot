@@ -13,7 +13,7 @@ import numpy as np
 from recsys.bundle import canonical_bytes
 from recsys.research_artifacts import read_json, stream_jsonl
 from recsys.research_models import fit_model, load_model, read_scoring_inputs
-from recsys.research_model_cf import _KNN, _SVD, _training_matrix, fit, load
+from recsys.research_model_cf import _KNN, _SVD, _seed_columns, _training_matrix, fit, load
 from recsys.research_protocol import ResearchError, sha
 from research_model_support import ModelFixture
 
@@ -82,6 +82,9 @@ class HandMatrixTests(unittest.TestCase):
         self.assertFalse(scorer.score((4,)).available.any())
         np.testing.assert_array_equal(scorer.score((1, 2)).values,
                                       scorer.score((2, 1)).values)
+        np.testing.assert_array_equal(scorer.score((3, 1, 2)).values,
+                                      scorer.score((2, 3, 1)).values)
+        self.assertEqual(_seed_columns((3, 1, 2), {1: 0, 2: 1, 3: 2}), (0, 1, 2))
         for seeds in ((1, 1), (True,), (99,), [1], tuple(range(11))):
             with self.subTest(seeds=seeds), self.assertRaises(ResearchError):
                 scorer.score(seeds)
@@ -105,8 +108,33 @@ class HandMatrixTests(unittest.TestCase):
         self.assertTrue(np.all(one.values[one.available] == 1 / 11))
         self.assertFalse(one.available[201:].any())
 
+    def test_knn_three_unequal_seed_contributions_have_exact_order_invariance(self):
+        ids = (1, 2, 3, 4)
+        inputs = SimpleNamespace(mal_ids=ids, train_stats={
+            "train_users": 1, "train_completed_rows": 4,
+            "items": {str(item): {"completed_users": 1, "positive_users": 1,
+                                  "rating_sum": 8, "rating_count": 1}
+                      for item in ids}})
+        np.save(self.root / "indptr.npy", np.array([0, 1, 2, 3, 3], dtype=np.int32))
+        np.save(self.root / "indices.npy", np.array([3, 3, 3], dtype=np.int32))
+        np.save(self.root / "weights.npy", np.array([.1, .2, .3], dtype=np.float64))
+        metadata = {"kind": "itemknn", "source": "fit/train-interactions.tsv.gz",
+                    "items": 4, "train_users": 1, "matrix_users": 1,
+                    "train_completed_rows": 4, "positive_rows": 4,
+                    "supported_items": 4, "edges": 3}
+        scorer = load(self.root, {"variant_id": "itemknn", "parameters": dict(_KNN),
+                                  "metadata": metadata,
+                                  "files": {name: {} for name in ("indptr.npy", "indices.npy",
+                                                                   "weights.npy")}}, inputs)
+        first = scorer.score((1, 2, 3))
+        permuted = scorer.score((2, 3, 1))
+        np.testing.assert_array_equal(first.values, permuted.values)
+        np.testing.assert_array_equal(first.available, permuted.available)
+        self.assertEqual(first.supported_seeds, 3)
+        self.assertEqual(first.available.tolist(), [False, False, False, True])
+
     def test_svd_exact_call_no_sigma_negative_scores_and_rank_zero(self):
-        right = np.array([[1., 0., -1., 7.], [0., 1., 0., 7.]])
+        right = np.array([[1., 1e-16, -1., 7.], [0., 1., 0., 7.]])
         fake = (np.empty((3, 2)), np.array([9., 3.]), right)
         with patch("recsys.research_model_cf.iter_training_rows", return_value=iter(self.rows)), \
              patch("sklearn.utils.extmath.randomized_svd", return_value=fake) as svd:
@@ -117,14 +145,18 @@ class HandMatrixTests(unittest.TestCase):
             "flip_sign": True, "random_state": 3737, "svd_lapack_driver": "gesdd"})
         self.assertEqual(metadata["effective_rank"], 2)
         self.assertEqual(np.load(self.root / "factors.npy").tolist(),
-                         [[1, 0], [0, 1], [-1, 0], [0, 0]])
+                         [[1, 0], [1e-16, 1], [-1, 0], [0, 0]])
         scorer = load(self.root, {"variant_id": "puresvd", "parameters": dict(_SVD),
                                   "metadata": metadata, "files": {"factors.npy": {}}}, self.inputs)
         answer = scorer.score((1,))
-        self.assertEqual(answer.values.tolist(), [1, 0, -1, 0])
+        self.assertEqual(answer.values.tolist(), [1, 1e-16, -1, 0])
         self.assertEqual(answer.available.tolist(), [True, True, True, False])
-        self.assertEqual(scorer.score((1, 4)).values.tolist(), [.5, 0, -.5, 0])
+        self.assertEqual(scorer.score((1, 4)).values.tolist(), [.5, 5e-17, -.5, 0])
         self.assertFalse(scorer.score((4,)).available.any())
+        np.testing.assert_array_equal(scorer.score((3, 1, 2)).values,
+                                      scorer.score((2, 3, 1)).values)
+        np.testing.assert_array_equal(scorer.score((3, 1, 2)).available,
+                                      scorer.score((2, 3, 1)).available)
 
         tiny = SimpleNamespace(mal_ids=(1, 2), train_stats={"train_users": 1,
             "train_completed_rows": 1, "items": {
@@ -139,7 +171,7 @@ class HandMatrixTests(unittest.TestCase):
         self.assertEqual(zero_metadata["effective_rank"], 0)
         zero_scorer = load(zero, {"variant_id": "puresvd", "parameters": dict(_SVD),
                                   "metadata": zero_metadata, "files": {"factors.npy": {}}}, tiny)
-        self.assertEqual(zero_scorer.score((1,)).supported_seeds, 1)
+        self.assertEqual(zero_scorer.score((1,)).supported_seeds, 0)
         self.assertFalse(zero_scorer.score((1,)).available.any())
 
 
@@ -220,6 +252,17 @@ class PublisherTests(unittest.TestCase):
                 manifest["files"][filename]["bytes"] = len(raw)
                 manifest["files"][filename]["sha256"] = sha(raw)
                 manifest_path.write_bytes(canonical_bytes(manifest))
+                with self.assertRaises(ResearchError):
+                    self.load_variant(model)
+
+    def test_rehashed_manifest_metadata_is_semantically_rejected(self):
+        for variant in ("itemknn", "puresvd"):
+            with self.subTest(variant=variant):
+                model = self.fit_variant(variant, f"{variant}-metadata")
+                path = model / "model-manifest.json"
+                manifest, _ = read_json(path)
+                manifest["metadata"]["matrix_users"] = 0
+                path.write_bytes(canonical_bytes(manifest))
                 with self.assertRaises(ResearchError):
                     self.load_variant(model)
 

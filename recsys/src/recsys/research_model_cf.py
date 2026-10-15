@@ -237,7 +237,7 @@ def _seed_columns(seed_mal_ids, columns):
             any(type(item) is not int or item not in columns for item in seed_mal_ids) or
             len(set(seed_mal_ids)) != len(seed_mal_ids)):
         fail("research_model_invalid")
-    return tuple(columns[item] for item in seed_mal_ids)
+    return tuple(sorted(columns[item] for item in seed_mal_ids))
 
 
 def load(model_dir, manifest, inputs):
@@ -306,7 +306,7 @@ def load(model_dir, manifest, inputs):
             seeds = _seed_columns(seed_mal_ids, columns)
             supported = sum(positive[col] > 0 for col in seeds)
             if not seeds or not supported or rank == 0:
-                return ScoreVector(zeros, unavailable, int(supported))
+                return ScoreVector(zeros, unavailable, 0)
             with threadpool_limits(limits=1, user_api="blas"):
                 profile = np.asarray(factors[list(seeds)].sum(axis=0) / len(seeds),
                                      dtype=np.float64)
