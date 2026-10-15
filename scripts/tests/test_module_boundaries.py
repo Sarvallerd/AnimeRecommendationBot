@@ -77,6 +77,15 @@ class BoundariesTest(unittest.TestCase):
         self.append("research_model_cf", "from .research_model_content import fit")
         self.assert_category("new_cycle")
 
+    def test_absolute_and_relative_self_imports_are_cycles(self) -> None:
+        for code in ("import recsys.release", "from . import release"):
+            with self.subTest(code=code):
+                path = self.source("release")
+                original = path.read_bytes()
+                self.append("release", code)
+                self.assert_category("new_cycle")
+                path.write_bytes(original)
+
     def test_inventory_and_unknown_internal_import(self) -> None:
         self.source("brand_new").write_text("", encoding="utf-8")
         self.assert_category("inventory_mismatch")

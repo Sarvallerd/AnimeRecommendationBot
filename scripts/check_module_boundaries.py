@@ -390,9 +390,9 @@ def check_repository(root: Path, stats: dict[str, int] | None = None) -> list[st
             if target not in inventory:
                 errors.append(f"unknown_import: {location}: missing internal module")
                 return
+            edges.add((source, target))
             if source == target:
                 return
-            edges.add((source, target))
             if source not in owners:
                 return
             src_group, dst_group = owners[source], owners[target]
