@@ -203,21 +203,23 @@ def _acquire():
             _SESSION = current
             return current
         except BaseException as exc:
-            cleanup_failed = False
+            cleanup_error = None
             try:
                 if adapter is not None:
                     adapter.close()
-            except Exception:
-                cleanup_failed = True
+            except BaseException as close_error:
+                cleanup_error = close_error
             try:
                 fcntl.flock(fd, fcntl.LOCK_UN)
             except OSError:
-                cleanup_failed = True
+                cleanup_error = cleanup_error or ResearchError("research_gpu_execution_failed")
             finally:
                 os.close(fd)
             if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                 raise
-            if cleanup_failed:
+            if cleanup_error is not None and not isinstance(cleanup_error, Exception):
+                raise cleanup_error
+            if cleanup_error is not None:
                 _error("research_gpu_execution_failed")
             if isinstance(exc, ResearchError):
                 raise
@@ -236,18 +238,20 @@ def _release(current):
         if current.refs:
             return
         _SESSION = None
-        cleanup_failed = False
+        cleanup_error = None
         try:
             current.adapter.close()
-        except Exception:
-            cleanup_failed = True
+        except BaseException as exc:
+            cleanup_error = exc
         try:
             fcntl.flock(current.fd, fcntl.LOCK_UN)
         except OSError:
-            cleanup_failed = True
+            cleanup_error = cleanup_error or ResearchError("research_gpu_execution_failed")
         finally:
             os.close(current.fd)
-        if cleanup_failed:
+        if cleanup_error is not None and not isinstance(cleanup_error, Exception):
+            raise cleanup_error
+        if cleanup_error is not None:
             _error("research_gpu_execution_failed")
 
 
@@ -331,7 +335,7 @@ class CupyDenseDots:
             try:
                 _release(current)
             finally:
-                if isinstance(exc, ResearchError):
+                if isinstance(exc, (KeyboardInterrupt, SystemExit, ResearchError)):
                     raise
                 _error("research_gpu_resource_limit" if isinstance(exc, MemoryError)
                        else "research_gpu_execution_failed")

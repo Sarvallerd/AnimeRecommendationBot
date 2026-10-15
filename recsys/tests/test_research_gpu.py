@@ -226,6 +226,43 @@ class CoreTests(unittest.TestCase):
         with gpu.CupyDenseDots(self.features) as next_dots:
             self.assertEqual(next_dots.dot(self.left).tolist(), [[4.0, 5.0]])
 
+    def test_constructor_control_flow_preserved_after_cleanup(self):
+        for interruption in (KeyboardInterrupt(), SystemExit(17)):
+            with self.subTest(interruption=type(interruption).__name__):
+                with patch.object(FakeCuda, "upload", side_effect=interruption):
+                    with self.assertRaises(type(interruption)) as caught:
+                        gpu.CupyDenseDots(self.features)
+                self.assertIs(caught.exception, interruption)
+                self.assertIsNone(gpu._SESSION)
+                self.assertTrue(FakeCuda.instances[-1].closed)
+                with gpu.CupyDenseDots(self.features) as again:
+                    self.assertEqual(again.dot(self.left).tolist(), [[4.0, 5.0]])
+
+    def test_release_control_flow_preserved_and_lease_freed(self):
+        for interruption in (KeyboardInterrupt(), SystemExit(23)):
+            with self.subTest(interruption=type(interruption).__name__):
+                dots = gpu.CupyDenseDots(self.features)
+                with patch.object(FakeCuda, "close", side_effect=interruption):
+                    with self.assertRaises(type(interruption)) as caught:
+                        dots.close()
+                self.assertIs(caught.exception, interruption)
+                self.assertIsNone(gpu._SESSION)
+                dots.close()
+                with gpu.CupyDenseDots(self.features) as again:
+                    self.assertEqual(again.dot(self.left).tolist(), [[4.0, 5.0]])
+
+    def test_acquire_control_flow_preserved_after_cleanup(self):
+        for interruption in (KeyboardInterrupt(), SystemExit(31)):
+            with self.subTest(interruption=type(interruption).__name__):
+                with patch.object(FakeCuda, "open", side_effect=interruption):
+                    with self.assertRaises(type(interruption)) as caught:
+                        gpu.gpu_execution().__enter__()
+                self.assertIs(caught.exception, interruption)
+                self.assertIsNone(gpu._SESSION)
+                self.assertTrue(FakeCuda.instances[-1].closed)
+                with gpu.gpu_execution():
+                    self.assertIsNotNone(gpu._SESSION)
+
     def test_real_fork_cannot_release_parent_lease(self):
         # Fork before NumPy or CUDA initializes any worker threads.
         code = textwrap.dedent("""\
