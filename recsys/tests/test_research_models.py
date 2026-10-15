@@ -111,20 +111,36 @@ class ModelTests(unittest.TestCase):
             np.save(path, np.array([1.0], dtype=np.float64))
             os.chmod(path, 0o644)
             return {"fixture": True}
-        backend = SimpleNamespace(CODE_FILES=("research_model_popularity.py",), fit=fit_stub)
-        output = self.fixture.root / "payload-model"
-        with patch("recsys.research_models.release_info", return_value=self.fixture.lock), \
-             patch("recsys.research_models._backend", return_value=backend):
-            fit_model(self.prepared, output, expected_prepared_identity=self.prepared_identity,
-                      variant_id="itemknn", code_revision="a" * 40)
-        self.assertEqual((output / "vector.npy").stat().st_mode & 0o777, 0o600)
-        self.assertEqual(output.stat().st_mode & 0o777, 0o700)
-        with (output / "vector.npy").open("ab") as stream:
-            stream.write(b"tamper")
-        with patch("recsys.research_models.release_info", return_value=self.fixture.lock), \
-             patch("recsys.research_models._backend", return_value=backend):
-            with self.assertRaises(ResearchError):
-                load_model(output, inputs=self.inputs())
+        backend = SimpleNamespace(CODE_FILES=("research_model_popularity.py",), fit=fit_stub,
+                                  load=lambda model_dir, manifest, inputs:
+                                      SimpleNamespace(score=lambda seeds: None))
+        for variant in ("itemknn", "puresvd"):
+            with self.subTest(variant=variant):
+                output = self.fixture.root / f"payload-{variant}"
+                with patch("recsys.research_models.release_info", return_value=self.fixture.lock), \
+                     patch("recsys.research_models._backend", return_value=backend):
+                    fit_model(self.prepared, output, expected_prepared_identity=self.prepared_identity,
+                              variant_id=variant, code_revision="a" * 40)
+                    loaded, _ = load_model(output, inputs=self.inputs())
+                    self.assertEqual(loaded["external_inputs"], {})
+                self.assertEqual((output / "vector.npy").stat().st_mode & 0o777, 0o600)
+                self.assertEqual(output.stat().st_mode & 0o777, 0o700)
+                path = output / "model-manifest.json"
+                original = path.read_bytes()
+                changed, _ = read_json(path)
+                changed["external_inputs"] = {"glove": {"bytes": 0, "sha256": "0" * 64}}
+                path.write_bytes(canonical_bytes(changed))
+                with patch("recsys.research_models.release_info", return_value=self.fixture.lock), \
+                     patch("recsys.research_models._backend", return_value=backend):
+                    with self.assertRaises(ResearchError):
+                        load_model(output, inputs=self.inputs())
+                path.write_bytes(original)
+                with (output / "vector.npy").open("ab") as stream:
+                    stream.write(b"tamper")
+                with patch("recsys.research_models.release_info", return_value=self.fixture.lock), \
+                     patch("recsys.research_models._backend", return_value=backend):
+                    with self.assertRaises(ResearchError):
+                        load_model(output, inputs=self.inputs())
 
     def test_content_asset_accepts_concrete_path_and_checks_lock(self):
         glove = self.fixture.root / "glove.txt"

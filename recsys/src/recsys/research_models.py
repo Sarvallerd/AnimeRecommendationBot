@@ -397,7 +397,7 @@ def load_model(model_dir, *, inputs: ScoringInputs):
             type(manifest["external_inputs"]) is not dict or
             manifest["producer"] != _producer(manifest["producer"]["code_revision"], backend)):
         fail("research_model_invalid")
-    if variant == "popularity" and manifest["external_inputs"]:
+    if variant in ("popularity", "itemknn", "puresvd") and manifest["external_inputs"]:
         fail("research_model_invalid")
     if variant.startswith("content-"):
         locked = release_info()["inputs"]["embeddings"]
