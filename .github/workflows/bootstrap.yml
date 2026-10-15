@@ -108,3 +108,7 @@ jobs:
           bash -n deploy/tests/full-catalog-acceptance.sh
       - name: Check dependency lockfiles
         run: git diff --exit-code -- uv.lock Cargo.lock
+      - name: Test local DVC storage
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/arb-data-venv
+        run: uv run --locked --only-group data python scripts/check_dvc.py

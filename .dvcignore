@@ -1,0 +1,11 @@
+.tools/
+.arb/
+.worktrees/
+.venv/
+.codex/
+target/
+__pycache__/
+.env
+.env.*
+*.pem
+*.key
