@@ -4,6 +4,7 @@ import sys
 import threading
 import textwrap
 import unittest
+import weakref
 from unittest.mock import patch
 
 import numpy as np
@@ -25,6 +26,10 @@ class FakeCuda:
         self.fail_close = False
         self.oom = False
         self.base_used = 0
+        self.current_used = 0
+        self.reserved = 0
+        self.peak_used = 0
+        self.peak_reserved = 0
         FakeCuda.instances.append(self)
 
     def open(self):
@@ -37,7 +42,28 @@ class FakeCuda:
         }, 256)
 
     def used_bytes(self):
-        return self.base_used
+        return self.current_used + self.base_used
+
+    def _track(self, value):
+        size = value.nbytes
+        self.current_used += size
+        self.reserved = max(self.reserved, self.used_bytes())
+        self.peak_used = max(self.peak_used, self.used_bytes())
+        self.peak_reserved = max(self.peak_reserved, self.reserved)
+        weakref.finalize(value, self._free, size)
+        return value
+
+    def _free(self, size):
+        self.current_used -= size
+
+    def memory_usage(self):
+        return {
+            "pool_used_bytes": self.used_bytes(),
+            "pool_reserved_bytes": self.reserved,
+            "pool_limit_bytes": 256,
+            "pool_peak_used_bytes": self.peak_used,
+            "pool_peak_reserved_bytes": self.peak_reserved,
+        }
 
     def upload(self, value):
         self.uploads += 1
@@ -45,14 +71,14 @@ class FakeCuda:
             raise MemoryError("private CUDA out of memory")
         if self.fail_upload:
             raise RuntimeError("private CUDA failure")
-        return value.copy()
+        return self._track(value.copy())
 
     def dot(self, left, right):
         if self.oom:
             raise MemoryError("private CUDA out of memory")
         if self.fail_dot:
             raise RuntimeError("private CUDA failure")
-        return left @ right.T
+        return self._track(left @ right.T)
 
     def download(self, value):
         return value.copy()
@@ -96,6 +122,36 @@ class CoreTests(unittest.TestCase):
             self.assert_code("research_gpu_unavailable", gpu.probe_gpu)
         with patch.object(gpu.sys, "platform", "darwin"):
             self.assert_code("research_gpu_unavailable", gpu.probe_gpu)
+
+    def test_memory_usage_tracks_short_lived_peak_and_resets(self):
+        self.assert_code("research_gpu_closed", gpu.gpu_memory_usage)
+        with gpu.gpu_execution():
+            first = gpu.gpu_memory_usage()
+            fields = {"pool_used_bytes", "pool_reserved_bytes", "pool_limit_bytes",
+                      "pool_peak_used_bytes", "pool_peak_reserved_bytes"}
+            self.assertEqual(set(first), fields)
+            self.assertTrue(all(type(value) is int for value in first.values()))
+            self.assertEqual(first["pool_peak_used_bytes"], 0)
+            with gpu.CupyDenseDots(self.features) as dots:
+                after_upload = gpu.gpu_memory_usage()
+                self.assertEqual(after_upload["pool_used_bytes"], self.features.nbytes)
+                with gpu.gpu_execution():
+                    self.assertEqual(gpu.gpu_memory_usage(), after_upload)
+                    self.assertEqual(dots.dot(self.left).tolist(), [[4.0, 5.0]])
+                after_dot = gpu.gpu_memory_usage()
+                self.assertEqual(after_dot["pool_used_bytes"], self.features.nbytes)
+                self.assertGreater(after_dot["pool_peak_used_bytes"],
+                                   after_dot["pool_used_bytes"])
+                self.assertGreaterEqual(after_dot["pool_peak_reserved_bytes"],
+                                        after_dot["pool_reserved_bytes"])
+            after_close = gpu.gpu_memory_usage()
+            self.assertEqual(after_close["pool_used_bytes"], 0)
+            self.assertEqual(after_close["pool_peak_used_bytes"],
+                             after_dot["pool_peak_used_bytes"])
+        self.assert_code("research_gpu_closed", gpu.gpu_memory_usage)
+        with gpu.gpu_execution():
+            self.assertEqual(gpu.gpu_memory_usage()["pool_peak_used_bytes"], 0)
+        self.assertEqual(len(FakeCuda.instances), 2)
 
     def test_metadata_copy_strict_expected_and_nested_probe(self):
         with gpu.gpu_execution() as metadata:
@@ -212,7 +268,8 @@ class CoreTests(unittest.TestCase):
             found = []
 
             def other_thread():
-                for call in (gpu.probe_gpu, lambda: dots.dot(self.left), dots.close):
+                for call in (gpu.probe_gpu, gpu.gpu_memory_usage,
+                             lambda: dots.dot(self.left), dots.close):
                     try:
                         call()
                     except ResearchError as exc:
@@ -221,9 +278,10 @@ class CoreTests(unittest.TestCase):
             worker = threading.Thread(target=other_thread)
             worker.start()
             worker.join()
-            self.assertEqual(found, ["research_gpu_busy"] * 3)
+            self.assertEqual(found, ["research_gpu_busy"] * 4)
             with patch.object(gpu.os, "getpid", return_value=os.getpid() + 1):
                 self.assert_code("research_gpu_process_mismatch", gpu.probe_gpu)
+                self.assert_code("research_gpu_process_mismatch", gpu.gpu_memory_usage)
                 self.assert_code("research_gpu_process_mismatch", lambda: dots.dot(self.left))
                 self.assert_code("research_gpu_process_mismatch", dots.close)
             self.assertEqual(dots.dot(self.left).tolist(), [[4.0, 5.0]])
@@ -238,12 +296,18 @@ class HardwareTests(unittest.TestCase):
 
     def test_float64_parity_shared_pool_and_cleanup(self):
         metadata = gpu.probe_gpu()  # Opt-in missing hardware must fail.
+        self.assert_code("research_gpu_closed", gpu.gpu_memory_usage)
         self.assertEqual(metadata["backend"], "cupy")
         features = np.arange(1, 257, dtype=np.float64).reshape(128, 2) / 11
         left = np.arange(1, 257, dtype=np.float64).reshape(128, 2) / 13
         with patch.object(gpu, "_new_adapter", wraps=gpu._new_adapter) as factory:
             with gpu.gpu_execution(metadata) as scoring:
                 self.assertEqual(scoring, metadata)
+                before_dots = gpu.gpu_memory_usage()
+                self.assertEqual(set(before_dots), {
+                    "pool_used_bytes", "pool_reserved_bytes", "pool_limit_bytes",
+                    "pool_peak_used_bytes", "pool_peak_reserved_bytes"})
+                self.assertTrue(all(type(value) is int for value in before_dots.values()))
                 first = gpu.CupyDenseDots(features)
                 second = gpu.CupyDenseDots(features.copy())
                 try:
@@ -251,6 +315,13 @@ class HardwareTests(unittest.TestCase):
                     self.assertEqual(gpu.probe_gpu(), metadata)
                     first.close()
                     output = second.dot(left)
+                    measured = gpu.gpu_memory_usage()
+                    self.assertGreater(measured["pool_peak_used_bytes"],
+                                       measured["pool_used_bytes"])
+                    self.assertGreaterEqual(measured["pool_peak_reserved_bytes"],
+                                            measured["pool_reserved_bytes"])
+                    self.assertEqual(measured["pool_limit_bytes"],
+                                     gpu._SESSION.adapter.pool.get_limit())
                     self.assertEqual(output.shape, (128, 128))
                     self.assertEqual(output.dtype, np.float64)
                     self.assertTrue(np.isfinite(output).all())
@@ -265,8 +336,15 @@ class HardwareTests(unittest.TestCase):
                 finally:
                     second.close()
                     first.close()
+                after_dots = gpu.gpu_memory_usage()
+                self.assertEqual(after_dots["pool_used_bytes"], 0)
+                self.assertEqual(after_dots["pool_peak_used_bytes"],
+                                 measured["pool_peak_used_bytes"])
         self.assertIsNone(gpu._SESSION)
+        self.assert_code("research_gpu_closed", gpu.gpu_memory_usage)
         with gpu.CupyDenseDots(np.asarray([[1.0]])) as again:
+            self.assertLess(gpu.gpu_memory_usage()["pool_peak_used_bytes"],
+                            measured["pool_peak_used_bytes"])
             self.assertEqual(again.dot(np.asarray([[2.0]])).tolist(), [[2.0]])
 
     def test_other_process_busy_then_acquires(self):

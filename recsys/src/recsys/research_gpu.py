@@ -22,6 +22,10 @@ _POOL_MAX = 6 * 1024**3
 _DEVICE_RESERVE = 2 * 1024**3
 _BATCH_MAX = 128
 _DEVICE_INDEX = 0
+_MEMORY_FIELDS = {
+    "pool_used_bytes", "pool_reserved_bytes", "pool_limit_bytes",
+    "pool_peak_used_bytes", "pool_peak_reserved_bytes",
+}
 _METADATA_FIELDS = {
     "backend", "dtype", "device_index", "device_name", "compute_capability",
     "cupy_version", "cuda_runtime_version", "cuda_driver_version",
@@ -78,6 +82,23 @@ class _CudaAdapter:
         self.pool = None
         self.previous_allocator = None
         self.allocator_set = False
+        self.peak_used_bytes = 0
+        self.peak_reserved_bytes = 0
+
+    def _pool_malloc(self, size):
+        pointer = self.pool.malloc(size)
+        self.peak_used_bytes = max(self.peak_used_bytes, int(self.pool.used_bytes()))
+        self.peak_reserved_bytes = max(self.peak_reserved_bytes, int(self.pool.total_bytes()))
+        return pointer
+
+    def memory_usage(self):
+        return {
+            "pool_used_bytes": int(self.pool.used_bytes()),
+            "pool_reserved_bytes": int(self.pool.total_bytes()),
+            "pool_limit_bytes": int(self.pool.get_limit()),
+            "pool_peak_used_bytes": self.peak_used_bytes,
+            "pool_peak_reserved_bytes": self.peak_reserved_bytes,
+        }
 
     def open(self):
         cp = self.cp
@@ -92,7 +113,7 @@ class _CudaAdapter:
         pool.set_limit(size=limit)
         self.previous_allocator = cp.cuda.get_allocator()
         self.pool = pool
-        cp.cuda.set_allocator(pool.malloc)
+        cp.cuda.set_allocator(self._pool_malloc)
         self.allocator_set = True
         # Check the pinned toolkit's compiler as well as the driver and BLAS path.
         kernel = cp.ElementwiseKernel("float64 x", "float64 y", "y = x",
@@ -248,6 +269,30 @@ def gpu_execution(expected_scoring: dict | None = None):
         yield dict(current.metadata)
     finally:
         _release(current)
+
+
+def gpu_memory_usage() -> dict:
+    """Return measured bytes of the active dedicated pool and its session peaks."""
+    with _GUARD:
+        current = _SESSION
+        if current is None:
+            _error("research_gpu_closed")
+        if current.pid != os.getpid():
+            _error("research_gpu_process_mismatch")
+        if current.thread != threading.get_ident():
+            _error("research_gpu_busy")
+        try:
+            usage = current.adapter.memory_usage()
+        except Exception:
+            _error("research_gpu_execution_failed")
+        if (type(usage) is not dict or set(usage) != _MEMORY_FIELDS or
+                any(type(value) is not int or value < 0 for value in usage.values()) or
+                usage["pool_used_bytes"] > usage["pool_peak_used_bytes"] or
+                usage["pool_reserved_bytes"] > usage["pool_peak_reserved_bytes"] or
+                usage["pool_used_bytes"] > usage["pool_reserved_bytes"] or
+                usage["pool_reserved_bytes"] > usage["pool_limit_bytes"]):
+            _error("research_gpu_execution_failed")
+        return dict(usage)
 
 
 def _matrix(value, *, rows_max=None, columns=None):
