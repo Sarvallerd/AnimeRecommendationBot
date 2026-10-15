@@ -299,6 +299,10 @@ class ResourceSupervisor:
             if group != proc.pid or session != proc.pid:
                 raise ValueError("group")
             job.starttime = birth
+        except (FileNotFoundError, ProcessLookupError):
+            # The new child can be temporarily absent from /proc. The next
+            # normal sample must establish its identity before acceptance.
+            pass
         except (OSError, ValueError):
             job.outcome = "monitor_failed"
             self._blocked = True
@@ -411,7 +415,8 @@ class ResourceSupervisor:
                     _state, _ppid, pgrp, session, birth, _rss = _stat_fields(job.pid)
                     if pgrp == job.pid and session == job.pid and birth == leader[2]:
                         job.starttime = birth
-                        self._stop(job, "monitor_failed")
+                        if job.outcome is not None:
+                            self._stop(job, job.outcome)
                 except (OSError, ValueError):
                     pass
             if job.starttime is None and job.term_at is None:
