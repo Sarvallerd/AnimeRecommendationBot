@@ -64,6 +64,7 @@ class DeclarationTests(unittest.TestCase):
         for change in (lambda p: p.update(bypass_actors=[{"actor_id": 1}]),
                        lambda p: p["rules"][3]["parameters"].update(required_approving_review_count=1),
                        lambda p: p["rules"][3]["parameters"].update(allowed_merge_methods=["squash", "merge"]),
+                       lambda p: p["rules"][3]["parameters"].update(require_extra_approval_for_unattributed_changes=True),
                        lambda p: p["rules"][4]["parameters"].update(extra=True)):
             with self.subTest(change=change), tempfile.TemporaryDirectory() as path:
                 policy = merge.load_policy()
@@ -121,6 +122,30 @@ class SnapshotTests(unittest.TestCase):
         snap["rulesets"][0].update(current_user_can_bypass="never", mystery_enforcement_setting=True)
         with self.assertRaisesRegex(merge.PolicyMismatch, "detail fields"):
             evaluate(snap, "check")
+
+    def test_preview_extra_approval_response_only_allows_absent_or_true(self) -> None:
+        field = "require_extra_approval_for_unattributed_changes"
+        self.assertEqual(evaluate(fixture(applied=True), "check")["action"], "noop")
+        for location in ("detail", "effective"):
+            with self.subTest(location=location, value=True):
+                snap = fixture(applied=True)
+                rules = snap["rulesets"][0]["rules"] if location == "detail" else snap["effective_rules"]
+                next(rule for rule in rules if rule["type"] == "pull_request")["parameters"][field] = True
+                self.assertEqual(evaluate(snap, "check")["action"], "noop")
+            for value in (False, 1, 0, None, "true", "false", [], {}):
+                with self.subTest(location=location, value=value):
+                    snap = fixture(applied=True)
+                    rules = snap["rulesets"][0]["rules"] if location == "detail" else snap["effective_rules"]
+                    next(rule for rule in rules if rule["type"] == "pull_request")["parameters"][field] = value
+                    with self.assertRaisesRegex(merge.PolicyMismatch, "extra approval"):
+                        evaluate(snap, "check")
+            snap = fixture(applied=True)
+            rules = snap["rulesets"][0]["rules"] if location == "detail" else snap["effective_rules"]
+            next(rule for rule in rules if rule["type"] == "pull_request")["parameters"].update(
+                {field: True, "unknown_neighbor": True})
+            with self.subTest(location=location, value="unknown neighbor"):
+                with self.assertRaises(merge.PolicyMismatch):
+                    evaluate(snap, "check")
 
     def test_repository_identity_permissions_and_master_race(self) -> None:
         changes = [lambda s: s["repository"].update(id=4),

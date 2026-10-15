@@ -92,6 +92,9 @@ def _rules(raw: object, *, server: bool = False) -> dict[str, dict]:
             _keys(rule, {"type", "parameters"}, kind)
             params = dict(rule["parameters"]) if type(rule["parameters"]) is dict else {}
             if server:
+                if "require_extra_approval_for_unattributed_changes" in params:
+                    if params.pop("require_extra_approval_for_unattributed_changes") is not True:
+                        raise PolicyError("invalid extra approval response")
                 if params.get("required_reviewers") == []:
                     params.pop("required_reviewers")
                 if params.get("dismissal_restriction") == {"enabled": False, "allowed_actors": []}:
