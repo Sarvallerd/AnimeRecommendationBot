@@ -82,8 +82,18 @@ UV_PROJECT_ENVIRONMENT=/tmp/arb-data-venv uv run --locked --only-group data dvc 
   data/snapshots/raw/glove-6b-300d-v1/glove.6B.300d.txt.dvc
 ```
 
-Для публикации из копии с уже проверенными файлами применяйте `dvc push -r local`
-с тем же явным списком указателей. После `pull` отдельно сверяйте SHA-256 и
+Для публикации из копии с уже проверенными файлами используйте:
+
+```sh
+UV_PROJECT_ENVIRONMENT=/tmp/arb-data-venv uv run --locked --only-group data dvc push -r local \
+  data/snapshots/datasets/sha256-78bb29bfe18a00519b5dcd06e9682e1c4c84528166f0c51a80d24ea28c7a62b6.dvc \
+  data/snapshots/aliases/sha256-ffa80087fc9d8bace4fe5517d7aa0fa7ba98bfed365988396b32828ec75a2403.dvc \
+  data/snapshots/releases/sha256-8da879636b476ffc9d72bf3a08447b778ef047232fc02cd69b1ed0ca02168b5c.dvc \
+  data/snapshots/raw/nafiul-2026-v1.dvc \
+  data/snapshots/raw/glove-6b-300d-v1/glove.6B.300d.txt.dvc
+```
+
+После `pull` отдельно сверяйте SHA-256 и
 размер каждого файла с доверенными манифестами и реестрами: DVC хеши отвечают
 за перенос, а принятые идентификаторы и release lock — за научную
 воспроизводимость. Изменяемый DVC checkout нельзя использовать как
