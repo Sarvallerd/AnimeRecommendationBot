@@ -30,6 +30,10 @@ jobs:
           python-version: '3.12'
       - name: Check agent setup
         run: python scripts/check_agent_setup.py
+      - name: Check Python module boundaries and repository guards
+        run: |
+          python3 scripts/check_module_boundaries.py
+          python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
       - name: Check patch whitespace
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}

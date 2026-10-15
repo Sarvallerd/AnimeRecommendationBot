@@ -15,6 +15,7 @@
 | Что меняется | Где смотреть и что запускать |
 | --- | --- |
 | Конфигурация ролей и правила задач | `python3 scripts/check_agent_setup.py`; [workflow](../.github/README.md) |
+| Границы Python-модулей | `python3 scripts/check_module_boundaries.py` и `python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v`; [карта подсистем](python-boundaries.md) |
 | Python-подготовка, выпуск и исследования | Установленный пакет и профильные `recsys/tests/` по [окружению](../dev/environment.md); входы и команды выпуска в [release](../recsys/RELEASE.md), исследовательский контракт в [research](../recsys/RESEARCH.md) |
 | Локальный DVC и метаданные снимков | Фикстурная проверка `scripts/check_dvc.py` в отдельном окружении группы `data`: [команда и проверка восстановления](data-versioning.md#настройка) |
 | Rust runtime и база | `cargo test --locked`, миграционные и профильные тесты; [сборка](../bot/docs/build.md), [база](../bot/docs/database.md) |
