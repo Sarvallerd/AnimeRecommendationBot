@@ -108,9 +108,9 @@ def _subreaper_state() -> int:
     return state.value
 
 
-def _stat_fields(pid: int) -> tuple[str, int, int, int, int, int]:
+def _stat_path(path: str) -> tuple[str, int, int, int, int, int]:
     """Return state, ppid, pgrp, session, starttime, RSS pages."""
-    with open(f"/proc/{pid}/stat", "rb") as stream:
+    with open(path, "rb") as stream:
         raw = stream.read(4096)
     end = raw.rfind(b")")
     if end < 0 or raw[end + 1 : end + 2] != b" ":
@@ -125,6 +125,35 @@ def _stat_fields(pid: int) -> tuple[str, int, int, int, int, int]:
     if rss_pages < 0:
         raise ValueError("stat")
     return state, int(fields[1]), int(fields[2]), int(fields[3]), int(fields[19]), rss_pages
+
+
+def _stat_fields(pid: int) -> tuple[str, int, int, int, int, int]:
+    return _stat_path(f"/proc/{pid}/stat")
+
+
+def _zombie_thread_rss(pid: int, pgrp: int, session: int) -> int:
+    """Count a zombie leader's live thread address space once, if present."""
+    largest = 0
+    try:
+        with os.scandir(f"/proc/{pid}/task") as tasks:
+            for task in tasks:
+                if not task.name.isdecimal():
+                    continue
+                try:
+                    state, _ppid, thread_group, thread_session, _birth, rss_pages = _stat_path(
+                        f"/proc/{pid}/task/{task.name}/stat")
+                except (FileNotFoundError, ProcessLookupError):
+                    continue
+                if thread_group != pgrp or thread_session != session:
+                    raise _error("unavailable")
+                if state != "Z":
+                    largest = max(largest, rss_pages)
+    except (FileNotFoundError, ProcessLookupError):
+        # An exited task may disappear between the process and task walks.
+        return largest
+    except (PermissionError, ValueError, OSError):
+        raise _error("unavailable") from None
+    return largest
 
 
 def _scan_groups(jobs: Sequence[_Job]) -> dict[int, dict[int, tuple[str, int, int, int]]]:
@@ -144,6 +173,8 @@ def _scan_groups(jobs: Sequence[_Job]) -> dict[int, dict[int, tuple[str, int, in
                     raise _error("unavailable") from None
                 continue
             if pgrp in wanted:
+                if state == "Z":
+                    rss_pages = max(rss_pages, _zombie_thread_rss(pid, pgrp, session))
                 groups[pgrp][pid] = (state, ppid, starttime, rss_pages)
     return groups
 
@@ -336,13 +367,13 @@ class ResourceSupervisor:
                 self._blocked = True
 
     @staticmethod
-    def _wait4_one(job: _Job, pid: int) -> bool:
+    def _wait4_one(job: _Job, pid: int) -> bool | None:
         try:
             got, status, usage = os.wait4(pid, os.WNOHANG)
         except OSError:
             return False
         if got == 0:
-            return False
+            return None
         job.wait4_peak = max(job.wait4_peak, max(0, usage.ru_maxrss) * 1024)
         if pid == job.pid:
             job.returncode = os.waitstatus_to_exitcode(status)
@@ -395,7 +426,7 @@ class ResourceSupervisor:
             return
         now = time.monotonic()
         current_by_pid = {
-            pid: sum(rss * os.sysconf("SC_PAGE_SIZE") for state, _ppid, _birth, rss in group.values() if state != "Z")
+            pid: sum(rss * os.sysconf("SC_PAGE_SIZE") for _state, _ppid, _birth, rss in group.values())
             for pid, group in groups.items()
         }
         current_total = sum(current_by_pid.values())
@@ -436,20 +467,24 @@ class ResourceSupervisor:
                 self._stop(job, "rss_limit")
             if time.monotonic() >= job.deadline:
                 self._stop(job, "timeout")
+            pending_descendant = False
             for pid, (state, ppid, birth, _rss) in group.items():
                 if pid == job.pid:
                     continue
                 if ppid == self._pid and state == "Z":
                     job.owned_descendants.add(pid)
-                    if not self._wait4_one(job, pid):
+                    waited = self._wait4_one(job, pid)
+                    if waited is None:
+                        pending_descendant = True
+                    elif waited is False:
                         self._stop(job, "monitor_failed")
+            observed = None
             if leader is not None:
                 try:
                     observed = os.waitid(os.P_PID, job.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
                 except OSError:
-                    observed = None
                     self._stop(job, "monitor_failed")
-                remaining = any(pid != job.pid and (state != "Z" or ppid != self._pid)
+                remaining = pending_descendant or any(pid != job.pid and (state != "Z" or ppid != self._pid)
                                 for pid, (state, ppid, _birth, _rss) in group.items())
                 if observed is not None and job.outcome is None and remaining:
                     self._stop(job, "descendants_remaining")
@@ -461,17 +496,18 @@ class ResourceSupervisor:
                     leader is None or leader[0] != "Z" or len(group) > 1):
                 self._finish(job, "cleanup_failed", clean=False)
                 continue
-            if leader_valid and len(group) == 1 and leader[0] == "Z" and job.empty_zombie_seen:
-                if self._wait4_one(job, job.pid):
+            confirmed_empty = leader_valid and len(group) == 1 and leader[0] == "Z" and observed is not None
+            if confirmed_empty and job.empty_zombie_seen:
+                waited = self._wait4_one(job, job.pid)
+                if waited is True:
                     outcome = job.outcome or ("ok" if job.returncode == 0 else "exit_nonzero")
                     self._finish(job, outcome)
-                else:
+                elif waited is False:
                     self._stop(job, "monitor_failed")
-            else:
-                # The unreaped zombie pins the PGID. A concurrent /proc walk
-                # can miss a descendant when the leader exits; a later walk
-                # checks again while inherited-group survivors remain visible.
-                job.empty_zombie_seen = leader_valid and len(group) == 1 and leader[0] == "Z"
+            # The unreaped zombie pins the PGID. Two consecutive waitable,
+            # empty walks guard against a concurrent descendant /proc entry.
+            # A zombie with live threads is not waitable and cannot count.
+            job.empty_zombie_seen = confirmed_empty
         self._sampled_peak = max(self._sampled_peak, current_total)
         self._samples += 1
         finished_sample = time.monotonic()

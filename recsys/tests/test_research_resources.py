@@ -58,6 +58,216 @@ class ResourceSupervisorTests(unittest.TestCase):
         self.assertTrue(ready.exists(), "worker handshake missing")
         return handle, release
 
+    @staticmethod
+    def threaded_exit_code():
+        return (
+            "import ctypes, os, sys, threading, time\n"
+            "from pathlib import Path\n"
+            "ready, release, count, mib = sys.argv[1:]\n"
+            "count, mib = int(count), int(mib)\n"
+            "barrier = threading.Barrier(count + 1)\n"
+            "def worker():\n"
+            " data = bytearray(mib * 1024 * 1024)\n"
+            " for offset in range(0, len(data), 4096):\n"
+            "  data[offset] = 88\n"
+            " barrier.wait()\n"
+            " while not Path(release).exists():\n"
+            "  time.sleep(.01)\n"
+            " os._exit(0)\n"
+            "for _ in range(count):\n"
+            " threading.Thread(target=worker).start()\n"
+            "barrier.wait()\n"
+            "Path(ready).write_text('ready')\n"
+            "libc = ctypes.CDLL(None)\n"
+            "libc.pthread_exit.argtypes = [ctypes.c_void_p]\n"
+            "libc.pthread_exit.restype = None\n"
+            "libc.pthread_exit(None)\n"
+        )
+
+    def wait_for_threaded_zombie(self, pid, *, waitable=False):
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                state = resources._stat_fields(pid)[0]
+                with os.scandir(f"/proc/{pid}/task") as tasks:
+                    live = [int(task.name) for task in tasks if task.name.isdecimal()
+                            and resources._stat_path(f"/proc/{pid}/task/{task.name}/stat")[0] != "Z"]
+                if state == "Z" and live:
+                    if waitable:
+                        self.assertIsNone(os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT))
+                    return live
+            except (FileNotFoundError, ProcessLookupError):
+                pass
+            time.sleep(.01)
+        self.fail("zombie leader with live threads not observed")
+
+    def launch_threaded(self, supervisor, *, count=1, mib=0, seconds=4):
+        ready = self.root / f"ready-{self.number + 1}"
+        release = self.root / f"release-{self.number + 1}"
+        handle = self.launch(supervisor, self.threaded_exit_code(), seconds=seconds,
+                             args=(str(ready), str(release), str(count), str(mib)))
+        deadline = time.monotonic() + 5
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(.01)
+        self.assertTrue(ready.exists(), "threaded worker handshake missing")
+        self.wait_for_threaded_zombie(supervisor._jobs[handle].pid, waitable=True)
+        return handle, release
+
+    def test_zombie_leader_live_thread_waits_then_completes_once(self):
+        with resources.ResourceSupervisor() as supervisor:
+            handle, release = self.launch_threaded(supervisor)
+            job = supervisor._jobs[handle]
+            for _ in range(3):
+                snapshot = supervisor.poll(wait_seconds=.05)
+                self.assertEqual(snapshot.completed, ())
+                self.assertEqual(snapshot.active_count, 1)
+                self.assertIsNone(supervisor.result(handle))
+                self.assertIsNone(job.term_at)
+                self.assertIsNone(job.returncode)
+                self.assertFalse(job.empty_zombie_seen)
+            release.write_text("go")
+            result, completed = self.await_result(supervisor, handle)
+            self.assertEqual((result.outcome, result.returncode, result.cleanup_complete), ("ok", 0, True))
+            self.assertEqual(completed, [handle])
+            self.assertEqual(supervisor.poll(wait_seconds=0).completed, ())
+
+    def test_two_empty_scans_must_both_observe_waitable_leader(self):
+        with resources.ResourceSupervisor() as supervisor:
+            handle = self.launch(supervisor, "print('done')")
+            leader = supervisor._jobs[handle].pid
+            deadline = time.monotonic() + 3
+            while os.waitid(os.P_PID, leader, os.WEXITED | os.WNOHANG | os.WNOWAIT) is None:
+                self.assertLess(time.monotonic(), deadline)
+                time.sleep(.01)
+            supervisor.poll(wait_seconds=0)
+            self.assertTrue(supervisor._jobs[handle].empty_zombie_seen)
+            with mock.patch.object(resources.os, "waitid", return_value=None):
+                supervisor.poll(wait_seconds=0)
+            self.assertFalse(supervisor._jobs[handle].empty_zombie_seen)
+            supervisor.poll(wait_seconds=0)
+            self.assertIsNone(supervisor.result(handle))
+            self.assertTrue(supervisor._jobs[handle].empty_zombie_seen)
+            self.assertEqual(supervisor.poll(wait_seconds=0).completed, (handle,))
+            self.assertEqual((supervisor.result(handle).outcome, supervisor.result(handle).returncode), ("ok", 0))
+
+    def test_zombie_leader_timeout_and_cancel_clean_live_threads(self):
+        for action in ("timeout", "cancelled"):
+            with self.subTest(action=action):
+                with resources.ResourceSupervisor() as supervisor:
+                    handle, _release = self.launch_threaded(supervisor, seconds=.6 if action == "timeout" else 4)
+                    pid = supervisor._jobs[handle].pid
+                    self.assertIsNone(supervisor.result(handle))
+                    if action == "cancelled":
+                        supervisor.cancel(handle)
+                    result, completed = self.await_result(supervisor, handle)
+                    self.assertEqual((result.outcome, result.cleanup_complete), (action, True))
+                    self.assertEqual(completed, [handle])
+                    self.assertFalse(Path(f"/proc/{pid}").exists())
+
+    def test_adopted_zombie_with_live_thread_requires_descendant_cleanup(self):
+        child_ready = self.root / "child-ready"
+        child_release = self.root / "child-release"
+        parent_release = self.root / "parent-release"
+        child_pid = self.root / "child-pid"
+        code = (
+            "import subprocess, sys, time\n"
+            "from pathlib import Path\n"
+            "child = subprocess.Popen([sys.executable, '-I', '-c', sys.argv[1], *sys.argv[2:6]])\n"
+            "Path(sys.argv[6]).write_text(str(child.pid))\n"
+            "while not Path(sys.argv[7]).exists():\n time.sleep(.01)\n"
+        )
+        with resources.ResourceSupervisor() as supervisor:
+            handle = self.launch(supervisor, code, args=(self.threaded_exit_code(), str(child_ready),
+                str(child_release), "1", "0", str(child_pid), str(parent_release)))
+            deadline = time.monotonic() + 5
+            while not child_pid.exists() and time.monotonic() < deadline:
+                time.sleep(.01)
+            self.assertTrue(child_pid.exists())
+            adopted_pid = int(child_pid.read_text())
+            self.wait_for_threaded_zombie(adopted_pid)
+            real_wait = resources.ResourceSupervisor._wait4_one
+            pending = []
+
+            def record_wait(job, pid):
+                result = real_wait(job, pid)
+                if pid == adopted_pid and result is None:
+                    pending.append(pid)
+                return result
+
+            with mock.patch.object(resources.ResourceSupervisor, "_wait4_one", side_effect=record_wait):
+                parent_release.write_text("go")
+                result, completed = self.await_result(supervisor, handle)
+            self.assertIn(adopted_pid, pending)
+            self.assertEqual((result.outcome, result.cleanup_complete), ("descendants_remaining", True))
+            self.assertEqual(completed, [handle])
+            self.assertFalse(Path(f"/proc/{adopted_pid}").exists())
+
+    def test_zombie_thread_rss_is_counted_once_per_process_and_aggregate(self):
+        with resources.ResourceSupervisor() as supervisor:
+            handle, release = self.launch_threaded(supervisor, count=2, mib=16)
+            pid = supervisor._jobs[handle].pid
+            live = self.wait_for_threaded_zombie(pid, waitable=True)
+            self.assertGreaterEqual(len(live), 2)
+            thread_rss = [resources._stat_path(f"/proc/{pid}/task/{tid}/stat")[5] for tid in live]
+            expected = max(thread_rss) * os.sysconf("SC_PAGE_SIZE")
+            self.assertGreater(expected, 24 * 1024**2)
+            supervisor.poll(wait_seconds=0)
+            sampled = supervisor._jobs[handle].current_rss
+            self.assertGreaterEqual(sampled, expected - 1024**2)
+            self.assertLess(sampled, expected + 1024**2)
+            self.assertLess(sampled, sum(thread_rss) * os.sysconf("SC_PAGE_SIZE"))
+            release.write_text("go")
+            self.assertEqual(self.await_result(supervisor, handle)[0].outcome, "ok")
+        with resources.ResourceSupervisor(rss_limit_bytes=65 * 1024**2) as supervisor:
+            handles = []
+            for _ in range(2):
+                handle, _release = self.launch_threaded(supervisor, count=2, mib=16)
+                handles.append(handle)
+            snapshot = supervisor.poll(wait_seconds=0)
+            self.assertGreater(snapshot.sampled_rss_bytes, supervisor.rss_limit_bytes)
+            results = [self.await_result(supervisor, handle)[0] for handle in handles]
+            self.assertEqual([result.outcome for result in results],
+                             ["aggregate_rss_limit", "aggregate_rss_limit"])
+            self.assertTrue(all(result.sampled_peak_rss_bytes < supervisor.rss_limit_bytes
+                                for result in results))
+            self.assertTrue(all(result.cleanup_complete for result in results))
+
+    def test_genuine_wait4_error_is_sticky_after_later_cleanup(self):
+        with resources.ResourceSupervisor() as supervisor:
+            handle = self.launch(supervisor, "print('done')")
+            leader = supervisor._jobs[handle].pid
+            real_wait4 = os.wait4
+            failed = []
+
+            def once(pid, flags):
+                if pid == leader and not failed:
+                    failed.append(pid)
+                    raise OSError("injected genuine wait failure")
+                return real_wait4(pid, flags)
+
+            with mock.patch.object(resources.os, "wait4", side_effect=once):
+                result, completed = self.await_result(supervisor, handle)
+            self.assertEqual(failed, [leader])
+            self.assertEqual((result.outcome, result.returncode, result.cleanup_complete),
+                             ("monitor_failed", 0, True))
+            self.assertEqual(completed, [handle])
+
+    def test_malformed_live_thread_stat_fails_closed(self):
+        with resources.ResourceSupervisor() as supervisor:
+            handle, _release = self.launch_threaded(supervisor)
+            real_stat = resources._stat_path
+
+            def malformed(path):
+                if "/task/" in path:
+                    raise ValueError("malformed live thread stat")
+                return real_stat(path)
+
+            with mock.patch.object(resources, "_stat_path", side_effect=malformed):
+                supervisor.poll(wait_seconds=0)
+            result, completed = self.await_result(supervisor, handle)
+            self.assertEqual((result.outcome, result.cleanup_complete), ("monitor_failed", True))
+            self.assertEqual(completed, [handle])
+
     def test_initial_transient_proc_read_accepts_late_identity(self):
         for missing in (FileNotFoundError, ProcessLookupError):
             with self.subTest(missing=missing.__name__):
