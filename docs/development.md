@@ -16,11 +16,14 @@
 | --- | --- |
 | Конфигурация ролей и правила задач | `python3 scripts/check_agent_setup.py`; [workflow](../.github/README.md) |
 | Python-подготовка, выпуск и исследования | Установленный пакет и профильные `recsys/tests/` по [окружению](../dev/environment.md); входы и команды выпуска в [release](../recsys/RELEASE.md), исследовательский контракт в [research](../recsys/RESEARCH.md) |
+| Локальный DVC и метаданные снимков | Фикстурная проверка `scripts/check_dvc.py` в отдельном окружении группы `data`: [команда и проверка восстановления](data-versioning.md#настройка) |
 | Rust runtime и база | `cargo test --locked`, миграционные и профильные тесты; [сборка](../bot/docs/build.md), [база](../bot/docs/database.md) |
 | Общий JSON-контракт | `python3 contracts/check_bundle.py tests/fixtures/bundle`, `python3 -m unittest discover -s contracts -p 'test_*.py'`; [спецификация](../contracts/README.md) |
 | Общее окружение и контейнеры | `python3 dev/tests/check_environment.py`; [окружение](../dev/environment.md), [Compose](../deploy/README.md) |
 | Стандартная приёмка | `python3 deploy/tests/level1-acceptance.py` с FakeTelegram, временной PostgreSQL и малым A→B→A; [ограничения и процедура](../deploy/LEVEL1_ACCEPTANCE.md) |
 | Полный каталог и живой диалог | Отдельная частная [процедура приёмки](../deploy/ACCEPTANCE.md); отсутствие наблюдаемого шага остаётся `PENDING` |
+
+Перед слиянием по процессу проекта должны пройти пять CI jobs: `agent-setup`, `python`, `rust` ([основной workflow](../.github/workflows/bootstrap.yml)), `compose` ([Compose workflow](../.github/workflows/compose.yml)) и `dev-environment` ([проверка окружения](../.github/workflows/dev-environment.yml)). DVC-фикстура выполняется внутри `python`.
 
 ## Канонические маршруты
 
