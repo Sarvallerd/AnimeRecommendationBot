@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
+import io
 import json
 from pathlib import Path
 import subprocess
@@ -194,6 +196,48 @@ class SnapshotTests(unittest.TestCase):
 
 
 class ApiTests(unittest.TestCase):
+    def test_plan_cli_exposes_create_and_noop_actions(self) -> None:
+        for applied, action in ((False, "create"), (True, "noop")):
+            with self.subTest(action=action):
+                snap = fixture(applied=applied)
+                completed = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+                for check in snap["check_runs"]:
+                    check["completed_at"] = completed
+
+                class FakeApi:
+                    def get_json(self, endpoint):
+                        if endpoint == merge.API:
+                            return snap["repository"]
+                        if endpoint == f"{merge.API}/branches/master":
+                            return snap["branch"]
+                        if endpoint == f"{merge.API}/branches/master/protection":
+                            raise merge.ApiStatus(404, "Branch not protected")
+                        if endpoint == f"{merge.API}/rulesets/77" and applied:
+                            return snap["rulesets"][0]
+                        raise AssertionError(f"unexpected GET {endpoint}")
+
+                    def get_pages(self, endpoint, **kwargs):
+                        if endpoint.startswith(f"{merge.API}/rulesets?"):
+                            return snap["ruleset_summaries"]
+                        if endpoint == f"{merge.API}/rules/branches/master":
+                            return snap["effective_rules"]
+                        if endpoint.startswith(f"{merge.API}/commits/{SHA}/check-runs?"):
+                            return snap["check_runs"]
+                        raise AssertionError(f"unexpected GET pages {endpoint}")
+
+                output = io.StringIO()
+                with patch.object(merge, "GhApi", return_value=FakeApi()), redirect_stdout(output):
+                    self.assertEqual(merge.main(["plan", "--expected-master-sha", SHA]), 0)
+                result = json.loads(output.getvalue())
+                self.assertEqual(result["schema_version"], 1)
+                self.assertEqual(result["mode"], "plan")
+                self.assertEqual(result["repository"], merge.REPOSITORY)
+                self.assertEqual(result["master_sha"], SHA)
+                self.assertEqual(result["action"], action)
+                self.assertEqual(result["result"], action)
+                self.assertEqual("ruleset_payload" in result, not applied)
+                self.assertEqual(result.get("ruleset_id"), 77 if applied else None)
+
     def test_only_get_and_fixed_host_headers(self) -> None:
         body = '{"id":631205863}'
         class Proc:

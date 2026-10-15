@@ -389,6 +389,8 @@ def main(argv: list[str] | None = None) -> int:
                 raise PolicyError("expected master SHA must be 40 lowercase hex characters")
             verdict = validate_snapshot(policy, collect_snapshot(GhApi(), expected), args.command)
             result.update(master_sha=expected, result=verdict["action"] if args.command == "plan" else "compliant")
+            if args.command == "plan":
+                result["action"] = verdict["action"]
             if verdict["ruleset_id"] is not None:
                 result["ruleset_id"] = verdict["ruleset_id"]
             if verdict["action"] == "create":
