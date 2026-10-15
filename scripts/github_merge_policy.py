@@ -303,9 +303,11 @@ def _validate_applied(policy: dict, detail: object, effective: object) -> int:
     if type(detail) is not dict or type(detail.get("id")) is not int:
         raise PolicyError("invalid ruleset detail")
     required_keys = set(policy) | {"id", "source_type", "source"}
-    metadata_keys = {"node_id", "_links", "created_at", "updated_at"}
+    metadata_keys = {"node_id", "_links", "created_at", "updated_at", "current_user_can_bypass"}
     if not required_keys <= set(detail) or set(detail) - required_keys - metadata_keys:
         raise PolicyMismatch("ruleset detail fields differ")
+    if "current_user_can_bypass" in detail and detail["current_user_can_bypass"] != "never":
+        raise PolicyMismatch("ruleset current user bypass differs")
     identifier = detail["id"]
     expected_top = {key: policy[key] for key in ("name", "target", "enforcement", "bypass_actors", "conditions")}
     for key, expected in expected_top.items():

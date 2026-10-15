@@ -104,6 +104,22 @@ class SnapshotTests(unittest.TestCase):
         with self.assertRaisesRegex(merge.PolicyMismatch, "detail fields"):
             evaluate(snap, "check")
 
+    def test_current_user_bypass_metadata_is_only_absent_or_never(self) -> None:
+        self.assertEqual(evaluate(fixture(applied=True), "check")["action"], "noop")
+        snap = fixture(applied=True)
+        snap["rulesets"][0]["current_user_can_bypass"] = "never"
+        self.assertEqual(evaluate(snap, "check")["action"], "noop")
+        for value in ("always", "pull_requests_only", "exempt", "sometimes", "", None, True, 0, []):
+            with self.subTest(value=value):
+                snap = fixture(applied=True)
+                snap["rulesets"][0]["current_user_can_bypass"] = value
+                with self.assertRaisesRegex(merge.PolicyMismatch, "current user bypass"):
+                    evaluate(snap, "check")
+        snap = fixture(applied=True)
+        snap["rulesets"][0].update(current_user_can_bypass="never", mystery_enforcement_setting=True)
+        with self.assertRaisesRegex(merge.PolicyMismatch, "detail fields"):
+            evaluate(snap, "check")
+
     def test_repository_identity_permissions_and_master_race(self) -> None:
         changes = [lambda s: s["repository"].update(id=4),
                    lambda s: s["repository"].update(full_name="other/repo"),
