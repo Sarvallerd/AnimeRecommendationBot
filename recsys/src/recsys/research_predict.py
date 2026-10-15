@@ -189,6 +189,7 @@ def predict_validation(prepared_dir, model_dir, output_dir, *, expected_prepared
     stage = None
     writer = None
     scorer = None
+    published = False
     scoring_ns = writing_ns = query_count = score_count = 0
     info = {"backend": backend}
     try:
@@ -267,30 +268,33 @@ def predict_validation(prepared_dir, model_dir, output_dir, *, expected_prepared
                     close = getattr(scorer, "close", None)
                     if callable(close):
                         close()
-        info.update({"status": "staged", "queries": query_count, "score_pairs": score_count,
+        info.update({"queries": query_count, "score_pairs": score_count,
                      "synchronized_scoring_seconds": scoring_ns / 1e9,
                      "encoding_gzip_write_seconds": writing_ns / 1e9,
                      "staging_wall_seconds": (perf_counter_ns() - start) / 1e9})
+        publish(stage, output_dir)
+        published = True
+        info.update({"status": "published",
+                     "publication_wall_seconds": (perf_counter_ns() - start) / 1e9})
         if measurements is not None:
             measurements.update(info)
         if measurement_output is not None:
             write_json(measurement_output, info)
-        publish(stage, output_dir)
         return output_dir / "prediction-manifest.json"
     except BaseException:
         if writer is not None:
             writer.abort()
         if stage is not None:
             cleanup(stage)
+        failure = {**info,
+                   "status": "published_measurement_failed" if published else "failed",
+                   "queries": query_count, "score_pairs": score_count,
+                   "elapsed_seconds": (perf_counter_ns() - start) / 1e9}
         if measurements is not None:
             measurements.clear()
-            measurements.update({**info, "status": "failed", "queries": query_count,
-                                 "score_pairs": score_count,
-                                 "elapsed_seconds": (perf_counter_ns() - start) / 1e9})
+            measurements.update(failure)
         if measurement_output is not None and not measurement_output.exists():
-            write_json(measurement_output, {**info, "status": "failed", "queries": query_count,
-                                            "score_pairs": score_count,
-                                            "elapsed_seconds": (perf_counter_ns() - start) / 1e9})
+            write_json(measurement_output, failure)
         raise
 
 

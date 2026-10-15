@@ -22,6 +22,62 @@ from test_research_model_content import _glove
 
 
 class BackendContractTests(unittest.TestCase):
+    def test_publication_failure_writes_failed_measurement_without_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = ModelFixture(directory)
+            prepared, identity = fixture.make_prepared()
+            model = fixture.fit_popularity(prepared, identity)
+            evidence = fixture.root / "evidence"
+            evidence.mkdir(mode=0o700)
+            measurement = evidence / "measure.json"
+            output = fixture.root / "prediction"
+            measured = {}
+            with patch("recsys.research_models.release_info", return_value=fixture.lock), \
+                 patch("recsys.research_predict.publish",
+                       side_effect=OSError("injected publication failure")):
+                with self.assertRaises(OSError):
+                    predict_validation(prepared, model, output,
+                                       expected_prepared_identity=identity,
+                                       measurements=measured,
+                                       measurement_output=measurement)
+            self.assertFalse(output.exists())
+            self.assertFalse(list(fixture.root.glob(".prediction.*")))
+            self.assertEqual(measured["status"], "failed")
+            self.assertEqual(read_json(measurement)[0], measured)
+            self.assertEqual(measurement.stat().st_mode & 0o777, 0o600)
+
+    def test_measurement_write_failure_keeps_published_output_honest(self):
+        from recsys.research_predict import write_json as original_write
+
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = ModelFixture(directory)
+            prepared, identity = fixture.make_prepared()
+            model = fixture.fit_popularity(prepared, identity)
+            evidence = fixture.root / "evidence"
+            evidence.mkdir(mode=0o700)
+            measurement = evidence / "measure.json"
+            output = fixture.root / "prediction"
+            measured = {}
+            failures = 0
+
+            def fail_once(path, body):
+                nonlocal failures
+                if path == measurement and failures == 0:
+                    failures += 1
+                    raise OSError("injected measurement failure")
+                return original_write(path, body)
+
+            with patch("recsys.research_models.release_info", return_value=fixture.lock), \
+                 patch("recsys.research_predict.write_json", side_effect=fail_once):
+                with self.assertRaises(OSError):
+                    predict_validation(prepared, model, output,
+                                       expected_prepared_identity=identity,
+                                       measurements=measured,
+                                       measurement_output=measurement)
+            self.assertTrue((output / "prediction-manifest.json").exists())
+            self.assertEqual(measured["status"], "published_measurement_failed")
+            self.assertEqual(read_json(measurement)[0], measured)
+
     def test_measurement_output_is_private_separate_and_no_replace(self):
         with tempfile.TemporaryDirectory() as directory:
             fixture = ModelFixture(directory)
@@ -243,7 +299,7 @@ class HardwareIntegrationTests(unittest.TestCase):
                                                measurement_output=measurement_path)
                         self.assertEqual(read_json(measurement_path)[0], measured)
                         self.assertEqual(measurement_path.stat().st_mode & 0o777, 0o600)
-                        self.assertEqual(measured["status"], "staged")
+                        self.assertEqual(measured["status"], "published")
                         self.assertTrue(measured["gpu_admission"]["complete_available_rankings_equal"])
                         self.assertGreater(measured["queries"], 0)
                         self.assertGreaterEqual(measured["dedicated_pool_session_including_admission"]
@@ -302,6 +358,13 @@ class HardwareIntegrationTests(unittest.TestCase):
                         predict_validation(prepared, model, fixture.root / "writer-fail",
                                            expected_prepared_identity=identity, backend="gpu")
                 self.assertFalse((fixture.root / "writer-fail").exists())
+                self.assertEqual(probe_gpu()["backend"], "cupy")
+                with patch("recsys.research_predict.publish",
+                           side_effect=OSError("fixture publication failure")):
+                    with self.assertRaises(OSError):
+                        predict_validation(prepared, model, fixture.root / "publish-fail",
+                                           expected_prepared_identity=identity, backend="gpu")
+                self.assertFalse((fixture.root / "publish-fail").exists())
                 self.assertEqual(probe_gpu()["backend"], "cupy")
 
     def test_two_loaded_gpu_scorers_share_session_and_close_independently(self):
