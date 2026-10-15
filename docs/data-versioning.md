@@ -50,8 +50,8 @@ UV_PROJECT_ENVIRONMENT=/tmp/arb-data-venv uv run --locked --only-group data pyth
 Передача выполняется явно по нужным указателям и с `-r local`, например:
 
 ```sh
-uv run --locked --only-group data dvc push -r local data/snapshots/path/to/snapshot.dvc
-uv run --locked --only-group data dvc pull -r local data/snapshots/path/to/snapshot.dvc
+UV_PROJECT_ENVIRONMENT=/tmp/arb-data-venv uv run --locked --only-group data dvc push -r local data/snapshots/path/to/snapshot.dvc
+UV_PROJECT_ENVIRONMENT=/tmp/arb-data-venv uv run --locked --only-group data dvc pull -r local data/snapshots/path/to/snapshot.dvc
 ```
 
 Отдельная сверка SHA-256 оригинала и восстановленного файла остаётся обязательной:

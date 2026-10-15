@@ -107,11 +107,19 @@ def main() -> None:
                 assert_bad(repo, storage, "mode 0600")
             finally:
                 local_file.chmod(0o600)
-            storage.chmod(0o755)
-            try:
-                assert_bad(repo, storage, "mode 0700")
-            finally:
-                storage.chmod(0o700)
+            for directory in (storage, storage / "cache", storage / "remote"):
+                for wrong_mode in (0o500, 0o600, 0o755):
+                    directory.chmod(wrong_mode)
+                    try:
+                        assert_bad(repo, storage, "mode 0700")
+                        try:
+                            configure(repo, storage, check_only=True)
+                        except StorageError as exc:
+                            assert "mode 0700" in str(exc), str(exc)
+                        else:
+                            raise AssertionError(f"check accepted {oct(wrong_mode)} on {directory}")
+                    finally:
+                        directory.chmod(0o700)
             for path in (storage, storage / "cache", storage / "remote"):
                 assert_private(path, True)
             assert_private(repo / ".dvc/config.local", False)

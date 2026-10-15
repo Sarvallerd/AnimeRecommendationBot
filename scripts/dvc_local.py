@@ -72,14 +72,14 @@ def _private_dir(path: Path, *, create: bool) -> None:
         raise StorageError(f"storage directory must not be a symlink: {path}")
     if path.exists():
         info = path.stat()
-        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
             raise StorageError(f"storage directory must be owned by this user and mode 0700: {path}")
     elif create:
         path.mkdir(parents=True, mode=0o700)
     else:
         raise StorageError(f"storage directory is missing: {path}")
-    if path.stat().st_mode & 0o077:
-        raise StorageError(f"storage directory is not private: {path}")
+    if stat.S_IMODE(path.stat().st_mode) != 0o700:
+        raise StorageError(f"storage directory must have mode 0700: {path}")
 
 
 def _local_config(repo: Path) -> configparser.ConfigParser | None:
@@ -159,6 +159,8 @@ def configure(repo: Path, requested: Path | None = None, *, check_only: bool = F
             raise StorageError("missing local cache.dir")
         requested = Path(cache).parent
     root = _storage_root(repo, requested)
+    if root.exists():
+        _private_dir(root, create=False)
     for path in (root, root / "cache", root / "remote"):
         _components_without_links(path)
     if prior is not None:
