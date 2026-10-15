@@ -12,16 +12,17 @@ import time
 import shutil
 import uuid
 import recsys
+import numpy as np
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from recsys.research_artifacts import read_json
+from recsys.research_artifacts import StreamWriter, read_json, stream_jsonl
 from recsys.research_campaign import (run_campaign, validate_campaign, _worker_main,
     _expected_nodes, _plan, _canonical, _digest, _private_file, _Journal,
     _worker_request, _worker_env, _remaining, _successes, FIT_SECONDS)
-from recsys.research_protocol import ResearchError
+from recsys.research_protocol import ResearchError, load_protocol, split_user
 from research_model_support import ModelFixture
 from test_research_model_content import _glove
 
@@ -135,6 +136,88 @@ class CampaignTests(unittest.TestCase):
                         code_revision="a" * 40, glove=glove, backend="cpu", cpu_workers=2,
                         resume=True, expected_campaign_identity=manifest["plan_identity"])
                 self.assertEqual((orphan / "model-manifest.json").read_bytes(), before)
+
+    def test_twenty_users_publish_paired_three_order_means_and_fixed_bootstrap(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = ModelFixture(temporary)
+            protocol = load_protocol()
+            validation = {user for user in fixture.users
+                          if split_user(user, protocol) == "validation"}
+            extra = set()
+            candidate = 0
+            while len(validation | extra) < 20:
+                user = "u1_" + hashlib.sha256(f"campaign-public-{candidate}".encode()).hexdigest()
+                if user not in fixture.users and split_user(user, protocol) == "validation":
+                    extra.add(user)
+                candidate += 1
+            self.assertEqual(len(validation | extra), 20)
+            training = fixture.dataset / "interactions.tsv.gz"
+            training.unlink()
+            writer = StreamWriter(training)
+            writer.write(b"dataset_user_key\tmal_id\trating\twatch_status\n")
+            for user in sorted(set(fixture.users) | extra):
+                for item in fixture.items[:17]:
+                    writer.write(f"{user}\t{item}\t{8 + item % 3}\tcompleted\n".encode())
+                writer.write(f"{user}\t18\t7\twatching\n".encode())
+            writer.close()
+            glove = Path(temporary) / "glove.txt"
+            fixture.lock["inputs"]["embeddings"] = _glove(glove)
+            prepared, identity = fixture.make_prepared()
+            output = Path(temporary) / "campaign"
+            with patch("recsys.research_models.release_info", return_value=fixture.lock), \
+                 patch("recsys.research_resources.ResourceSupervisor", _Supervisor):
+                manifest_path = run_campaign(prepared, output,
+                    expected_prepared_identity=identity, code_revision="a" * 40,
+                    glove=glove, backend="cpu", cpu_workers=2)
+                manifest, _ = read_json(manifest_path)
+                self.assertEqual(manifest["status"], "complete")
+                report = validate_campaign(prepared, output,
+                    expected_prepared_identity=identity,
+                    expected_campaign_identity=manifest["plan_identity"])
+            self.assertEqual(report["primary_users"], 20)
+            self.assertFalse(report["small_cohort_suppressed"])
+            matrices = {}
+            for variant in ("popularity", "hybrid"):
+                artifact = (output / "variants" / variant / "attempts" / "evaluate" / "1" /
+                            "artifact")
+                evaluation, _ = read_json(artifact / "evaluation-manifest.json")
+                rows = stream_jsonl(artifact / "user-metrics.jsonl.gz",
+                                    evaluation["files"]["user-metrics.jsonl.gz"])
+                cells = {}
+                for row in rows:
+                    if (row["cohort"] == "main" and row["mask"] == "controlled" and
+                            row["order"].startswith("random-liked-") and row["n"] > 0):
+                        cells[(row["user_key"], row["n"], row["order"])] = row["metrics"]["ndcg5"]
+                users = sorted({user for user, _n, _order in cells})
+                self.assertEqual(len(users), 20)
+                matrix = np.asarray([
+                    [sum(cells[(user, n, f"random-liked-{order}")]
+                         for order in (1, 2, 3)) / 3 for n in range(1, 11)]
+                    for user in users], dtype=np.float64)
+                matrices[variant] = matrix
+                np.testing.assert_allclose(
+                    report["primary_ndcg5"][variant]["mean_ndcg5_by_n"],
+                    matrix.mean(axis=0), rtol=0, atol=1e-15)
+            delta = matrices["hybrid"] - matrices["popularity"]
+            paired = report["paired_vs_popularity"]["hybrid"]
+            np.testing.assert_allclose(paired["mean_difference_by_n"],
+                                       delta.mean(axis=0), rtol=0, atol=1e-15)
+            self.assertEqual((paired["bootstrap_replicates"], paired["bootstrap_seed"]),
+                             (2000, 366))
+            rng = np.random.Generator(np.random.PCG64(366))
+            draws = np.asarray([delta[rng.integers(0, 20, 20)].mean(axis=0)
+                                for _ in range(2000)])
+            expected = [[float(np.quantile(draws[:, index], .025, method="lower")),
+                         float(np.quantile(draws[:, index], .975, method="higher"))]
+                        for index in range(10)]
+            np.testing.assert_allclose(paired["pointwise_ci95_by_n"], expected,
+                                       rtol=0, atol=1e-15)
+            public = json.dumps(report, ensure_ascii=False)
+            self.assertNotIn("chosen_n", public)
+            self.assertNotIn(str(output), public)
+            self.assertNotRegex(public, r"u1_[0-9a-f]{64}")
+            for private_key in ("user_key", "query_id", "seed_mal_ids", "ranking"):
+                self.assertNotIn(private_key, public)
 
     def test_shared_auxiliary_fit_budget_and_journal_clock_regression(self):
         with tempfile.TemporaryDirectory() as temporary:
