@@ -102,7 +102,7 @@ class _LRU:
 
 
 class ContentScorer:
-    def __init__(self, ids, vectors, ready, variant):
+    def __init__(self, ids, vectors, ready, variant, *, backend="cpu"):
         import numpy as np
         self.ids = np.asarray(ids, dtype=np.int64)
         self.lookup = {item: index for index, item in enumerate(ids)}
@@ -110,22 +110,36 @@ class ContentScorer:
         self.ready = ready
         self.variant = variant
         self.cache = _LRU()
+        self.backend = backend
+        self.dots = None
+        if backend == "gpu":
+            from .research_gpu import CupyDenseDots
+            self.dots = CupyDenseDots(np.ascontiguousarray(np.asarray(vectors),
+                                                          dtype=np.float64))
+        elif backend != "cpu":
+            fail("research_backend_unsupported")
+
+    def close(self):
+        if self.dots is not None:
+            dots, self.dots = self.dots, None
+            dots.close()
 
     def _row(self, index):
         import numpy as np
         row = np.einsum("ik,jk->ij", self.vectors[index:index + 1],
                         self.vectors, optimize=False)[0]
+        return self._finish_row(row)
+
+    @staticmethod
+    def _finish_row(row):
+        import numpy as np
         if not np.isfinite(row).all() or np.any(row > 1 + 1e-12):
             fail("research_model_invalid")
         np.minimum(row, 1.0, out=row)
         return row
 
-    def _source(self, index):
+    def _pack_source(self, index, row):
         import numpy as np
-        cached = self.cache.get(index)
-        if cached is not None:
-            return cached
-        row = self._row(index)
         if self.variant != "content-union":
             return self.cache.put(index, row)
         candidates = np.flatnonzero(self.ready & (row > 0))
@@ -136,15 +150,55 @@ class ContentScorer:
         top = np.asarray(candidates[order[:110]], dtype=np.int32)
         return self.cache.put(index, top)
 
-    def score(self, seed_mal_ids):
+    def _source(self, index):
+        cached = self.cache.get(index)
+        if cached is not None:
+            return cached
+        if self.backend == "gpu":
+            self._prefetch((index,))
+            return self.cache.get(index)
+        return self._pack_source(index, self._row(index))
+
+    def _prefetch(self, indices):
         import numpy as np
+        if self.dots is None:
+            fail("research_gpu_closed")
+        missing = tuple(dict.fromkeys(index for index in indices
+                                      if self.cache.get(index) is None))
+        for offset in range(0, len(missing), 128):
+            block = missing[offset:offset + 128]
+            left = np.ascontiguousarray(np.asarray(self.vectors[list(block)]),
+                                        dtype=np.float64)
+            rows = self.dots.dot(left)
+            for index, row in zip(block, rows, strict=True):
+                # A view would retain the whole GPU result batch outside the LRU budget.
+                self._pack_source(index, self._finish_row(row.copy()))
+
+    def _validated(self, seed_mal_ids):
         if (type(seed_mal_ids) is not tuple or len(seed_mal_ids) > 10 or
                 any(type(item) is not int or item not in self.lookup
                     for item in seed_mal_ids) or
                 len(set(seed_mal_ids)) != len(seed_mal_ids)):
             fail("research_model_invalid")
-        supported = [self.lookup[item] for item in sorted(seed_mal_ids)
-                     if self.ready[self.lookup[item]]]
+        return tuple(self.lookup[item] for item in sorted(seed_mal_ids)
+                     if self.ready[self.lookup[item]])
+
+    def score(self, seed_mal_ids):
+        if self.backend == "gpu":
+            return self.score_many((seed_mal_ids,))[0]
+        return self._score_validated(seed_mal_ids, self._validated(seed_mal_ids))
+
+    def score_many(self, seed_sets):
+        if type(seed_sets) is not tuple or len(seed_sets) > 128:
+            fail("research_model_invalid")
+        supported = tuple(self._validated(seeds) for seeds in seed_sets)
+        if self.backend == "gpu":
+            self._prefetch(index for group in supported for index in group)
+        return tuple(self._score_validated(seeds, group)
+                     for seeds, group in zip(seed_sets, supported, strict=True))
+
+    def _score_validated(self, seed_mal_ids, supported):
+        import numpy as np
         values = np.zeros(len(self.ids), dtype=np.float64)
         available = np.zeros(len(self.ids), dtype=np.bool_)
         if not supported:
@@ -170,7 +224,7 @@ class ContentScorer:
         return models.ScoreVector(values, available, len(supported))
 
 
-def load(model_dir, manifest, inputs):
+def load(model_dir, manifest, inputs, *, backend="cpu"):
     """Recheck the payload semantics after the common manifest and hash checks."""
     import numpy as np
 
@@ -204,4 +258,4 @@ def load(model_dir, manifest, inputs):
             int(np.count_nonzero(ready)) != metadata["ready_items"] or
             not np.all(np.abs(np.linalg.norm(vectors[ready], axis=1) - 1) <= 1e-12)):
         fail("research_model_invalid")
-    return ContentScorer(inputs.mal_ids, vectors, ready, variant)
+    return ContentScorer(inputs.mal_ids, vectors, ready, variant, backend=backend)
