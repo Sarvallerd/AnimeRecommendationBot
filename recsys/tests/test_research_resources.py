@@ -106,6 +106,40 @@ class ResourceSupervisorTests(unittest.TestCase):
             child = int((self.root / "log-1/stdout.log").read_text().strip())
             self.assertFalse(Path(f"/proc/{child}").exists())
 
+    def test_incomplete_first_scan_cannot_reap_leader_with_live_descendant(self):
+        code = ("import subprocess,sys; "
+                "p=subprocess.Popen([sys.executable,'-I','-c','import time; time.sleep(60)']); "
+                "print(p.pid,flush=True)")
+        with resources.ResourceSupervisor() as supervisor:
+            h = self.launch(supervisor, code)
+            leader = supervisor._jobs[h].pid
+            log = self.root / "log-1/stdout.log"
+            deadline = time.monotonic() + 3
+            while (not log.exists() or not log.read_text().strip()) and time.monotonic() < deadline:
+                time.sleep(.01)
+            child = int(log.read_text().strip())
+            while (os.waitid(os.P_PID, leader, os.WEXITED | os.WNOHANG | os.WNOWAIT) is None
+                   and time.monotonic() < deadline):
+                time.sleep(.01)
+            self.assertIsNotNone(os.waitid(os.P_PID, leader, os.WEXITED | os.WNOWAIT))
+            real_scan = resources._scan_groups
+            hidden = []
+
+            def incomplete_once(jobs):
+                groups = real_scan(jobs)
+                if not hidden and child in groups[leader]:
+                    groups[leader].pop(child)
+                    hidden.append(True)
+                return groups
+
+            with mock.patch.object(resources, "_scan_groups", side_effect=incomplete_once):
+                supervisor.poll(wait_seconds=0)
+            self.assertEqual(hidden, [True])
+            self.assertIsNone(supervisor.result(h))
+            result, _ = self.await_result(supervisor, h)
+            self.assertEqual(result.outcome, "descendants_remaining")
+            self.assertFalse(Path(f"/proc/{child}").exists())
+
     def test_local_and_aggregate_rss_limits(self):
         held = "import time; b=bytearray(24*1024*1024); b[:]=b'X'*len(b); print('ready',flush=True); time.sleep(60)"
         with resources.ResourceSupervisor(rss_limit_bytes=18 * 1024**2) as supervisor:
@@ -216,6 +250,27 @@ class ResourceSupervisorTests(unittest.TestCase):
         finally:
             os.umask(previous_umask)
 
+    def test_elapsed_includes_delayed_final_log_cleanup(self):
+        close_logs = resources._close_logs
+
+        def delayed_close(job):
+            self.assertIsNone(job.outcome)
+            time.sleep(1.15)
+            return close_logs(job)
+
+        with resources.ResourceSupervisor() as supervisor:
+            started = time.monotonic()
+            with mock.patch.object(resources, "_close_logs", side_effect=delayed_close):
+                h = self.launch(supervisor, "print('done')", seconds=1.0)
+                result, completed = self.await_result(supervisor, h, wall=4)
+            wall_elapsed = time.monotonic() - started
+            self.assertEqual((result.outcome, result.returncode, completed), ("timeout", 0, [h]))
+            self.assertTrue(result.cleanup_complete)
+            self.assertGreaterEqual(result.elapsed_seconds, 1.15)
+            self.assertGreaterEqual(result.max_sample_gap_seconds, 1.10)
+            self.assertGreaterEqual(wall_elapsed, result.elapsed_seconds)
+            self.assertLess(wall_elapsed - result.elapsed_seconds, .5)
+
     def test_invalid_time_and_memory_inputs_have_fixed_errors(self):
         for limit in (0, -1, True, 1.5):
             with self.assertRaisesRegex(ResearchError, "research_resources_invalid"):
@@ -269,7 +324,10 @@ class ResourceSupervisorTests(unittest.TestCase):
                     self.launch(supervisor, "print('blocked')")
                 with self.assertRaisesRegex(ResearchError, "research_resources_cleanup_failed"):
                     supervisor.close()
-            supervisor.poll(wait_seconds=0)
+            for _ in range(3):
+                supervisor.poll(wait_seconds=0)
+                if supervisor.result(h).cleanup_complete:
+                    break
             self.assertTrue(supervisor.result(h).cleanup_complete)
         finally:
             supervisor.close()
@@ -319,6 +377,8 @@ class ResourceSupervisorTests(unittest.TestCase):
             thread.start()
             thread.join()
             self.assertEqual(other_errors, ["research_resources_busy"])
+            with self.assertRaisesRegex(ResearchError, "research_resources_busy"):
+                supervisor.__enter__()
             with self.assertRaisesRegex(ResearchError, "research_resources_busy"):
                 with resources.ResourceSupervisor():
                     pass
