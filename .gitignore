@@ -30,3 +30,9 @@ target
 .arb/
 deploy/.env.bot
 deploy/.env.postgres
+
+# DVC keeps only metadata for curated snapshots in Git.
+/data/snapshots/**
+!/data/snapshots/**/
+!/data/snapshots/**/*.dvc
+!/data/snapshots/**/.gitignore

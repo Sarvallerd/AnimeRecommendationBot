@@ -1,0 +1,7 @@
+[core]
+    analytics = false
+    check_update = false
+    autostage = false
+    checksum_jobs = 2
+[cache]
+    type = reflink,copy
