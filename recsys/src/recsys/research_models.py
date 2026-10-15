@@ -31,6 +31,13 @@ COMMON_CODE = ("research_models.py", "research_predict.py", CAMPAIGN,
                "release_prepare.py", "release_neelagiri_2025_nafiul_2026_v1.json",
                "research_protocol.py", "research_protocol_v1.json", "research_artifacts.py",
                "research_prepare.py")
+GPU_CODE = ("research_gpu.py",)
+GPU_DEPENDENCIES = ("cupy-cuda12x", "cuda-toolkit", "cuda-pathfinder",
+                    "nvidia-cublas-cu12", "nvidia-cuda-runtime-cu12",
+                    "nvidia-cuda-nvrtc-cu12", "nvidia-cufft-cu12",
+                    "nvidia-curand-cu12", "nvidia-cusolver-cu12",
+                    "nvidia-cusparse-cu12", "nvidia-nvjitlink-cu12")
+GPU_VARIANTS = {"content-mean", "content-max", "content-union", "puresvd"}
 BACKENDS = {"popularity": "research_model_popularity",
             "content-mean": "research_model_content",
             "content-max": "research_model_content",
@@ -265,11 +272,19 @@ def _external(variant_id, assets, prepared_dir, output_dir):
     return entries
 
 
-def _producer(code_revision, backend):
+def _model_backend(variant_id, requested):
+    if requested not in ("cpu", "gpu") or type(requested) is not str:
+        fail("research_backend_unsupported")
+    if requested == "gpu" and variant_id not in GPU_VARIANTS:
+        fail("research_backend_unsupported")
+
+
+def _producer(code_revision, backend, *, model_backend="cpu", scoring=None):
     import numpy as np
     if type(code_revision) is not str or HEX40.fullmatch(code_revision) is None:
         fail("research_model_invalid")
-    names = (*COMMON_CODE, *backend.CODE_FILES)
+    names = (*COMMON_CODE, *backend.CODE_FILES,
+             *(GPU_CODE if model_backend == "gpu" else ()))
     if len(set(names)) != len(names) or any(type(name) is not str or "/" in name or "\\" in name for name in names):
         fail("research_model_invalid")
     package = resources.files("recsys")
@@ -278,11 +293,24 @@ def _producer(code_revision, backend):
         if name in dependencies or type(name) is not str:
             fail("research_model_invalid")
         dependencies[name] = importlib.metadata.version(name)
+    if model_backend == "gpu":
+        if type(scoring) is not dict:
+            fail("research_backend_mismatch")
+        for name in GPU_DEPENDENCIES:
+            try:
+                dependencies[name] = importlib.metadata.version(name)
+            except importlib.metadata.PackageNotFoundError:
+                fail("research_gpu_unavailable")
+    elif model_backend != "cpu" or scoring is not None:
+        fail("research_backend_unsupported")
+    execution = {"backend": "cpu", "dtype": "float64", "blas_threads": 1}
+    if scoring is not None:
+        execution["scoring"] = scoring
     return {"code_revision": code_revision,
             "code_files_sha256": {name: sha(package.joinpath(name).read_bytes()) for name in names},
             "python_version": platform.python_version(), "package_version": __version__,
             "dependency_versions": dependencies,
-            "execution": {"backend": "cpu", "dtype": "float64", "blas_threads": 1}}
+            "execution": execution}
 
 
 def _payloads(stage):
@@ -340,18 +368,25 @@ def _check_payloads(model_dir, files):
 
 
 def fit_model(prepared_dir, output_dir, *, expected_prepared_identity, variant_id,
-              code_revision, assets: dict[str, Path] | None = None):
+              code_revision, assets: dict[str, Path] | None = None, backend="cpu"):
     prepared_dir, output_dir = Path(prepared_dir), Path(output_dir)
     separate(prepared_dir, output_dir)
     inputs = read_training_inputs(prepared_dir, expected_prepared_identity=expected_prepared_identity)
-    backend = _backend(variant_id)
+    _model_backend(variant_id, backend)
+    variant_module = _backend(variant_id)
     spec, campaign_hash = campaign()
     external = _external(variant_id, assets, prepared_dir, output_dir)
-    producer = _producer(code_revision, backend)
+    if backend == "gpu":
+        from .research_gpu import probe_gpu
+        scoring = probe_gpu()
+    else:
+        scoring = None
+    producer = _producer(code_revision, variant_module, model_backend=backend,
+                         scoring=scoring)
     parameters = spec["variants"][variant_id]
     stage = open_stage(output_dir)
     try:
-        metadata = backend.fit(inputs, parameters, {} if assets is None else assets, stage)
+        metadata = variant_module.fit(inputs, parameters, {} if assets is None else assets, stage)
         if type(metadata) is not dict:
             fail("research_model_invalid")
         files = _payloads(stage)
@@ -370,20 +405,34 @@ def fit_model(prepared_dir, output_dir, *, expected_prepared_identity, variant_i
         write_json(stage / "model-manifest.json", manifest)
         publish(stage, output_dir)
         return output_dir / "model-manifest.json"
-    except Exception:
+    except BaseException:
         cleanup(stage)
         raise
 
 
-def load_model(model_dir, *, inputs: ScoringInputs):
+def load_model(model_dir, *, inputs: ScoringInputs, backend="cpu"):
     model_dir = safe_path(model_dir, directory=True)
     manifest, raw = read_json(model_dir / "model-manifest.json")
     exact(manifest, MODEL_FIELDS)
     variant = manifest["variant_id"]
-    backend = _backend(variant)
+    _model_backend(variant, backend)
+    variant_module = _backend(variant)
     spec, campaign_hash = campaign()
     if type(manifest["producer"]) is not dict or type(manifest["producer"].get("code_revision")) is not str:
         fail("research_model_invalid")
+    producer = manifest["producer"]
+    execution = producer.get("execution")
+    if (type(execution) is not dict or
+            set(execution) != ({"backend", "dtype", "blas_threads", "scoring"}
+                               if backend == "gpu" else {"backend", "dtype", "blas_threads"})):
+        fail("research_backend_mismatch")
+    scoring = execution.get("scoring") if backend == "gpu" else None
+    if backend == "gpu":
+        from .research_gpu import gpu_execution
+        with gpu_execution(expected_scoring=scoring):
+            pass
+    expected_producer = _producer(producer["code_revision"], variant_module,
+                                  model_backend=backend, scoring=scoring)
     if (type(manifest["schema_version"]) is not int or manifest["schema_version"] != 1 or
             manifest["kind"] != "arb-ml02-model" or
             canonical_bytes(manifest["parameters"]) != canonical_bytes(spec["variants"][variant]) or
@@ -395,7 +444,7 @@ def load_model(model_dir, *, inputs: ScoringInputs):
             manifest["train_interactions"] != inputs.train_interactions_descriptor or
             manifest["train_stats"] != inputs.train_stats_descriptor or
             type(manifest["external_inputs"]) is not dict or
-            manifest["producer"] != _producer(manifest["producer"]["code_revision"], backend)):
+            canonical_bytes(producer) != canonical_bytes(expected_producer)):
         fail("research_model_invalid")
     if variant in ("popularity", "itemknn", "puresvd") and manifest["external_inputs"]:
         fail("research_model_invalid")
@@ -407,7 +456,11 @@ def load_model(model_dir, *, inputs: ScoringInputs):
     for desc in manifest["external_inputs"].values():
         check_descriptor(desc)
     _check_payloads(model_dir, manifest["files"])
-    scorer = backend.load(model_dir, manifest, inputs)
+    scorer = (variant_module.load(model_dir, manifest, inputs, backend="gpu")
+              if backend == "gpu" else variant_module.load(model_dir, manifest, inputs))
     if not callable(getattr(scorer, "score", None)):
+        close = getattr(scorer, "close", None)
+        if callable(close):
+            close()
         fail("research_model_invalid")
     return manifest, scorer

@@ -120,9 +120,15 @@ def build_parser() -> argparse.ArgumentParser:
     for flag in ("prepared-dir", "expected-prepared-identity", "variant", "code-revision", "output-dir"):
         model_fit.add_argument(f"--{flag}", required=True)
     model_fit.add_argument("--glove")
+    model_fit.add_argument("--backend", choices=("cpu", "gpu"), default="cpu")
     predict_validation = research_commands.add_parser("predict-validation", help="score validation queries")
     for flag in ("prepared-dir", "expected-prepared-identity", "model-dir", "output-dir"):
         predict_validation.add_argument(f"--{flag}", required=True)
+    predict_validation.add_argument("--backend", choices=("cpu", "gpu"), default="cpu")
+    predict_validation.add_argument("--measurement-output")
+    gpu_preflight = research_commands.add_parser("gpu-preflight", help="GPU parity and timing diagnostic")
+    for flag in ("prepared-dir", "expected-prepared-identity", "model-dir", "output-dir"):
+        gpu_preflight.add_argument(f"--{flag}", required=True)
     research_evaluate = research_commands.add_parser("evaluate")
     for flag in ("prepared-dir", "expected-prepared-identity", "predictions", "output-dir"):
         research_evaluate.add_argument(f"--{flag}", required=True)
@@ -313,10 +319,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                 result = fit_model(Path(parsed.prepared_dir), Path(parsed.output_dir),
                     expected_prepared_identity=parsed.expected_prepared_identity,
                     variant_id=parsed.variant, code_revision=parsed.code_revision,
-                    assets={"glove": Path(parsed.glove)} if parsed.glove else None)
+                    assets={"glove": Path(parsed.glove)} if parsed.glove else None,
+                    backend=parsed.backend)
             elif parsed.research_command == "predict-validation":
                 from .research_predict import predict_validation
+                measured = {} if parsed.measurement_output else None
                 result = predict_validation(Path(parsed.prepared_dir), Path(parsed.model_dir),
+                    Path(parsed.output_dir), expected_prepared_identity=parsed.expected_prepared_identity,
+                    backend=parsed.backend, measurements=measured,
+                    measurement_output=Path(parsed.measurement_output)
+                    if parsed.measurement_output else None)
+            elif parsed.research_command == "gpu-preflight":
+                from .research_predict import gpu_preflight
+                result = gpu_preflight(Path(parsed.prepared_dir), Path(parsed.model_dir),
                     Path(parsed.output_dir), expected_prepared_identity=parsed.expected_prepared_identity)
             elif parsed.research_command == "evaluate":
                 from .research_evaluate import evaluate_predictions
