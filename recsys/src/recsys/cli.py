@@ -107,7 +107,7 @@ def build_parser() -> argparse.ArgumentParser:
     for option in ("comparison", "catalog", "measurements", "output-dir"):
         summary_parser.add_argument(f"--{option}", required=True)
     summary_parser.add_argument("--assessment", required=True, action="append")
-    research = commands.add_parser("research", help="offline ML-01 evaluation protocol")
+    research = commands.add_parser("research", help="offline ML-01 and ML-02 research")
     research_commands = research.add_subparsers(dest="research_command", required=True)
     research_prepare = research_commands.add_parser("prepare")
     for flag in ("dataset-dir", "release-dir", "code-revision", "output-dir"):
@@ -116,6 +116,13 @@ def build_parser() -> argparse.ArgumentParser:
     research_validate = research_commands.add_parser("validate")
     research_validate.add_argument("prepared_dir")
     research_validate.add_argument("--expected-identity", required=True)
+    model_fit = research_commands.add_parser("model-fit", help="fit a frozen ML-02 variant")
+    for flag in ("prepared-dir", "expected-prepared-identity", "variant", "code-revision", "output-dir"):
+        model_fit.add_argument(f"--{flag}", required=True)
+    model_fit.add_argument("--glove")
+    predict_validation = research_commands.add_parser("predict-validation", help="score validation queries")
+    for flag in ("prepared-dir", "expected-prepared-identity", "model-dir", "output-dir"):
+        predict_validation.add_argument(f"--{flag}", required=True)
     research_evaluate = research_commands.add_parser("evaluate")
     for flag in ("prepared-dir", "expected-prepared-identity", "predictions", "output-dir"):
         research_evaluate.add_argument(f"--{flag}", required=True)
@@ -301,6 +308,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 from .research_prepare import validate_preparation
                 validate_preparation(Path(parsed.prepared_dir), expected_identity=parsed.expected_identity)
                 result = Path(parsed.prepared_dir) / "prepare-manifest.json"
+            elif parsed.research_command == "model-fit":
+                from .research_models import fit_model
+                result = fit_model(Path(parsed.prepared_dir), Path(parsed.output_dir),
+                    expected_prepared_identity=parsed.expected_prepared_identity,
+                    variant_id=parsed.variant, code_revision=parsed.code_revision,
+                    assets={"glove": Path(parsed.glove)} if parsed.glove else None)
+            elif parsed.research_command == "predict-validation":
+                from .research_predict import predict_validation
+                result = predict_validation(Path(parsed.prepared_dir), Path(parsed.model_dir),
+                    Path(parsed.output_dir), expected_prepared_identity=parsed.expected_prepared_identity)
             elif parsed.research_command == "evaluate":
                 from .research_evaluate import evaluate_predictions
                 result = evaluate_predictions(

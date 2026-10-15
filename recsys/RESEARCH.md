@@ -45,3 +45,17 @@ uv run --locked --no-editable recsys research evaluate --prepared-dir /private/m
 ```
 
 Initial experimental budget: at most 12 model/config variants; up to 2 hours fit and 1 hour evaluation per variant, 48 hours for the campaign, 8 GiB RSS and 64 GiB for a score artifact. These are planning limits, not observed performance. Full 69M interaction preparation and A/B byte comparison require the accepted private snapshot and are separate from the small synthetic test suite. No ML-02 quality claim or optimal N is established by this implementation alone.
+
+## ML-02 model and validation prediction boundary
+
+The [ML-02 campaign](src/recsys/research_campaign_v1.json) fixes seven candidate variants and their parameters before comparing validation results. `model-fit` and `predict-validation` currently implement only the train-positive-count popularity reference; the other named variants fail with `research_model_unavailable` until their own reviewed implementation tasks land. No quality result or preferred N follows from this foundation alone.
+
+```sh
+uv sync --locked --no-editable --extra quality
+uv run --locked --no-editable recsys research model-fit --prepared-dir /private/ml01-prepared --expected-prepared-identity sha256:PREPARE_MANIFEST_SHA256 --variant popularity --code-revision COMMIT_SHA --output-dir /private/popularity-model
+uv run --locked --no-editable recsys research predict-validation --prepared-dir /private/ml01-prepared --expected-prepared-identity sha256:PREPARE_MANIFEST_SHA256 --model-dir /private/popularity-model --output-dir /private/popularity-validation
+```
+
+The model reader checks the accepted preparation identity, unchanged ML-01 source fingerprints, release lock, protocol, catalog and fit descriptors. A model package binds the frozen variant and parameters, code and dependency versions, train input identities, and any model payloads. The popularity fit reads only `fit/train-stats.json`; later collaborative models must consume and validate the full train interaction stream. Prediction receives only the model, model catalog, train statistics and `development/queries.jsonl.gz`. It never reads evaluation labels, hidden masks, user histories or test queries. The scorer receives only visible seed MAL IDs.
+
+Popularity scores are exact train completed-positive user counts for every N. All variants use those raw counts for N=0. For other variants at N>0, finite available float64 scores are quantized with half-even rounding to integer units of 10⁻⁹; unavailable items remain `null`. Every output row lists the entire numeric MAL ID catalog. The prediction gzip is deterministic level 1 with one member and the fixed research header, and is accepted unchanged by `research evaluate`. Model and prediction directories are private, immutable and published only after complete validation. Full release-scale runtime and resource budgets still require a measured private campaign.
