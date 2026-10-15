@@ -183,6 +183,9 @@ def predict_validation(prepared_dir, model_dir, output_dir, *, expected_prepared
             fail("research_unsafe_path")
     if backend not in ("cpu", "gpu") or type(backend) is not str:
         fail("research_backend_unsupported")
+    from .research_models import _model_backend
+    preview, _ = read_json(safe_path(model_dir, directory=True) / "model-manifest.json")
+    _model_backend(preview["variant_id"], backend)
     if measurements is not None and (type(measurements) is not dict or measurements):
         fail("research_prediction_invalid")
     start = perf_counter_ns()
@@ -305,6 +308,9 @@ def gpu_preflight(prepared_dir, model_dir, output_dir, *, expected_prepared_iden
 
     prepared_dir, model_dir, output_dir = map(Path, (prepared_dir, model_dir, output_dir))
     separate(prepared_dir, model_dir, output_dir)
+    from .research_models import _model_backend
+    preview, _ = read_json(safe_path(model_dir, directory=True) / "model-manifest.json")
+    _model_backend(preview["variant_id"], "gpu")
     stage = None
     try:
         started = perf_counter_ns()
