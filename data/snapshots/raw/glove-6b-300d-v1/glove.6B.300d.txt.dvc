@@ -1,0 +1,5 @@
+outs:
+- md5: b78f53fb56ec1ce9edc367d2e6186ba4
+  size: 1037962819
+  hash: md5
+  path: glove.6B.300d.txt

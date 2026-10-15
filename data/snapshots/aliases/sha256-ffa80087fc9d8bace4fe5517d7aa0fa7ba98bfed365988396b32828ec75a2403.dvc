@@ -1,0 +1,6 @@
+outs:
+- md5: 963e5edd0d258af3b443aaa72d16a5f8.dir
+  size: 1006447
+  nfiles: 3
+  hash: md5
+  path: sha256-ffa80087fc9d8bace4fe5517d7aa0fa7ba98bfed365988396b32828ec75a2403
