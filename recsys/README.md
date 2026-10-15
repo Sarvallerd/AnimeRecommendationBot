@@ -67,3 +67,5 @@ It writes a deterministic genre baseline and an unjudged relevance template. See
 Build pinned GloVe cosine neighbors after normalization with `recsys build`; see [the build guide](BUILD.md) for the command, validation, algorithm, report, and output contract.
 
 Export a validated immutable runtime bundle with `recsys export`; see [the export guide](EXPORT.md) for the command, verification, and publication contract.
+
+The versioned ML-01 offline protocol and its private full-catalog evaluator are documented in [RESEARCH.md](RESEARCH.md). The synthetic tests exercise preparation, validation selection and final-test boundaries; research score artifacts and user-level evidence stay out of Git.
