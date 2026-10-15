@@ -2,9 +2,10 @@
 
 from pathlib import Path
 
-from .research_artifacts import (StreamWriter, check_identity, cleanup, identity, open_stage,
-                                 publish, read_json, safe_path, separate, stream_jsonl, write_json)
-from .research_protocol import exact, fail, sha
+from .research_artifacts import (StreamWriter, check_descriptor, check_identity, cleanup, identity,
+                                 open_stage, publish, read_json, safe_path, separate, stream_jsonl, write_json)
+from .bundle import canonical_bytes
+from .research_protocol import exact, fail, load_protocol, sha
 
 
 def read_selection(selection_path, expected_selection_identity, expected_prepared_identity):
@@ -30,17 +31,50 @@ def _comparison(path, prepared_identity):
     if {item.name for item in path.iterdir()} != {"comparison.json", "comparison-manifest.json"}:
         fail()
     manifest, raw = read_json(path / "comparison-manifest.json")
-    report, _ = read_json(path / "comparison.json", manifest["report"])
-    if (manifest["prepared_identity"] != prepared_identity or
-            report["prepared_identity"] != prepared_identity or
-            report["kind"] != "arb-ml-comparison"):
+    exact(manifest, {"schema_version", "kind", "prepared_identity", "evaluation_identities", "report"})
+    if (type(manifest["schema_version"]) is not int or manifest["schema_version"] != 1 or
+            manifest["kind"] != "arb-ml-comparison-artifact" or
+            manifest["prepared_identity"] != prepared_identity or
+            type(manifest["evaluation_identities"]) is not list or
+            not manifest["evaluation_identities"]):
         fail()
-    return report, "sha256:" + sha(raw)
+    check_identity(prepared_identity)
+    check_descriptor(manifest["report"])
+    evaluation_ids = manifest["evaluation_identities"]
+    for value in evaluation_ids:
+        check_identity(value)
+        if value != value.lower():
+            fail()
+    if len(set(evaluation_ids)) != len(evaluation_ids):
+        fail()
+    report, _ = read_json(path / "comparison.json", manifest["report"])
+    exact(report, {"schema_version", "kind", "prepared_identity", "metric", "models",
+                   "paired_differences", "users", "selection_limitations"})
+    if (type(report["schema_version"]) is not int or report["schema_version"] != 1 or
+            report["kind"] != "arb-ml-comparison" or
+            report["prepared_identity"] != prepared_identity or
+            report["metric"] != "main-controlled-random-liked-user-mean-NDCG@5" or
+            type(report["models"]) is not list or
+            type(report["paired_differences"]) is not list or
+            type(report["users"]) is not int or report["users"] < 0 or
+            type(report["selection_limitations"]) is not str or
+            len(report["models"]) != len(evaluation_ids)):
+        fail()
+    model_ids = []
+    for model in report["models"]:
+        exact(model, {"evaluation_identity", "prediction_identity", "model_id", "config_sha256",
+                      "fit_identity", "code_revision", "n_policy"})
+        model_ids.append(model["evaluation_identity"])
+    if model_ids != evaluation_ids:
+        fail()
+    for paired in report["paired_differences"]:
+        exact(paired, {"left", "right", "users", "mean_difference_by_n", "ci95_by_n"})
+    return report, "sha256:" + sha(raw), evaluation_ids
 
 
 def finalize_selection(prepared_dir, decision_path, validation_reports, output_dir):
     from .research_evaluate import _prepared
-    from .research_compare import _evaluation
+    from .research_compare import _comparison_report, _evaluation
     prepared_dir, decision_path, output_dir = map(Path, (prepared_dir, decision_path, output_dir))
     if type(validation_reports) not in (list, tuple) or len(validation_reports) < 2:
         fail()
@@ -68,9 +102,17 @@ def finalize_selection(prepared_dir, decision_path, validation_reports, output_d
             fail()
     if len(comparisons) != 1 or not evaluations:
         fail()
-    comparison, comparison_identity = comparisons[0]
-    if comparison_identity != decision["comparison_identity"]:
-        fail()
+    comparison, comparison_identity, comparison_ids = comparisons[0]
+    evaluation_ids = [item[1] for item in evaluations]
+    if (comparison_identity != decision["comparison_identity"] or
+            len(set(evaluation_ids)) != len(evaluation_ids) or
+            set(evaluation_ids) != set(comparison_ids)):
+        fail("research_selection_invalid")
+    by_identity = {item[1]: item for item in evaluations}
+    recomputed = _comparison_report([by_identity[value] for value in comparison_ids],
+                                    prepared_identity, load_protocol())
+    if canonical_bytes(comparison) != canonical_bytes(recomputed):
+        fail("research_selection_invalid")
     selected = next((item for item in evaluations if item[1] == decision["evaluation_identity"]), None)
     if selected is None:
         fail()

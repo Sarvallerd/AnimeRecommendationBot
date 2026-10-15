@@ -104,20 +104,11 @@ def _policy(matrix, protocol):
             "bootstrap_replicates": protocol["comparison"]["bootstrap_replicates"]}
 
 
-def compare_evaluations(evaluation_dirs, output_dir, *, expected_prepared_identity):
+def _comparison_report(evaluations, prepared_identity, protocol):
+    """Derive every public comparison field from verified private validation rows."""
     import numpy as np
-    if type(evaluation_dirs) not in (list, tuple) or not evaluation_dirs:
+    if not evaluations:
         fail()
-    output_dir = Path(output_dir)
-    separate(*(list(evaluation_dirs) + [output_dir]))
-    # Read only protocol/catalog/fit metadata, never hidden test labels.
-    prepared_identity = expected_prepared_identity
-    # Protocol is embedded in each evaluation through prepared identity. Caller supplies
-    # prepared path via the evaluation manifest's reproducible companion? Explicitly use
-    # the packaged frozen policy; production cannot override it.
-    from .research_protocol import load_protocol
-    protocol = load_protocol()
-    evaluations = [_evaluation(path, prepared_identity) for path in evaluation_dirs]
     ids = [item[1] for item in evaluations]
     if len(ids) != len(set(ids)):
         fail()
@@ -164,6 +155,19 @@ def compare_evaluations(evaluation_dirs, output_dir, *, expected_prepared_identi
               "metric": "main-controlled-random-liked-user-mean-NDCG@5", "models": models,
               "paired_differences": pairs, "users": len(reference_users),
               "selection_limitations": "Validation only; uncertainty and finite sample do not guarantee product benefit."}
+    return report
+
+
+def compare_evaluations(evaluation_dirs, output_dir, *, expected_prepared_identity):
+    if type(evaluation_dirs) not in (list, tuple) or not evaluation_dirs:
+        fail()
+    output_dir = Path(output_dir)
+    separate(*(list(evaluation_dirs) + [output_dir]))
+    from .research_protocol import load_protocol
+    prepared_identity = expected_prepared_identity
+    evaluations = [_evaluation(path, prepared_identity) for path in evaluation_dirs]
+    report = _comparison_report(evaluations, prepared_identity, load_protocol())
+    ids = [item[1] for item in evaluations]
     stage = open_stage(output_dir)
     try:
         desc = write_json(stage / "comparison.json", report)
