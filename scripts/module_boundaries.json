@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "subsystems": {
+    "core": {"modules": ["recsys", "recsys.bundle", "recsys.sources"], "depends_on": []},
+    "data": {"modules": ["recsys.aliases", "recsys.dataset", "recsys.dataset_interactions", "recsys.dataset_metadata", "recsys.normalize", "recsys.obtain"], "depends_on": ["core"]},
+    "content": {"modules": ["recsys.build"], "depends_on": ["core"]},
+    "release": {"modules": ["recsys.export", "recsys.release", "recsys.release_build", "recsys.release_prepare"], "depends_on": ["core", "data", "content"]},
+    "historical": {"modules": ["recsys.assessment", "recsys.evaluation", "recsys.legacy", "recsys.quality"], "depends_on": ["core", "data", "content", "release"]},
+    "research_support": {"modules": ["recsys.research_artifacts", "recsys.research_gpu", "recsys.research_protocol", "recsys.research_resources"], "depends_on": ["core"]},
+    "research_models": {"modules": ["recsys.research_models", "recsys.research_model_cf", "recsys.research_model_content", "recsys.research_model_hybrid", "recsys.research_model_popularity", "recsys.research_predict"], "depends_on": ["core", "data", "content", "research_support"]},
+    "research_evaluation": {"modules": ["recsys.research_compare", "recsys.research_evaluate", "recsys.research_finalize", "recsys.research_prepare"], "depends_on": ["core", "data", "research_support"]},
+    "research_campaign": {"modules": ["recsys.research_campaign"], "depends_on": ["core", "research_support", "research_models", "research_evaluation"]},
+    "entrypoints": {"modules": ["recsys.__main__", "recsys.cli"], "depends_on": ["core", "data", "content", "release", "historical", "research_support", "research_models", "research_evaluation", "research_campaign"]}
+  },
+  "exceptions": [
+    {"source": "recsys.research_artifacts", "target": "recsys.dataset", "names": ["_publish_no_replace", "_stream_lines"], "reason": "Reuse bounded streaming and atomic publication helpers."},
+    {"source": "recsys.research_models", "target": "recsys.release_prepare", "names": ["release_info"], "reason": "Read immutable release lock identity."},
+    {"source": "recsys.research_prepare", "target": "recsys.release_prepare", "names": ["release_info"], "reason": "Read immutable release lock identity."}
+  ],
+  "existing_cycles": [
+    {"members": ["recsys.research_models", "recsys.research_model_cf", "recsys.research_model_content", "recsys.research_model_hybrid", "recsys.research_model_popularity"], "edges": [["recsys.research_models", "recsys.research_model_cf"], ["recsys.research_models", "recsys.research_model_content"], ["recsys.research_models", "recsys.research_model_hybrid"], ["recsys.research_models", "recsys.research_model_popularity"], ["recsys.research_model_cf", "recsys.research_models"], ["recsys.research_model_content", "recsys.research_models"], ["recsys.research_model_hybrid", "recsys.research_models"], ["recsys.research_model_popularity", "recsys.research_models"]], "reason": "Finite backend dispatch and shared model interfaces."},
+    {"members": ["recsys.research_evaluate", "recsys.research_finalize"], "edges": [["recsys.research_evaluate", "recsys.research_finalize"], ["recsys.research_finalize", "recsys.research_evaluate"]], "reason": "Lazy selection receipt and evaluation helpers."}
+  ],
+  "dynamic_dispatch": {"source": "recsys.research_models", "function": "_backend", "registry": "BACKENDS", "source_sha256": "a56bcfbc7e4f42d197c033b656ddd204acae3e6282a6577025a8c02288c30ab0", "reason": "Audited finite lazy backend dispatch; re-audit when producer bytes change."}
+}
