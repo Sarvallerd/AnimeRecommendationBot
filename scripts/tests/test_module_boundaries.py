@@ -103,6 +103,29 @@ class BoundariesTest(unittest.TestCase):
                 self.assert_category("forbidden_dependency")
                 path.write_bytes(original)
 
+    def test_direct_submodule_and_builtin_loader_bindings(self) -> None:
+        for code in (
+            "import importlib.util\nimportlib.import_module('recsys.research_evaluate')",
+            "from builtins import __import__ as loader\nloader('recsys.research_evaluate')",
+            "import builtins as bi\nbi.__import__('recsys.research_evaluate')",
+        ):
+            with self.subTest(code=code.splitlines()[0]):
+                path = self.source("release")
+                original = path.read_bytes()
+                self.append("release", code)
+                self.assert_category("forbidden_dependency")
+                path.write_bytes(original)
+        for code in (
+            "import importlib.util\nimportlib.import_module(f'recsys.{name}')",
+            "from builtins import __import__ as loader\nloader('recsys.research_evaluate', globals())",
+        ):
+            with self.subTest(code=code.splitlines()[0]):
+                path = self.source("release")
+                original = path.read_bytes()
+                self.append("release", code)
+                self.assert_category("unsupported_dynamic_import")
+                path.write_bytes(original)
+
     def test_dynamic_dispatch_pin_and_finite_targets(self) -> None:
         source = self.source("research_models")
         content = source.read_text(encoding="utf-8")
@@ -113,7 +136,19 @@ class BoundariesTest(unittest.TestCase):
         policy = self.policy()
         policy["dynamic_dispatch"]["source_sha256"] = hashlib.sha256(source.read_bytes()).hexdigest()
         self.save_policy(policy)
-        self.assert_category("forbidden_dependency")
+        self.assert_category("dynamic_dispatch_changed")
+
+    def test_registry_extra_variant_reusing_backend_fails_after_repin(self) -> None:
+        source = self.source("research_models")
+        content = source.read_text(encoding="utf-8")
+        self.assertIn('BACKENDS = {"popularity": "research_model_popularity",', content)
+        content = content.replace('BACKENDS = {"popularity": "research_model_popularity",',
+                                  'BACKENDS = {"extra": "research_model_content", "popularity": "research_model_popularity",', 1)
+        source.write_text(content, encoding="utf-8")
+        policy = self.policy()
+        policy["dynamic_dispatch"]["source_sha256"] = hashlib.sha256(source.read_bytes()).hexdigest()
+        self.save_policy(policy)
+        self.assert_category("dynamic_dispatch_changed")
 
     def test_unresolved_dynamic_loader_and_internal_wildcard(self) -> None:
         self.append("release", "import importlib\nimportlib.import_module(f'recsys.{name}')")
@@ -149,6 +184,27 @@ class BoundariesTest(unittest.TestCase):
         policy["existing_cycles"][0]["edges"].pop()
         self.save_policy(policy)
         self.assert_category("new_cycle")
+
+    def test_module_package_collision_rejects_both_sources(self) -> None:
+        package = self.root / "recsys/src/recsys/collision"
+        package.mkdir()
+        (package / "__init__.py").write_text("", encoding="utf-8")
+        self.source("collision").write_text("", encoding="utf-8")
+        policy = self.policy()
+        policy["subsystems"]["core"]["modules"].append("recsys.collision")
+        self.save_policy(policy)
+        self.assert_category("config_invalid")
+        self.assertTrue(any("module/package collision" in error for error in check_repository(self.root)))
+
+    def test_nested_package_relative_import_uses_package_anchor(self) -> None:
+        package = self.root / "recsys/src/recsys/nested"
+        package.mkdir()
+        (package / "__init__.py").write_text("__version__ = '1'\nfrom . import child\n", encoding="utf-8")
+        (package / "child.py").write_text("from .. import __version__\n", encoding="utf-8")
+        policy = self.policy()
+        policy["subsystems"]["core"]["modules"].extend(["recsys.nested", "recsys.nested.child"])
+        self.save_policy(policy)
+        self.assertEqual(check_repository(self.root), [])
 
 
 if __name__ == "__main__":

@@ -17,6 +17,10 @@ SUBSYSTEM_FIELDS = {"modules", "depends_on"}
 EXCEPTION_FIELDS = {"source", "target", "names", "reason"}
 CYCLE_FIELDS = {"members", "edges", "reason"}
 DISPATCH_FIELDS = {"source", "function", "registry", "source_sha256", "reason"}
+BACKEND_VARIANTS = {"popularity", "content-mean", "content-max", "content-union",
+                    "itemknn", "puresvd", "hybrid"}
+BACKEND_MODULES = {"research_model_popularity", "research_model_content",
+                   "research_model_cf", "research_model_hybrid"}
 
 
 class PolicyError(ValueError):
@@ -151,6 +155,9 @@ def _inventory(package: Path) -> dict[str, Path]:
             name = ".".join(("recsys", *rel.parts[:-1]))
         else:
             name = ".".join(("recsys", *rel.with_suffix("").parts))
+        if name in result:
+            raise PolicyError(f"module/package collision for {name}: "
+                              f"{result[name].relative_to(package)} and {rel}")
         result[name] = path
     return result
 
@@ -167,10 +174,9 @@ def _attribute_names(tree: ast.Module) -> set[str]:
     return names
 
 
-def _resolve_relative(source: str, module: str | None, level: int) -> str:
+def _resolve_relative(package: str, module: str | None, level: int) -> str:
     if level == 0:
         return module or ""
-    package = source if source == "recsys" else source.rpartition(".")[0]
     parts = package.split(".")
     if level > len(parts):
         return ""
@@ -227,8 +233,9 @@ def _dispatch_targets(tree: ast.Module, policy: dict, raw: bytes) -> set[str]:
         _identifier(value.value, "dynamic_dispatch.registry value")
         keys.append(key.value)
         values.append(value.value)
-    if not keys or len(keys) != len(set(keys)):
-        raise PolicyError("dynamic_dispatch_changed: duplicate or empty registry")
+    if (len(keys) != len(set(keys)) or set(keys) != BACKEND_VARIANTS or
+            set(values) != BACKEND_MODULES):
+        raise PolicyError("dynamic_dispatch_changed: expected seven approved variants and four backend modules")
     calls = [node for node in ast.walk(functions[0]) if isinstance(node, ast.Call) and
              isinstance(node.func, ast.Attribute) and node.func.attr == "import_module"]
     if len(calls) != 1:
@@ -328,19 +335,29 @@ def check_repository(root: Path, stats: dict[str, int] | None = None) -> list[st
 
     for source, tree in sorted(trees.items()):
         rel = inventory[source].relative_to(root)
-        package = source if source == "recsys" else source.rpartition(".")[0]
+        package = source if inventory[source].name == "__init__.py" else source.rpartition(".")[0]
         imports = set()
+        builtins_roots = set()
         loaders = set()
         builtin_loaders = {"__import__"}
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 for alias in node.names:
-                    if alias.name == "importlib":
+                    # Without `as`, `import importlib.util` binds the root
+                    # `importlib`, while `import importlib.util as util` binds
+                    # the submodule to `util`.
+                    if alias.name == "importlib" or (alias.name.startswith("importlib.") and not alias.asname):
                         imports.add(alias.asname or "importlib")
+                    elif alias.name == "builtins" or (alias.name.startswith("builtins.") and not alias.asname):
+                        builtins_roots.add(alias.asname or "builtins")
             elif isinstance(node, ast.ImportFrom) and node.module == "importlib" and node.level == 0:
                 for alias in node.names:
                     if alias.name == "import_module":
                         loaders.add(alias.asname or alias.name)
+            elif isinstance(node, ast.ImportFrom) and node.module == "builtins" and node.level == 0:
+                for alias in node.names:
+                    if alias.name == "__import__":
+                        builtin_loaders.add(alias.asname or alias.name)
         # A direct local alias is common in optional imports. No general dataflow
         # or evaluation is attempted: only this statically visible assignment.
         for node in ast.walk(tree):
@@ -354,13 +371,18 @@ def check_repository(root: Path, stats: dict[str, int] | None = None) -> list[st
             elif (isinstance(value, ast.Attribute) and value.attr == "import_module" and
                   isinstance(value.value, ast.Name) and value.value.id in imports):
                 loaders.add(node.targets[0].id)
+            elif (isinstance(value, ast.Attribute) and value.attr == "__import__" and
+                  isinstance(value.value, ast.Name) and value.value.id in builtins_roots):
+                builtin_loaders.add(node.targets[0].id)
         parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
 
         def loader_reference(node: ast.AST) -> bool:
             return (isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and
                     node.id in loaders | builtin_loaders) or (
                 isinstance(node, ast.Attribute) and node.attr == "import_module" and
-                isinstance(node.value, ast.Name) and node.value.id in imports)
+                isinstance(node.value, ast.Name) and node.value.id in imports) or (
+                isinstance(node, ast.Attribute) and node.attr == "__import__" and
+                isinstance(node.value, ast.Name) and node.value.id in builtins_roots)
         def add(target: str, node: ast.AST, names: set[str] | None = None) -> None:
             if not target.startswith("recsys"):
                 return
@@ -396,7 +418,7 @@ def check_repository(root: Path, stats: dict[str, int] | None = None) -> list[st
                     if alias.name == "recsys" or alias.name.startswith("recsys."):
                         add(alias.name, node)
             elif isinstance(node, ast.ImportFrom):
-                target = _resolve_relative(source, node.module, node.level)
+                target = _resolve_relative(package, node.module, node.level)
                 if not target.startswith("recsys") and not (node.level and not target):
                     continue
                 if not target or (target != "recsys" and not target.startswith("recsys.")):
@@ -421,6 +443,9 @@ def check_repository(root: Path, stats: dict[str, int] | None = None) -> list[st
             elif isinstance(node, ast.Call):
                 kind = None
                 if isinstance(node.func, ast.Name) and node.func.id in builtin_loaders:
+                    kind = "builtin"
+                elif (isinstance(node.func, ast.Attribute) and node.func.attr == "__import__" and
+                      isinstance(node.func.value, ast.Name) and node.func.value.id in builtins_roots):
                     kind = "builtin"
                 elif isinstance(node.func, ast.Name) and node.func.id in loaders:
                     kind = "module"
