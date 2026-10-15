@@ -107,6 +107,32 @@ def build_parser() -> argparse.ArgumentParser:
     for option in ("comparison", "catalog", "measurements", "output-dir"):
         summary_parser.add_argument(f"--{option}", required=True)
     summary_parser.add_argument("--assessment", required=True, action="append")
+    research = commands.add_parser("research", help="offline ML-01 evaluation protocol")
+    research_commands = research.add_subparsers(dest="research_command", required=True)
+    research_prepare = research_commands.add_parser("prepare")
+    for flag in ("dataset-dir", "release-dir", "code-revision", "output-dir"):
+        research_prepare.add_argument(f"--{flag}", required=True)
+    research_prepare.add_argument("--protocol", required=True, choices=("ml01-v1",))
+    research_validate = research_commands.add_parser("validate")
+    research_validate.add_argument("prepared_dir")
+    research_validate.add_argument("--expected-identity", required=True)
+    research_evaluate = research_commands.add_parser("evaluate")
+    for flag in ("prepared-dir", "expected-prepared-identity", "predictions", "output-dir"):
+        research_evaluate.add_argument(f"--{flag}", required=True)
+    research_evaluate.add_argument("--split", required=True, choices=("validation", "test"))
+    research_evaluate.add_argument("--selection")
+    research_evaluate.add_argument("--expected-selection-identity")
+    research_compare = research_commands.add_parser("compare")
+    research_compare.add_argument("--evaluation", action="append", required=True)
+    research_compare.add_argument("--expected-prepared-identity", required=True)
+    research_compare.add_argument("--output-dir", required=True)
+    research_finalize = research_commands.add_parser("finalize")
+    for flag in ("prepared-dir", "decision", "output-dir"):
+        research_finalize.add_argument(f"--{flag}", required=True)
+    research_finalize.add_argument("--validation-report", action="append", required=True)
+    research_test = research_commands.add_parser("test-queries")
+    for flag in ("prepared-dir", "selection", "expected-selection-identity", "output-dir"):
+        research_test.add_argument(f"--{flag}", required=True)
     return parser
 
 
@@ -260,6 +286,45 @@ def main(argv: Sequence[str] | None = None) -> int:
         except (ReleaseError, ReleaseBuildError, PrepareError, OSError, ValueError) as exc:
             code = str(exc) if isinstance(exc, (ReleaseError, ReleaseBuildError, PrepareError)) else "release_integrity_error"
             print(f"recsys release: {code}", file=sys.stderr)
+            return 1
+    elif parsed.command == "research":
+        from pathlib import Path
+        from .research_protocol import ResearchError
+        try:
+            if parsed.research_command == "prepare":
+                from .research_prepare import prepare_research
+                from .research_protocol import load_protocol
+                load_protocol(parsed.protocol)
+                result = prepare_research(Path(parsed.dataset_dir), Path(parsed.release_dir),
+                                          Path(parsed.output_dir), code_revision=parsed.code_revision)
+            elif parsed.research_command == "validate":
+                from .research_prepare import validate_preparation
+                validate_preparation(Path(parsed.prepared_dir), expected_identity=parsed.expected_identity)
+                result = Path(parsed.prepared_dir) / "prepare-manifest.json"
+            elif parsed.research_command == "evaluate":
+                from .research_evaluate import evaluate_predictions
+                result = evaluate_predictions(
+                    Path(parsed.prepared_dir), Path(parsed.predictions), Path(parsed.output_dir),
+                    split=parsed.split, expected_prepared_identity=parsed.expected_prepared_identity,
+                    selection_path=Path(parsed.selection) if parsed.selection else None,
+                    expected_selection_identity=parsed.expected_selection_identity)
+            elif parsed.research_command == "compare":
+                from .research_compare import compare_evaluations
+                result = compare_evaluations([Path(path) for path in parsed.evaluation],
+                                             Path(parsed.output_dir),
+                                             expected_prepared_identity=parsed.expected_prepared_identity)
+            elif parsed.research_command == "finalize":
+                from .research_finalize import finalize_selection
+                result = finalize_selection(Path(parsed.prepared_dir), Path(parsed.decision),
+                    [Path(path) for path in parsed.validation_report], Path(parsed.output_dir))
+            else:
+                from .research_finalize import export_test_queries
+                result = export_test_queries(Path(parsed.prepared_dir), Path(parsed.selection),
+                    Path(parsed.output_dir), expected_selection_identity=parsed.expected_selection_identity)
+            print(result)
+        except (ResearchError, OSError, ValueError, KeyError, TypeError) as exc:
+            code = str(exc) if isinstance(exc, ResearchError) else "research_integrity_error"
+            print(f"recsys research: {code}", file=sys.stderr)
             return 1
     elif parsed.command == "build":
         from pathlib import Path
