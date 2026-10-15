@@ -183,6 +183,9 @@ class ContentScorer:
         return tuple(self.lookup[item] for item in sorted(seed_mal_ids)
                      if self.ready[self.lookup[item]])
 
+    def supported_seed_ids(self, seed_mal_ids):
+        return frozenset(int(self.ids[index]) for index in self._validated(seed_mal_ids))
+
     def score(self, seed_mal_ids):
         if self.backend == "gpu":
             return self.score_many((seed_mal_ids,))[0]
@@ -224,9 +227,12 @@ class ContentScorer:
         return models.ScoreVector(values, available, len(supported))
 
 
-def load(model_dir, manifest, inputs, *, backend="cpu"):
+def load(model_dir, manifest, inputs, *, backend="cpu", payload_prefix=""):
     """Recheck the payload semantics after the common manifest and hash checks."""
     import numpy as np
+
+    if payload_prefix not in ("", "content_"):
+        fail("research_model_invalid")
 
     variant = manifest["variant_id"]
     if variant not in ("content-mean", "content-max", "content-union") or not _same_typed(
@@ -243,8 +249,8 @@ def load(model_dir, manifest, inputs, *, backend="cpu"):
             set(manifest["files"]) != {"vectors.npy", "ready.npy"}):
         fail("research_model_invalid")
     try:
-        vectors = np.load(model_dir / "vectors.npy", mmap_mode="r", allow_pickle=False)
-        ready = np.load(model_dir / "ready.npy", mmap_mode="r", allow_pickle=False)
+        vectors = np.load(model_dir / (payload_prefix + "vectors.npy"), mmap_mode="r", allow_pickle=False)
+        ready = np.load(model_dir / (payload_prefix + "ready.npy"), mmap_mode="r", allow_pickle=False)
     except (OSError, ValueError, TypeError) as exc:
         raise ValueError("research_model_invalid") from exc
     if (vectors.dtype != np.dtype("<f8") or vectors.dtype.byteorder not in ("<", "=") or

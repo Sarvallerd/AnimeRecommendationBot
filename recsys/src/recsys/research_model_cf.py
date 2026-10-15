@@ -240,11 +240,13 @@ def _seed_columns(seed_mal_ids, columns):
     return tuple(sorted(columns[item] for item in seed_mal_ids))
 
 
-def load(model_dir, manifest, inputs, *, backend="cpu"):
+def load(model_dir, manifest, inputs, *, backend="cpu", payload_prefix=""):
     import numpy as np
     from threadpoolctl import threadpool_limits
 
     kind = manifest["variant_id"]
+    if payload_prefix not in ("", "svd_") or (kind != "puresvd" and payload_prefix):
+        fail("research_model_invalid")
     if kind not in ("itemknn", "puresvd") or _parameters(manifest["parameters"]) != kind:
         fail("research_model_invalid")
     if backend not in ("cpu", "gpu") or (backend == "gpu" and kind != "puresvd"):
@@ -260,9 +262,9 @@ def load(model_dir, manifest, inputs, *, backend="cpu"):
         if set(manifest["files"]) != {"indptr.npy", "indices.npy", "weights.npy"}:
             fail("research_model_invalid")
         edges = manifest["metadata"]["edges"]
-        pointers = _array(model_dir / "indptr.npy", np.int32, (m + 1,))
-        targets = _array(model_dir / "indices.npy", np.int32, (edges,))
-        weights = _array(model_dir / "weights.npy", np.float64, (edges,))
+        pointers = _array(model_dir / (payload_prefix + "indptr.npy"), np.int32, (m + 1,))
+        targets = _array(model_dir / (payload_prefix + "indices.npy"), np.int32, (edges,))
+        weights = _array(model_dir / (payload_prefix + "weights.npy"), np.float64, (edges,))
         if (pointers[0] != 0 or pointers[-1] != edges or
                 np.any(np.diff(pointers.astype(np.int64)) < 0) or
                 np.any(np.diff(pointers.astype(np.int64)) > _KNN["top_k"]) or
@@ -297,7 +299,7 @@ def load(model_dir, manifest, inputs, *, backend="cpu"):
     if set(manifest["files"]) != {"factors.npy"}:
         fail("research_model_invalid")
     rank = manifest["metadata"]["effective_rank"]
-    factors = _array(model_dir / "factors.npy", np.float64, (m, rank))
+    factors = _array(model_dir / (payload_prefix + "factors.npy"), np.float64, (m, rank))
     if not np.isfinite(factors).all() or np.any(factors[positive == 0] != 0):
         fail("research_model_invalid")
     supported_items = positive > 0
@@ -322,6 +324,10 @@ def load(model_dir, manifest, inputs, *, backend="cpu"):
 
         def score(self, seed_mal_ids):
             return self.score_many((seed_mal_ids,))[0]
+
+        def supported_seed_ids(self, seed_mal_ids):
+            seeds = _seed_columns(seed_mal_ids, columns)
+            return frozenset(int(inputs.mal_ids[col]) for col in seeds if rank and positive[col] > 0)
 
         def score_many(self, seed_sets):
             if backend == "gpu" and self.closed:

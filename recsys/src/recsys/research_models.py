@@ -257,13 +257,14 @@ def _external(variant_id, assets, prepared_dir, output_dir):
     assets = {} if assets is None else assets
     if type(assets) is not dict:
         fail("research_model_invalid")
-    required = {"glove"} if variant_id.startswith("content-") else set()
+    required = ({"glove"} if variant_id.startswith("content-") else
+                {"content_model", "puresvd_model"} if variant_id == "hybrid" else set())
     if set(assets) != required or any(not isinstance(path, Path) for path in assets.values()):
         fail("research_model_invalid")
     entries = {}
     for name, path in assets.items():
         separate(path, prepared_dir, output_dir)
-        desc = _file_descriptor(path)
+        desc = _file_descriptor(path / "model-manifest.json" if variant_id == "hybrid" else path)
         locked = release_info()["inputs"]["embeddings"]
         if name == "glove" and (desc != {"bytes": locked["text_size"],
                                         "sha256": locked["text_sha256"]}):
@@ -370,9 +371,11 @@ def _check_payloads(model_dir, files):
 def fit_model(prepared_dir, output_dir, *, expected_prepared_identity, variant_id,
               code_revision, assets: dict[str, Path] | None = None, backend="cpu"):
     prepared_dir, output_dir = Path(prepared_dir), Path(output_dir)
-    separate(prepared_dir, output_dir)
-    inputs = read_training_inputs(prepared_dir, expected_prepared_identity=expected_prepared_identity)
     _model_backend(variant_id, backend)
+    separate(prepared_dir, output_dir)
+    inputs = (read_scoring_inputs(prepared_dir, expected_prepared_identity=expected_prepared_identity)
+              if variant_id == "hybrid" else
+              read_training_inputs(prepared_dir, expected_prepared_identity=expected_prepared_identity))
     variant_module = _backend(variant_id)
     spec, campaign_hash = campaign()
     external = _external(variant_id, assets, prepared_dir, output_dir)
@@ -386,7 +389,10 @@ def fit_model(prepared_dir, output_dir, *, expected_prepared_identity, variant_i
     parameters = spec["variants"][variant_id]
     stage = open_stage(output_dir)
     try:
-        metadata = variant_module.fit(inputs, parameters, {} if assets is None else assets, stage)
+        metadata = (variant_module.fit(inputs, parameters, {} if assets is None else assets,
+                                       stage, code_revision=code_revision, backend=backend)
+                    if variant_id == "hybrid" else
+                    variant_module.fit(inputs, parameters, {} if assets is None else assets, stage))
         if type(metadata) is not dict:
             fail("research_model_invalid")
         files = _payloads(stage)
@@ -410,9 +416,8 @@ def fit_model(prepared_dir, output_dir, *, expected_prepared_identity, variant_i
         raise
 
 
-def load_model(model_dir, *, inputs: ScoringInputs, backend="cpu"):
-    model_dir = safe_path(model_dir, directory=True)
-    manifest, raw = read_json(model_dir / "model-manifest.json")
+def _validate_manifest(manifest, *, inputs: ScoringInputs, backend="cpu",
+                       expected_code_revision=None):
     exact(manifest, MODEL_FIELDS)
     variant = manifest["variant_id"]
     _model_backend(variant, backend)
@@ -421,6 +426,8 @@ def load_model(model_dir, *, inputs: ScoringInputs, backend="cpu"):
     if type(manifest["producer"]) is not dict or type(manifest["producer"].get("code_revision")) is not str:
         fail("research_model_invalid")
     producer = manifest["producer"]
+    if expected_code_revision is not None and producer["code_revision"] != expected_code_revision:
+        fail("research_model_invalid")
     execution = producer.get("execution")
     if (type(execution) is not dict or
             set(execution) != ({"backend", "dtype", "blas_threads", "scoring"}
@@ -453,9 +460,27 @@ def load_model(model_dir, *, inputs: ScoringInputs, backend="cpu"):
         if manifest["external_inputs"] != {"glove": {"bytes": locked["text_size"],
                                                      "sha256": locked["text_sha256"]}}:
             fail("research_model_invalid")
+    if variant == "hybrid":
+        if set(manifest["external_inputs"]) != {"content_model", "puresvd_model"}:
+            fail("research_model_invalid")
     for desc in manifest["external_inputs"].values():
         check_descriptor(desc)
+
+
+def _read_model_package(model_dir, *, inputs: ScoringInputs, backend="cpu",
+                        expected_code_revision=None):
+    model_dir = safe_path(model_dir, directory=True)
+    manifest, raw = read_json(model_dir / "model-manifest.json")
+    _validate_manifest(manifest, inputs=inputs, backend=backend,
+                       expected_code_revision=expected_code_revision)
     _check_payloads(model_dir, manifest["files"])
+    return manifest, raw
+
+
+def load_model(model_dir, *, inputs: ScoringInputs, backend="cpu"):
+    model_dir = safe_path(model_dir, directory=True)
+    manifest, raw = _read_model_package(model_dir, inputs=inputs, backend=backend)
+    variant_module = _backend(manifest["variant_id"])
     scorer = (variant_module.load(model_dir, manifest, inputs, backend="gpu")
               if backend == "gpu" else variant_module.load(model_dir, manifest, inputs))
     if not callable(getattr(scorer, "score", None)):

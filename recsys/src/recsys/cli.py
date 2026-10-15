@@ -120,6 +120,8 @@ def build_parser() -> argparse.ArgumentParser:
     for flag in ("prepared-dir", "expected-prepared-identity", "variant", "code-revision", "output-dir"):
         model_fit.add_argument(f"--{flag}", required=True)
     model_fit.add_argument("--glove")
+    model_fit.add_argument("--content-model")
+    model_fit.add_argument("--puresvd-model")
     model_fit.add_argument("--backend", choices=("cpu", "gpu"), default="cpu")
     predict_validation = research_commands.add_parser("predict-validation", help="score validation queries")
     for flag in ("prepared-dir", "expected-prepared-identity", "model-dir", "output-dir"):
@@ -129,6 +131,17 @@ def build_parser() -> argparse.ArgumentParser:
     gpu_preflight = research_commands.add_parser("gpu-preflight", help="GPU parity and timing diagnostic")
     for flag in ("prepared-dir", "expected-prepared-identity", "model-dir", "output-dir"):
         gpu_preflight.add_argument(f"--{flag}", required=True)
+    campaign_run = research_commands.add_parser("campaign-run", help="run fixed ML-02 validation campaign")
+    for flag in ("prepared-dir", "expected-prepared-identity", "code-revision", "glove", "output-dir"):
+        campaign_run.add_argument(f"--{flag}", required=True)
+    campaign_run.add_argument("--backend", choices=("cpu", "gpu"), default="cpu")
+    campaign_run.add_argument("--cpu-workers", type=int, choices=(1, 2), default=2)
+    campaign_run.add_argument("--resume", action="store_true")
+    campaign_run.add_argument("--expected-campaign-identity")
+    campaign_validate = research_commands.add_parser("campaign-validate", help="verify retained ML-02 validation evidence")
+    for flag in ("prepared-dir", "expected-prepared-identity", "campaign-dir",
+                 "expected-campaign-identity"):
+        campaign_validate.add_argument(f"--{flag}", required=True)
     research_evaluate = research_commands.add_parser("evaluate")
     for flag in ("prepared-dir", "expected-prepared-identity", "predictions", "output-dir"):
         research_evaluate.add_argument(f"--{flag}", required=True)
@@ -316,10 +329,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 result = Path(parsed.prepared_dir) / "prepare-manifest.json"
             elif parsed.research_command == "model-fit":
                 from .research_models import fit_model
+                assets = ({"glove": Path(parsed.glove)} if parsed.glove else
+                          {"content_model": Path(parsed.content_model),
+                           "puresvd_model": Path(parsed.puresvd_model)}
+                          if parsed.content_model is not None and parsed.puresvd_model is not None else
+                          None)
+                if (bool(parsed.content_model) != bool(parsed.puresvd_model) or
+                        (parsed.glove and parsed.content_model)):
+                    raise ValueError("research_model_invalid")
                 result = fit_model(Path(parsed.prepared_dir), Path(parsed.output_dir),
                     expected_prepared_identity=parsed.expected_prepared_identity,
                     variant_id=parsed.variant, code_revision=parsed.code_revision,
-                    assets={"glove": Path(parsed.glove)} if parsed.glove else None,
+                    assets=assets,
                     backend=parsed.backend)
             elif parsed.research_command == "predict-validation":
                 from .research_predict import predict_validation
@@ -333,6 +354,22 @@ def main(argv: Sequence[str] | None = None) -> int:
                 from .research_predict import gpu_preflight
                 result = gpu_preflight(Path(parsed.prepared_dir), Path(parsed.model_dir),
                     Path(parsed.output_dir), expected_prepared_identity=parsed.expected_prepared_identity)
+            elif parsed.research_command == "campaign-run":
+                from .research_campaign import run_campaign
+                result = run_campaign(
+                    Path(parsed.prepared_dir), Path(parsed.output_dir),
+                    expected_prepared_identity=parsed.expected_prepared_identity,
+                    code_revision=parsed.code_revision, glove=Path(parsed.glove),
+                    backend=parsed.backend, cpu_workers=parsed.cpu_workers,
+                    resume=parsed.resume,
+                    expected_campaign_identity=parsed.expected_campaign_identity)
+            elif parsed.research_command == "campaign-validate":
+                from .research_campaign import validate_campaign
+                validated = validate_campaign(
+                    Path(parsed.prepared_dir), Path(parsed.campaign_dir),
+                    expected_prepared_identity=parsed.expected_prepared_identity,
+                    expected_campaign_identity=parsed.expected_campaign_identity)
+                result = f"{parsed.expected_campaign_identity} {validated['status']}"
             elif parsed.research_command == "evaluate":
                 from .research_evaluate import evaluate_predictions
                 result = evaluate_predictions(
