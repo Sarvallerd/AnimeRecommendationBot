@@ -302,6 +302,10 @@ def _validate_repo(repo: object) -> None:
 def _validate_applied(policy: dict, detail: object, effective: object) -> int:
     if type(detail) is not dict or type(detail.get("id")) is not int:
         raise PolicyError("invalid ruleset detail")
+    required_keys = set(policy) | {"id", "source_type", "source"}
+    metadata_keys = {"node_id", "_links", "created_at", "updated_at"}
+    if not required_keys <= set(detail) or set(detail) - required_keys - metadata_keys:
+        raise PolicyMismatch("ruleset detail fields differ")
     identifier = detail["id"]
     expected_top = {key: policy[key] for key in ("name", "target", "enforcement", "bypass_actors", "conditions")}
     for key, expected in expected_top.items():

@@ -80,6 +80,8 @@ class SnapshotTests(unittest.TestCase):
 
     def test_applied_noop_check_and_known_server_defaults(self) -> None:
         snap = fixture(applied=True)
+        snap["rulesets"][0].update(node_id="RRS_fixture", _links={"self": {"href": "fixture"}},
+                                   created_at="2026-10-15T00:00:00Z", updated_at="2026-10-15T01:00:00Z")
         snap["rulesets"][0]["rules"].reverse()
         snap["effective_rules"].reverse()
         for rules in (snap["rulesets"][0]["rules"], snap["effective_rules"]):
@@ -91,6 +93,16 @@ class SnapshotTests(unittest.TestCase):
             checks["parameters"]["required_status_checks"].reverse()
         self.assertEqual(evaluate(snap), {"action": "noop", "ruleset_id": 77})
         self.assertEqual(evaluate(snap, "check")["ruleset_id"], 77)
+
+    def test_unknown_and_missing_ruleset_detail_fields_fail_closed(self) -> None:
+        snap = fixture(applied=True)
+        snap["rulesets"][0]["mystery_enforcement_setting"] = True
+        with self.assertRaisesRegex(merge.PolicyMismatch, "detail fields"):
+            evaluate(snap, "check")
+        snap = fixture(applied=True)
+        del snap["rulesets"][0]["conditions"]
+        with self.assertRaisesRegex(merge.PolicyMismatch, "detail fields"):
+            evaluate(snap, "check")
 
     def test_repository_identity_permissions_and_master_race(self) -> None:
         changes = [lambda s: s["repository"].update(id=4),
