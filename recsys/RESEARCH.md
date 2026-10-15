@@ -1,6 +1,8 @@
 # ML-01 offline evaluation protocol (`ml01-v1`)
 
-This protocol evaluates candidate rankers for recommendations from several liked anime. It does not train a model or select a live bot bundle. The packaged [policy](src/recsys/research_protocol_v1.json) fixes all numerical choices before ML-02 results. The named `neelagiri-2025-nafiul-2026-v1` release lock fixes the Neelagiri 2025 base, Nafiul 2026 aliases and catalog. The historical MAL 2020 preparation commands remain available separately.
+This protocol evaluates candidate rankers for recommendations from several liked anime. It does not train a model or select a live bot bundle. The packaged [policy](../src/recsys/research_protocol_v1.json) fixes all numerical choices before ML-02 results. The named `neelagiri-2025-nafiul-2026-v1` release lock fixes the Neelagiri 2025 base, Nafiul 2026 aliases and catalog. The historical MAL 2020 preparation commands remain available separately.
+
+The [source layout migration](../docs/migrations/arb053-python-src-v1.md) moved the package to `src/recsys/` with package-relative resource names and raw bytes preserved. New experiment outputs record their actual checkout revision; prior evidence keeps its recorded revision.
 
 The full dataset and accepted release must already exist in private storage. `prepare` validates the entire dataset against its identity and checks the release manifest, catalog hash, base and alias links against the immutable lock. It projects `score: null` for *every* entry in `model-catalog.json` to remove the global MAL rating. No catalog item is removed for cold start, OOV tokens or missing metadata. All generated interactions, split records, query IDs and hidden labels are private; do not commit them, put them in a PR, or publish them in Notion.
 
@@ -48,7 +50,7 @@ Initial experimental budget: at most 12 model/config variants; up to 2 hours fit
 
 ## ML-02 model and validation prediction boundary
 
-The [ML-02 campaign](src/recsys/research_campaign_v1.json) fixes seven candidate variants and their parameters before comparing validation results. The seventh variant embeds a fitted content-mean package and a fitted PureSVD package into one portable hybrid. It combines their complete raw float64 candidate rankings by equal-weight reciprocal rank fusion with constant 60 after excluding every visible seed. No quality result or preferred N follows from implementation alone.
+The [ML-02 campaign](../src/recsys/research_campaign_v1.json) fixes seven candidate variants and their parameters before comparing validation results. The seventh variant embeds a fitted content-mean package and a fitted PureSVD package into one portable hybrid. It combines their complete raw float64 candidate rankings by equal-weight reciprocal rank fusion with constant 60 after excluding every visible seed. No quality result or preferred N follows from implementation alone.
 
 ```sh
 uv sync --locked --no-editable --extra quality

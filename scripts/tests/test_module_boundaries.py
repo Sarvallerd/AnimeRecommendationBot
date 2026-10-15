@@ -21,14 +21,14 @@ class BoundariesTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
-        package = self.root / "recsys/src/recsys"
+        package = self.root / "src/recsys"
         package.parent.mkdir(parents=True)
-        shutil.copytree(REPO / "recsys/src/recsys", package)
+        shutil.copytree(REPO / "src/recsys", package)
         (self.root / "scripts").mkdir()
         shutil.copy2(REPO / "scripts/module_boundaries.json", self.root / "scripts/module_boundaries.json")
 
     def source(self, module: str) -> Path:
-        return self.root / "recsys/src/recsys" / f"{module}.py"
+        return self.root / "src/recsys" / f"{module}.py"
 
     def append(self, module: str, code: str) -> None:
         with self.source(module).open("a", encoding="utf-8") as stream:
@@ -73,7 +73,7 @@ class BoundariesTest(unittest.TestCase):
     def test_new_cycle_and_new_internal_edge_in_existing_cycle(self) -> None:
         self.append("dataset_metadata", "from .dataset import HEADER")
         self.assert_category("new_cycle")
-        self.source("dataset_metadata").write_bytes((REPO / "recsys/src/recsys/dataset_metadata.py").read_bytes())
+        self.source("dataset_metadata").write_bytes((REPO / "src/recsys/dataset_metadata.py").read_bytes())
         self.append("research_model_cf", "from .research_model_content import fit")
         self.assert_category("new_cycle")
 
@@ -162,14 +162,14 @@ class BoundariesTest(unittest.TestCase):
     def test_unresolved_dynamic_loader_and_internal_wildcard(self) -> None:
         self.append("release", "import importlib\nimportlib.import_module(f'recsys.{name}')")
         self.assert_category("unsupported_dynamic_import")
-        self.source("release").write_bytes((REPO / "recsys/src/recsys/release.py").read_bytes())
+        self.source("release").write_bytes((REPO / "src/recsys/release.py").read_bytes())
         self.append("release", "from .dataset import *")
         self.assert_category("unknown_import")
 
     def test_loader_callable_and_unknown_package_member_fail(self) -> None:
         self.append("release", "import importlib\nreceiver(importlib.import_module)")
         self.assert_category("unsupported_dynamic_import")
-        self.source("release").write_bytes((REPO / "recsys/src/recsys/release.py").read_bytes())
+        self.source("release").write_bytes((REPO / "src/recsys/release.py").read_bytes())
         self.append("release", "from recsys import nonexistent_member")
         self.assert_category("unknown_import")
 
@@ -195,7 +195,7 @@ class BoundariesTest(unittest.TestCase):
         self.assert_category("new_cycle")
 
     def test_module_package_collision_rejects_both_sources(self) -> None:
-        package = self.root / "recsys/src/recsys/collision"
+        package = self.root / "src/recsys/collision"
         package.mkdir()
         (package / "__init__.py").write_text("", encoding="utf-8")
         self.source("collision").write_text("", encoding="utf-8")
@@ -206,7 +206,7 @@ class BoundariesTest(unittest.TestCase):
         self.assertTrue(any("module/package collision" in error for error in check_repository(self.root)))
 
     def test_nested_package_relative_import_uses_package_anchor(self) -> None:
-        package = self.root / "recsys/src/recsys/nested"
+        package = self.root / "src/recsys/nested"
         package.mkdir()
         (package / "__init__.py").write_text("__version__ = '1'\nfrom . import child\n", encoding="utf-8")
         (package / "child.py").write_text("from .. import __version__\n", encoding="utf-8")

@@ -16,8 +16,9 @@
 !bot/tests/**
 !recsys/
 !recsys/README.md
-!recsys/src/
-!recsys/src/**
+!src/
+!src/recsys/
+!src/recsys/**
 !contracts/
 !contracts/*.schema.json
 !contracts/check_bundle.py

@@ -4,7 +4,6 @@ import hashlib
 import importlib.metadata
 import json
 import os
-import shutil
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -21,20 +20,28 @@ from recsys.quality import genre_neighbors
 
 class RootLockOriginalsTests(unittest.TestCase):
     def test_root_lock_checks_pinned_original_bytes(self):
-        repository = Path(__file__).resolve().parents[2]
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             lock = root / "uv.lock"
-            lock.write_bytes((repository / "uv.lock").read_bytes())
-            for name in ORIGINALS:
+            lock.write_bytes(b"synthetic lock\n")
+            original_bytes = {name: f"synthetic original {index}\n".encode()
+                              for index, name in enumerate(ORIGINALS)}
+            expected = {name: hashlib.sha256(raw).hexdigest()
+                        for name, raw in original_bytes.items()}
+            for name, raw in original_bytes.items():
                 target = root / name
                 target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(repository / name, target)
-            self.assertEqual(_verify_originals(lock), ORIGINAL_HASHES)
-            changed = root / ORIGINALS[0]
-            changed.write_bytes(changed.read_bytes() + b"changed")
-            with self.assertRaisesRegex(EvaluationError, "original notebook or ranker SHA256 mismatch"):
-                _verify_originals(lock)
+                target.write_bytes(raw)
+            with patch("recsys.evaluation.ORIGINAL_HASHES", expected):
+                self.assertEqual(_verify_originals(lock), expected)
+                changed = root / ORIGINALS[0]
+                changed.write_bytes(changed.read_bytes() + b"changed")
+                with self.assertRaisesRegex(EvaluationError, "original notebook or ranker SHA256 mismatch"):
+                    _verify_originals(lock)
+                changed.write_bytes(original_bytes[ORIGINALS[0]])
+                changed.unlink()
+                with self.assertRaises(FileNotFoundError):
+                    _verify_originals(lock)
 
 
 class EvaluationTests(unittest.TestCase):

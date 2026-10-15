@@ -3,6 +3,7 @@
 import csv
 import gzip
 import hashlib
+from importlib import resources
 import io
 import json
 import tempfile
@@ -75,7 +76,7 @@ class Fixture:
                     "verified": [{k: source[k] for k in ("filename", "size", "sha256")}
                                  for source in sources]}
         (self.cache / "source-manifest.json").write_bytes(canonical_bytes(manifest))
-        counts = {key: 0 for key in json.loads((Path(__file__).parents[1] / "src" / "recsys" /
+        counts = {key: 0 for key in json.loads(resources.files("recsys").joinpath(
                        "neelagiri_2025_v1_expectations.json").read_text())["counts"]}
         counts.update(metadata_rows=2, catalog_items=2, raw_rows=7, blank_user_rows=1,
                       zero_or_missing_rows=2, valid_explicit_rows=4, raw_explicit_pairs=3,
@@ -169,7 +170,7 @@ class DatasetTests(unittest.TestCase):
                              "source-audit.json").read_bytes())
         audit = next(item for item in report["candidates"]
                      if item["id"] == "neelagiri-2025-v1")
-        pinned = json.loads((repository / "recsys" / "src" / "recsys" /
+        pinned = json.loads(resources.files("recsys").joinpath(
                              "neelagiri_2025_v1_expectations.json").read_bytes())
         pairs = {
             "raw_rows": "raw_interaction_rows",

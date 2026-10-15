@@ -264,9 +264,9 @@ def check_probe(probe, profile):
          probe['lock_sha256'] == profile.lock_sha256 and
          probe['registry_sha256'] == profile.inputs['embeddings']['registry_sha256'],
          'BUILD_MISMATCH')
-    need(all(file_sha(ROOT/'recsys/src/recsys'/name) == digest for name,digest in
+    need(all(file_sha(ROOT/'src/recsys'/name) == digest for name,digest in
              ref['code_files_sha256'].items()) and
-         file_sha(ROOT/'recsys/src/recsys/source_registry_glove_6b_300d_v1.json') ==
+         file_sha(ROOT/'src/recsys/source_registry_glove_6b_300d_v1.json') ==
              profile.inputs['embeddings']['registry_sha256'], 'BUILD_MISMATCH')
 
 
@@ -686,7 +686,7 @@ def _run_locked(args,head,data,settings,evidence,values,old_path,old,profile,pat
     saved_records['old_profile'] = private_file(evidence/'old-profile.json',
         p.regular_bytes(p.PROFILE_DIR/p.PROFILE_FILES[p.LEGACY_RELEASE]))
     saved_records['lock'] = private_file(evidence/'release-lock.json',
-        p.regular_bytes(ROOT/'recsys/src/recsys'/p.LOCK_RESOURCE))
+        p.regular_bytes(ROOT/'src/recsys'/p.LOCK_RESOURCE))
     saved_records['original_settings'] = private_file(evidence/'original-settings.env',original_raw)
     (evidence/'original-settings.env').chmod(original_state[3])
     for key,path in (('tool',Path(__file__)),('compose',ROOT/'compose.yaml'),

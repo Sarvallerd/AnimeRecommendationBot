@@ -40,7 +40,7 @@ UV_PROJECT_ENVIRONMENT=/tmp/arb-data-venv uv run --locked --only-group data pyth
 ## Снимки и восстановление
 
 Зарегистрированы ровно пять входных наборов неизменяемого
-[`release_neelagiri_2025_nafiul_2026_v1.json`](../recsys/src/recsys/release_neelagiri_2025_nafiul_2026_v1.json).
+[`release_neelagiri_2025_nafiul_2026_v1.json`](../src/recsys/release_neelagiri_2025_nafiul_2026_v1.json).
 Git хранит следующие указатели, а сами файлы передаются через локальный DVC
 remote. Имена SHA-256 каталогов совпадают с идентификаторами исходных
 манифестов в release lock.
@@ -50,8 +50,8 @@ remote. Имена SHA-256 каталогов совпадают с иденти
 | Подготовленная база Neelagiri 2025 | [base](../data/snapshots/datasets/sha256-78bb29bfe18a00519b5dcd06e9682e1c4c84528166f0c51a80d24ea28c7a62b6.dvc) | `inputs.base.identity` в release lock | 5 |
 | Алиасы Nafiul 2026 | [aliases](../data/snapshots/aliases/sha256-ffa80087fc9d8bace4fe5517d7aa0fa7ba98bfed365988396b32828ec75a2403.dvc) | `inputs.aliases.identity` в release lock | 3 |
 | Каталог release | [release](../data/snapshots/releases/sha256-8da879636b476ffc9d72bf3a08447b778ef047232fc02cd69b1ed0ca02168b5c.dvc) | `inputs.catalog_release.identity` в release lock | 2 |
-| Исходный Nafiul 2026 | [nafiul](../data/snapshots/raw/nafiul-2026-v1.dvc) | [реестр Nafiul](../recsys/src/recsys/source_registry_nafiul_2026_v1.json) и включённый `source-manifest.json` | 2 |
-| Текст GloVe 6B 300d | [glove](../data/snapshots/raw/glove-6b-300d-v1/glove.6B.300d.txt.dvc) | `inputs.embeddings` в release lock и [реестр GloVe](../recsys/src/recsys/source_registry_glove_6b_300d_v1.json) | 1 |
+| Исходный Nafiul 2026 | [nafiul](../data/snapshots/raw/nafiul-2026-v1.dvc) | [реестр Nafiul](../src/recsys/source_registry_nafiul_2026_v1.json) и включённый `source-manifest.json` | 2 |
+| Текст GloVe 6B 300d | [glove](../data/snapshots/raw/glove-6b-300d-v1/glove.6B.300d.txt.dvc) | `inputs.embeddings` в release lock и [реестр GloVe](../src/recsys/source_registry_glove_6b_300d_v1.json) | 1 |
 
 Подготовленная база содержит псевдонимизированные взаимодействия; доступ к
 remote ограничивают как к приватным данным. GloVe зарегистрирован как один
