@@ -1,3 +1,4 @@
+import importlib
 import tempfile
 import unittest
 import os
@@ -53,14 +54,20 @@ class ModelTests(unittest.TestCase):
                          {"popularity", "content-mean", "content-max", "content-union",
                           "itemknn", "puresvd", "hybrid"})
 
-    def test_train_stream_full_validation_and_unavailable_backend(self):
+    def test_train_stream_full_validation_and_lazy_unavailable_backend(self):
         with patch("recsys.research_models.release_info", return_value=self.fixture.lock):
             inputs = read_training_inputs(self.prepared, expected_prepared_identity=self.prepared_identity)
         rows = list(iter_training_rows(inputs))
         self.assertEqual(len(rows), inputs.train_stats["train_completed_rows"])
         self.assertTrue(all(1 <= rating <= 10 for _, _, rating in rows))
+        real_import = importlib.import_module
+        def missing_cf(name, package=None):
+            if name == ".research_model_cf" and package == "recsys":
+                raise ModuleNotFoundError(name="recsys.research_model_cf")
+            return real_import(name, package)
         with self.assertRaisesRegex(ResearchError, "research_model_unavailable"):
-            with patch("recsys.research_models.release_info", return_value=self.fixture.lock):
+            with patch("recsys.research_models.release_info", return_value=self.fixture.lock), \
+                 patch("recsys.research_models.importlib.import_module", side_effect=missing_cf):
                 fit_model(self.prepared, self.fixture.root / "missing",
                           expected_prepared_identity=self.prepared_identity,
                           variant_id="itemknn", code_revision="a" * 40)
