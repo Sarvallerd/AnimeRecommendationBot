@@ -320,17 +320,24 @@ class ResourceSupervisorTests(unittest.TestCase):
                 result = supervisor.result(h)
                 self.assertIsNotNone(result)
                 self.assertEqual((result.outcome, result.cleanup_complete), ("cleanup_failed", False))
+                self.assertEqual(supervisor.poll(wait_seconds=0).completed, ())
                 with self.assertRaisesRegex(ResearchError, "research_resources_cleanup_failed"):
                     self.launch(supervisor, "print('blocked')")
                 with self.assertRaisesRegex(ResearchError, "research_resources_cleanup_failed"):
                     supervisor.close()
+            completed = []
             for _ in range(3):
-                supervisor.poll(wait_seconds=0)
+                completed.extend(supervisor.poll(wait_seconds=0).completed)
                 if supervisor.result(h).cleanup_complete:
                     break
-            self.assertTrue(supervisor.result(h).cleanup_complete)
+            final = supervisor.result(h)
+            self.assertEqual((final.outcome, final.cleanup_complete), ("cleanup_failed", True))
+            self.assertEqual(completed, [h])
+            self.assertEqual(supervisor.poll(wait_seconds=0).completed, ())
         finally:
             supervisor.close()
+        self.assertEqual((supervisor.result(h).outcome, supervisor.result(h).cleanup_complete),
+                         ("cleanup_failed", True))
 
     def test_sample_gap_records_blocking_caller_delay(self):
         with resources.ResourceSupervisor() as supervisor:

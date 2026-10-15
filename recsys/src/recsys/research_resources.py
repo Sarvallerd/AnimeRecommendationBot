@@ -80,6 +80,7 @@ class _Job:
     pid: int | None = None
     starttime: int | None = None
     outcome: str | None = None
+    cleanup_failed: bool = False
     term_at: float | None = None
     kill_at: float | None = None
     result: ProcessResult | None = None
@@ -352,8 +353,10 @@ class ResourceSupervisor:
             return
         logs_ok = _close_logs(job)
         if not clean:
-            outcome = "cleanup_failed"
+            job.cleanup_failed = True
             self._blocked = True
+        if job.cleanup_failed:
+            outcome = "cleanup_failed"
         elif not logs_ok and outcome == "ok":
             outcome = "log_io_failed"
         elif job.wait4_peak > self.rss_limit_bytes and outcome == "ok":
