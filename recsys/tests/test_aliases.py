@@ -10,7 +10,8 @@ from pathlib import Path
 
 from test_dataset import Fixture as DatasetFixture
 
-from recsys.aliases import (
+from recsys.contracts.bundle import canonical_bytes
+from recsys.data.aliases import (
     CSV_COLUMNS,
     AliasError,
     AliasSpec,
@@ -19,8 +20,7 @@ from recsys.aliases import (
     normalize_aliases,
     validate_aliases,
 )
-from recsys.bundle import canonical_bytes
-from recsys.dataset import validate_dataset
+from recsys.data.dataset import validate_dataset
 
 
 def csv_bytes(rows):
@@ -340,7 +340,7 @@ class AliasTests(unittest.TestCase):
             "bytes": len(corrected),
             "sha256": hashlib.sha256(corrected).hexdigest(),
         }
-        manifest["normalizer"]["code_files_sha256"]["aliases.py"] = "0" * 64
+        manifest["normalizer"]["code_files_sha256"]["data/aliases.py"] = "0" * 64
         manifest_path.write_bytes(canonical_bytes(manifest))
         self.assertNotEqual(self.fixture.validate(output).identity, original)
         with self.assertRaisesRegex(AliasError, "alias_integrity_error"):

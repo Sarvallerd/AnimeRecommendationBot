@@ -8,19 +8,20 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
-from research_model_support import ModelFixture
+from research_model_support import ModelFixture, patch_release_info
 from test_research_model_cf import hand_inputs
 from test_research_model_content import _glove
 
-from recsys.research_artifacts import read_json, write_json
-from recsys.research_evaluate import evaluate_predictions
-from recsys.research_model_cf import _SVD
-from recsys.research_model_cf import fit as fit_cf
-from recsys.research_model_cf import load as load_cf
-from recsys.research_model_content import ContentScorer
-from recsys.research_models import ScoreVector, fit_model, load_model, read_scoring_inputs
-from recsys.research_predict import _admit_gpu, gpu_preflight, predict_validation
-from recsys.research_protocol import ResearchError
+from recsys.research.artifacts import read_json, write_json
+from recsys.research.evaluation.evaluate import evaluate_predictions
+from recsys.research.models.collaborative import _SVD
+from recsys.research.models.collaborative import fit as fit_cf
+from recsys.research.models.collaborative import load as load_cf
+from recsys.research.models.content import ContentScorer
+from recsys.research.models.package import fit_model, load_model, read_scoring_inputs
+from recsys.research.models.types import ScoreVector
+from recsys.research.predict import _admit_gpu, gpu_preflight, predict_validation
+from recsys.research.protocol import ResearchError
 
 
 class BackendContractTests(unittest.TestCase):
@@ -35,9 +36,9 @@ class BackendContractTests(unittest.TestCase):
             output = fixture.root / "prediction"
             measured = {}
             with (
-                patch("recsys.research_models.release_info", return_value=fixture.lock),
+                patch_release_info(fixture.lock),
                 patch(
-                    "recsys.research_predict.publish",
+                    "recsys.research.predict.publish",
                     side_effect=OSError("injected publication failure"),
                 ),
             ):
@@ -57,7 +58,7 @@ class BackendContractTests(unittest.TestCase):
             self.assertEqual(measurement.stat().st_mode & 0o777, 0o600)
 
     def test_measurement_write_failure_keeps_published_output_honest(self):
-        from recsys.research_predict import write_json as original_write
+        from recsys.research.predict import write_json as original_write
 
         with tempfile.TemporaryDirectory() as directory:
             fixture = ModelFixture(directory)
@@ -78,8 +79,8 @@ class BackendContractTests(unittest.TestCase):
                 return original_write(path, body)
 
             with (
-                patch("recsys.research_models.release_info", return_value=fixture.lock),
-                patch("recsys.research_predict.write_json", side_effect=fail_once),
+                patch_release_info(fixture.lock),
+                patch("recsys.research.predict.write_json", side_effect=fail_once),
             ):
                 with self.assertRaises(OSError):
                     predict_validation(
@@ -104,7 +105,7 @@ class BackendContractTests(unittest.TestCase):
             measurement = evidence / "measure.json"
             measurement.write_text("existing", encoding="utf-8")
             output = fixture.root / "prediction"
-            with patch("recsys.research_models.release_info", return_value=fixture.lock):
+            with patch_release_info(fixture.lock):
                 with self.assertRaisesRegex(ResearchError, "research_unsafe_path"):
                     predict_validation(
                         prepared,
@@ -137,7 +138,10 @@ class BackendContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             with (
-                patch("recsys.research_model_cf.iter_training_rows", return_value=iter(rows)),
+                patch(
+                    "recsys.research.models.collaborative.iter_training_rows",
+                    return_value=iter(rows),
+                ),
                 patch("sklearn.utils.extmath.randomized_svd", return_value=fake_svd),
             ):
                 metadata = fit_cf(inputs, dict(_SVD), {}, root)
@@ -148,7 +152,7 @@ class BackendContractTests(unittest.TestCase):
                 "files": {"factors.npy": {}},
             }
             cpu = load_cf(root, manifest, inputs)
-            with patch("recsys.research_gpu.CupyDenseDots", FakeDots):
+            with patch("recsys.research.gpu.CupyDenseDots", FakeDots):
                 gpu = load_cf(root, manifest, inputs, backend="gpu")
                 try:
                     queries = ((1,), (1, 4), (4,), (3, 1, 2))
@@ -182,7 +186,7 @@ class BackendContractTests(unittest.TestCase):
         }
         first = (({"query_id": "q1_" + "a" * 64}, (3,)),)
         inputs = SimpleNamespace(mal_ids=(1, 2, 3))
-        with patch("recsys.research_predict._backend", return_value=module):
+        with patch("recsys.research.predict._backend", return_value=module):
             with self.assertRaisesRegex(ResearchError, "research_gpu_parity_failed"):
                 _admit_gpu(first, Path("unused"), model, scored, inputs, {"sha256": "b" * 64})
 
@@ -211,12 +215,13 @@ class BackendContractTests(unittest.TestCase):
             )
             root = Path(directory)
             with patch(
-                "recsys.research_model_cf.iter_training_rows", return_value=iter([("a", 1, 8)])
+                "recsys.research.models.collaborative.iter_training_rows",
+                return_value=iter([("a", 1, 8)]),
             ):
                 metadata = fit_cf(inputs, dict(_SVD), {}, root)
             self.assertEqual(metadata["effective_rank"], 0)
             with patch(
-                "recsys.research_gpu.CupyDenseDots", side_effect=AssertionError("rank-zero upload")
+                "recsys.research.gpu.CupyDenseDots", side_effect=AssertionError("rank-zero upload")
             ):
                 scorer = load_cf(
                     root,
@@ -253,7 +258,7 @@ class BackendContractTests(unittest.TestCase):
             def close(self):
                 self.closed = True
 
-        with patch("recsys.research_gpu.CupyDenseDots", FakeDots):
+        with patch("recsys.research.gpu.CupyDenseDots", FakeDots):
             scorer = ContentScorer(
                 ids, vectors, np.ones(len(ids), dtype=np.bool_), "content-mean", backend="gpu"
             )
@@ -280,7 +285,7 @@ class BackendContractTests(unittest.TestCase):
                     self.subTest(variant=variant),
                     self.assertRaisesRegex(ResearchError, "research_backend_unsupported"),
                 ):
-                    with patch("recsys.research_models.release_info", return_value=fixture.lock):
+                    with patch_release_info(fixture.lock):
                         fit_model(
                             prepared,
                             fixture.root / variant,
@@ -325,7 +330,7 @@ class HardwareIntegrationTests(unittest.TestCase):
                     raise AssertionError("nondevelopment stream opened during scoring")
                 return original_open(path, *args, **kwargs)
 
-            with patch("recsys.research_models.release_info", return_value=fixture.lock):
+            with patch_release_info(fixture.lock):
                 inputs = read_scoring_inputs(prepared, expected_prepared_identity=identity)
                 for variant in ("content-mean", "content-max", "content-union", "puresvd"):
                     with self.subTest(variant=variant):
@@ -422,7 +427,7 @@ class HardwareIntegrationTests(unittest.TestCase):
             fixture = ModelFixture(directory)
             prepared, identity = fixture.make_prepared()
             model = fixture.root / "gpu"
-            with patch("recsys.research_models.release_info", return_value=fixture.lock):
+            with patch_release_info(fixture.lock):
                 fit_model(
                     prepared,
                     model,
@@ -440,14 +445,14 @@ class HardwareIntegrationTests(unittest.TestCase):
                     load_model(model, inputs=inputs, backend="gpu")
 
     def test_admission_and_writer_failures_release_gpu_and_never_publish(self):
-        from recsys.research_gpu import probe_gpu
-        from recsys.research_predict import GzipOneWriter
+        from recsys.research.gpu import probe_gpu
+        from recsys.research.predict import GzipOneWriter
 
         with tempfile.TemporaryDirectory() as directory:
             fixture = ModelFixture(directory)
             prepared, identity = fixture.make_prepared()
             model = fixture.root / "gpu"
-            with patch("recsys.research_models.release_info", return_value=fixture.lock):
+            with patch_release_info(fixture.lock):
                 fit_model(
                     prepared,
                     model,
@@ -457,7 +462,7 @@ class HardwareIntegrationTests(unittest.TestCase):
                     backend="gpu",
                 )
                 with patch(
-                    "recsys.research_predict._admit_gpu",
+                    "recsys.research.predict._admit_gpu",
                     side_effect=ResearchError("research_gpu_parity_failed"),
                 ):
                     with self.assertRaisesRegex(ResearchError, "research_gpu_parity_failed"):
@@ -484,7 +489,7 @@ class HardwareIntegrationTests(unittest.TestCase):
                 self.assertFalse((fixture.root / "writer-fail").exists())
                 self.assertEqual(probe_gpu()["backend"], "cupy")
                 with patch(
-                    "recsys.research_predict.publish",
+                    "recsys.research.predict.publish",
                     side_effect=OSError("fixture publication failure"),
                 ):
                     with self.assertRaises(OSError):
@@ -499,7 +504,7 @@ class HardwareIntegrationTests(unittest.TestCase):
                 self.assertEqual(probe_gpu()["backend"], "cupy")
 
     def test_two_loaded_gpu_scorers_share_session_and_close_independently(self):
-        from recsys.research_gpu import gpu_execution, gpu_memory_usage, probe_gpu
+        from recsys.research.gpu import gpu_execution, gpu_memory_usage, probe_gpu
 
         with tempfile.TemporaryDirectory() as directory:
             fixture = ModelFixture(directory)
@@ -508,7 +513,7 @@ class HardwareIntegrationTests(unittest.TestCase):
             prepared, identity = fixture.make_prepared()
             content = fixture.root / "content-gpu"
             svd = fixture.root / "svd-gpu"
-            with patch("recsys.research_models.release_info", return_value=fixture.lock):
+            with patch_release_info(fixture.lock):
                 fit_model(
                     prepared,
                     content,

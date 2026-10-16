@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from recsys.dataset_metadata import DETAIL_COLUMNS, normalize_metadata
+from recsys.data.metadata import DETAIL_COLUMNS, normalize_metadata
 
 
 def row(mal, title, **values):

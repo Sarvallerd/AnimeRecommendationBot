@@ -13,8 +13,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from recsys import research_resources as resources
-from recsys.research_protocol import ResearchError
+from recsys.research import resources
+from recsys.research.protocol import ResearchError
 
 
 class ResourceSupervisorTests(unittest.TestCase):
@@ -809,8 +809,8 @@ class ResourceSupervisorTests(unittest.TestCase):
         source = str(Path(__file__).resolve().parents[2] / "src")
         code = (
             "import os,sys; sys.path.insert(0," + repr(source) + "); "
-            "from recsys.research_resources import ResourceSupervisor; "
-            "from recsys.research_protocol import ResearchError; "
+            "from recsys.research.resources import ResourceSupervisor; "
+            "from recsys.research.protocol import ResearchError; "
             "s=ResourceSupervisor(); s.__enter__(); pid=os.fork(); "
             "\nif pid==0:\n"
             " try: s.close()\n"
@@ -830,7 +830,7 @@ class ResourceSupervisorTests(unittest.TestCase):
         code = (
             "import sys,signal,ctypes,os; sys.path.insert(0," + repr(source) + "); "
             "libc=ctypes.CDLL(None); before=ctypes.c_int(); libc.prctl(37,ctypes.byref(before),0,0,0); "
-            "handler=signal.getsignal(signal.SIGCHLD); import recsys.research_resources; "
+            "handler=signal.getsignal(signal.SIGCHLD); import recsys.research.resources; "
             "after=ctypes.c_int(); libc.prctl(37,ctypes.byref(after),0,0,0); "
             "assert before.value==after.value and signal.getsignal(signal.SIGCHLD)==handler; "
             "assert 'numpy' not in sys.modules and 'cupy' not in sys.modules"

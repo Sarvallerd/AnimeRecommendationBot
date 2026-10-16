@@ -9,13 +9,20 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
-from research_model_support import ModelFixture
+from research_model_support import ModelFixture, patch_release_info
 
-from recsys.bundle import canonical_bytes
-from recsys.research_artifacts import read_json, stream_jsonl
-from recsys.research_model_cf import _KNN, _SVD, _seed_columns, _training_matrix, fit, load
-from recsys.research_models import fit_model, load_model, read_scoring_inputs
-from recsys.research_protocol import ResearchError, sha
+from recsys.contracts.bundle import canonical_bytes
+from recsys.research.artifacts import read_json, stream_jsonl
+from recsys.research.models.collaborative import (
+    _KNN,
+    _SVD,
+    _seed_columns,
+    _training_matrix,
+    fit,
+    load,
+)
+from recsys.research.models.package import fit_model, load_model, read_scoring_inputs
+from recsys.research.protocol import ResearchError, sha
 
 
 def hand_inputs():
@@ -58,7 +65,9 @@ class HandMatrixTests(unittest.TestCase):
         self.inputs, self.rows = hand_inputs()
 
     def matrix(self):
-        with patch("recsys.research_model_cf.iter_training_rows", return_value=iter(self.rows)):
+        with patch(
+            "recsys.research.models.collaborative.iter_training_rows", return_value=iter(self.rows)
+        ):
             return _training_matrix(self.inputs)
 
     def test_binary_matrix_counts_and_all_stat_fields(self):
@@ -71,18 +80,23 @@ class HandMatrixTests(unittest.TestCase):
                 changed, _ = hand_inputs()
                 changed.train_stats["items"]["4"][field] += 1
                 with patch(
-                    "recsys.research_model_cf.iter_training_rows", return_value=iter(self.rows)
+                    "recsys.research.models.collaborative.iter_training_rows",
+                    return_value=iter(self.rows),
                 ):
                     with self.assertRaises(ResearchError):
                         _training_matrix(changed)
         changed, _ = hand_inputs()
         changed.train_stats["items"]["1"]["positive_users"] += 1
-        with patch("recsys.research_model_cf.iter_training_rows", return_value=iter(self.rows)):
+        with patch(
+            "recsys.research.models.collaborative.iter_training_rows", return_value=iter(self.rows)
+        ):
             with self.assertRaises(ResearchError):
                 _training_matrix(changed)
 
     def test_knn_exact_similarity_cold_seed_and_permutation(self):
-        with patch("recsys.research_model_cf.iter_training_rows", return_value=iter(self.rows)):
+        with patch(
+            "recsys.research.models.collaborative.iter_training_rows", return_value=iter(self.rows)
+        ):
             metadata = fit(self.inputs, dict(_KNN), {}, self.root)
         scorer = load(
             self.root,
@@ -132,7 +146,9 @@ class HandMatrixTests(unittest.TestCase):
             },
         )
         rows = [("a", item, 8) for item in ids]
-        with patch("recsys.research_model_cf.iter_training_rows", return_value=iter(rows)):
+        with patch(
+            "recsys.research.models.collaborative.iter_training_rows", return_value=iter(rows)
+        ):
             metadata = fit(inputs, dict(_KNN), {}, self.root)
         scorer = load(
             self.root,
@@ -202,7 +218,10 @@ class HandMatrixTests(unittest.TestCase):
         right = np.array([[1.0, 1e-16, -1.0, 7.0], [0.0, 1.0, 0.0, 7.0]])
         fake = (np.empty((3, 2)), np.array([9.0, 3.0]), right)
         with (
-            patch("recsys.research_model_cf.iter_training_rows", return_value=iter(self.rows)),
+            patch(
+                "recsys.research.models.collaborative.iter_training_rows",
+                return_value=iter(self.rows),
+            ),
             patch("sklearn.utils.extmath.randomized_svd", return_value=fake) as svd,
         ):
             metadata = fit(self.inputs, dict(_SVD), {}, self.root)
@@ -269,7 +288,10 @@ class HandMatrixTests(unittest.TestCase):
         zero = self.root / "zero"
         zero.mkdir()
         with (
-            patch("recsys.research_model_cf.iter_training_rows", return_value=iter([("a", 1, 8)])),
+            patch(
+                "recsys.research.models.collaborative.iter_training_rows",
+                return_value=iter([("a", 1, 8)]),
+            ),
             patch("sklearn.utils.extmath.randomized_svd") as skipped,
         ):
             zero_metadata = fit(tiny, dict(_SVD), {}, zero)
@@ -298,7 +320,7 @@ class PublisherTests(unittest.TestCase):
 
     def fit_variant(self, variant, name):
         model = self.fixture.root / name
-        with patch("recsys.research_models.release_info", return_value=self.fixture.lock):
+        with patch_release_info(self.fixture.lock):
             fit_model(
                 self.prepared,
                 model,
@@ -309,7 +331,7 @@ class PublisherTests(unittest.TestCase):
         return model
 
     def load_variant(self, model):
-        with patch("recsys.research_models.release_info", return_value=self.fixture.lock):
+        with patch_release_info(self.fixture.lock):
             inputs = read_scoring_inputs(self.prepared, expected_prepared_identity=self.identity)
             return load_model(model, inputs=inputs)
 
@@ -401,7 +423,7 @@ class PublisherTests(unittest.TestCase):
                 sys.executable,
                 "-I",
                 "-c",
-                "import sys, recsys.research_model_cf; "
+                "import sys, recsys.research.models.collaborative; "
                 "assert 'scipy' not in sys.modules; "
                 "assert 'sklearn' not in sys.modules; "
                 "assert 'threadpoolctl' not in sys.modules",

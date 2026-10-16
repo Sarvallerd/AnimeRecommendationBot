@@ -7,12 +7,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
-from research_model_support import ModelFixture
+from research_model_support import ModelFixture, patch_release_info
 from test_research_model_content import _glove
 
-from recsys.research_model_hybrid import _fusion
-from recsys.research_models import ScoreVector, fit_model, load_model, read_scoring_inputs
-from recsys.research_protocol import ResearchError
+from recsys.research.models.hybrid import _fusion
+from recsys.research.models.package import fit_model, load_model, read_scoring_inputs
+from recsys.research.models.types import ScoreVector
+from recsys.research.protocol import ResearchError
 
 
 class _Fake:
@@ -61,7 +62,7 @@ class PortableTests(unittest.TestCase):
             prepared, identity = fixture.make_prepared()
             base = Path(temporary)
             paths = {"content_model": base / "content-model", "puresvd_model": base / "svd-model"}
-            with patch("recsys.research_models.release_info", return_value=fixture.lock):
+            with patch_release_info(fixture.lock):
                 for variant, path, assets in (
                     ("content-mean", paths["content_model"], {"glove": glove}),
                     ("puresvd", paths["puresvd_model"], None),
@@ -84,15 +85,15 @@ class PortableTests(unittest.TestCase):
                     assets=paths,
                 )
                 inputs = read_scoring_inputs(prepared, expected_prepared_identity=identity)
-                from recsys.research_predict import gpu_preflight, predict_validation
+                from recsys.research.predict import gpu_preflight, predict_validation
 
                 with (
                     patch(
-                        "recsys.research_gpu.probe_gpu",
+                        "recsys.research.gpu.probe_gpu",
                         side_effect=AssertionError("probe forbidden"),
                     ),
                     patch(
-                        "recsys.research_gpu.gpu_execution",
+                        "recsys.research.gpu.gpu_execution",
                         side_effect=AssertionError("session forbidden"),
                     ),
                 ):
@@ -144,8 +145,8 @@ class PortableTests(unittest.TestCase):
 @unittest.skipUnless(os.getenv("ARB_RESEARCH_GPU_TEST") == "1", "hardware opt-in")
 class HardwareTests(unittest.TestCase):
     def test_four_gpu_components_and_cpu_hybrid_preserve_raw_ranks(self):
-        from recsys.research_gpu import probe_gpu
-        from recsys.research_predict import gpu_preflight, predict_validation
+        from recsys.research.gpu import probe_gpu
+        from recsys.research.predict import gpu_preflight, predict_validation
 
         with tempfile.TemporaryDirectory() as temporary:
             fixture = ModelFixture(temporary)
@@ -156,7 +157,7 @@ class HardwareTests(unittest.TestCase):
             parts = {"content_model": base / "content-cpu", "puresvd_model": base / "svd-cpu"}
             evidence = base / "evidence"
             evidence.mkdir(mode=0o700)
-            with patch("recsys.research_models.release_info", return_value=fixture.lock):
+            with patch_release_info(fixture.lock):
                 for variant in ("content-mean", "content-max", "content-union", "puresvd"):
                     fit_model(
                         prepared,
@@ -215,11 +216,11 @@ class HardwareTests(unittest.TestCase):
                 self.assertEqual(measured["status"], "published")
                 with (
                     patch(
-                        "recsys.research_gpu.probe_gpu",
+                        "recsys.research.gpu.probe_gpu",
                         side_effect=AssertionError("probe forbidden"),
                     ),
                     patch(
-                        "recsys.research_gpu.gpu_execution",
+                        "recsys.research.gpu.gpu_execution",
                         side_effect=AssertionError("session forbidden"),
                     ),
                 ):

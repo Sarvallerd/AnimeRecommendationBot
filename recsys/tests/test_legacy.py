@@ -2,7 +2,7 @@
 
 import unittest
 
-from recsys.legacy import (
+from recsys.historical.legacy_vectors import (
     LegacyDataset,
     LegacyError,
     build_legacy_vectors,
@@ -76,7 +76,7 @@ class LegacyTests(unittest.TestCase):
             prepare_legacy_rows(rows + [self.row(1)], syn)
 
     def test_real_kmeans_is_deterministic(self):
-        from recsys.legacy import FEATURES
+        from recsys.historical.legacy_vectors import FEATURES
 
         rows = [self.row(i, Genres=FEATURES[i - 1]) for i in range(1, 22)]
         syn = [{"MAL_ID": str(i), "sypnopsis": "Story"} for i in range(1, 22)]

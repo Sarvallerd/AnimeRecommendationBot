@@ -104,6 +104,8 @@ import importlib.metadata as metadata
 from importlib import resources
 from pathlib import Path
 import recsys
+import importlib
+import pkgutil
 import shutil
 import sys
 
@@ -132,7 +134,12 @@ assert source_payload and source_payload == installed_payload, (
     set(installed_payload) - set(source_payload),
     [name for name in source_payload.keys() & installed_payload.keys()
      if source_payload[name] != installed_payload[name]])
-assert metadata.version('anime-recommendation-recsys') == '0.1.0'
+from recsys.contracts.provenance import SOURCE_FILES, source_fingerprints
+assert set(source_payload) == set(SOURCE_FILES)
+assert source_fingerprints() == {name: __import__('hashlib').sha256(raw).hexdigest() for name, raw in source_payload.items()}
+for info in pkgutil.walk_packages(recsys.__path__, recsys.__name__ + '.'):
+    importlib.import_module(info.name)
+assert metadata.version('anime-recommendation-recsys') == '0.2.0'
 assert 'ruff' not in {dist.metadata['Name'].lower() for dist in metadata.distributions()}
 files = [str(path) for path in metadata.distribution('anime-recommendation-recsys').files]
 for name in ('recsys', 'bot', 'check_bundle'):
@@ -175,7 +182,7 @@ def assert_direct_script(root: Path, base: Path, env: dict[str, str], expected: 
     outside_env.pop("PYTHONPATH", None)
     outside_env.pop("VIRTUAL_ENV", None)
     outside_env["PATH"] = str(base / "empty-path")
-    assert run([str(script), "--version"], base, outside_env, timeout=20) == "recsys 0.1.0"
+    assert run([str(script), "--version"], base, outside_env, timeout=20) == "recsys 0.2.0"
     assert (
         run(
             [str(script), "validate", str(root / "tests/fixtures/bundle")],
@@ -236,7 +243,7 @@ def main() -> None:
         assert_manifest(root, env)
         uv(root, env, "sync", "--locked")
         assert_install(root, env, editable=True)
-        assert uv(root, env, "run", "--locked", "recsys", "--version") == "recsys 0.1.0"
+        assert uv(root, env, "run", "--locked", "recsys", "--version") == "recsys 0.2.0"
         expected = check_fixture(root, env)
         assert_direct_script(root, base, env, expected)
 

@@ -66,7 +66,13 @@ class CliTests(unittest.TestCase):
                     "release", "prepare", "--data-dir", "missing", console=console
                 )
                 self.assertEqual(missing.returncode, 1)
-                self.assertIn("release_prerequisite_missing", missing.stderr)
+                self.assertEqual(
+                    missing.stderr,
+                    "recsys release: release_reference_producer_required\n"
+                    "Recover accepted v1 with Python 3.12.14 from pinned Git checkout "
+                    "1441573fbbbffc4693c7e1100aaae4458d9e88d4; follow root README.md "
+                    "and https://app.notion.com/p/3fb3908d6b1f8136a1dfff3c4a12108e.\n",
+                )
                 self.assertNotIn("Traceback", missing.stderr)
 
     def test_version_matches_installed_distribution(self) -> None:
@@ -150,7 +156,7 @@ class CliTests(unittest.TestCase):
 
     def test_isolated_installed_package_contains_new_registry(self) -> None:
         code = (
-            "import json; from recsys.sources import load_registry; "
+            "import json; from recsys.data.sources import load_registry; "
             "r,h=load_registry('neelagiri-2025-v1'); "
             "print(json.dumps([len(r['sources']),r['provenance']['dataset']['snapshot_id'],len(h)]))"
         )
@@ -421,8 +427,8 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("private-canary", failed.stderr)
             self.assertNotIn("Traceback", failed.stderr)
         code = (
-            "from recsys.sources import load_registry; "
-            "from recsys.aliases import _load_spec; "
+            "from recsys.data.sources import load_registry; "
+            "from recsys.data.aliases import _load_spec; "
             "r,h=load_registry('nafiul-2026-v1'); s,_,e,_,_=_load_spec(None); "
             "print(len(r['sources']),s.snapshot_id,e['counts']['emitted_items'])"
         )

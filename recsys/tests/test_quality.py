@@ -8,7 +8,7 @@ import unittest
 from importlib import resources
 from pathlib import Path
 
-from recsys.quality import QualityError, genre_neighbors, run_baseline
+from recsys.historical.genre_baseline import QualityError, genre_neighbors, run_baseline
 
 
 def canonical(value):
@@ -30,7 +30,9 @@ class QualityTests(unittest.TestCase):
             },
         }
         self.spec = json.loads(
-            resources.files("recsys").joinpath("quality_queries_v1.json").read_bytes()
+            resources.files("recsys")
+            .joinpath("resources/queries/quality_queries_v1.json")
+            .read_bytes()
         )
         self.spec["query_set_version"] = "fixture-v1"
         self.spec["queries"] = [
@@ -167,7 +169,11 @@ class QualityTests(unittest.TestCase):
         self.assertFalse((self.root / "bad-hash").exists())
 
     def test_packaged_spec_provenance_and_frozen_ids(self):
-        raw = resources.files("recsys").joinpath("quality_queries_v1.json").read_bytes()
+        raw = (
+            resources.files("recsys")
+            .joinpath("resources/queries/quality_queries_v1.json")
+            .read_bytes()
+        )
         spec = json.loads(raw)
         self.assertEqual(raw, canonical(spec))
         self.assertEqual(

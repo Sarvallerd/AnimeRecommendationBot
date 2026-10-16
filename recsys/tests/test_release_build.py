@@ -11,9 +11,10 @@ from unittest.mock import patch
 
 from test_aliases import Fixture
 
-from recsys.bundle import canonical_bytes, check_bundle
-from recsys.release import compose_release
-from recsys.release_build import ReleaseBuildError, build_release, export_release_bundle
+from recsys.contracts.bundle import canonical_bytes, check_bundle
+from recsys.contracts.provenance import source_fingerprints
+from recsys.release.build import ReleaseBuildError, build_release, export_release_bundle
+from recsys.release.catalog import compose_release
 
 
 class ReleaseBuildTests(unittest.TestCase):
@@ -129,7 +130,7 @@ class ReleaseBuildTests(unittest.TestCase):
         self.assertEqual(
             set(report_a["inputs"]), {"release-manifest.json", "catalog.json", "glove.6B.300d.txt"}
         )
-        self.assertEqual(set(report_a["producer"]["code_files"]), {"build.py", "release_build.py"})
+        self.assertEqual(set(report_a["producer"]["code_files"]), set(source_fingerprints()))
         first = self.export(a)
         second = self.export(b)
         self.assertNotEqual(first, second)
@@ -171,7 +172,7 @@ class ReleaseBuildTests(unittest.TestCase):
         self.assertEqual(check_bundle(self.export(report))[1], 2)
 
     def test_each_operation_uses_one_upstream_validation(self):
-        import recsys.release as release
+        import recsys.release.catalog as release
 
         real = release.validate_aliases
         with patch.object(release, "validate_aliases", wraps=real) as call:
@@ -212,7 +213,7 @@ class ReleaseBuildTests(unittest.TestCase):
                     for directory in (self.fixture.root, *inputs)
                 }
                 with patch(
-                    "recsys.release_build._verified",
+                    "recsys.release.build._verified",
                     side_effect=AssertionError("overlapping store reached full validation"),
                 ):
                     with self.assertRaisesRegex(ReleaseBuildError, "release_build_integrity_error"):
@@ -237,7 +238,7 @@ class ReleaseBuildTests(unittest.TestCase):
         for target in (special, linked, parent_link / "nested-store"):
             with self.subTest(target=target):
                 with patch(
-                    "recsys.release_build._verified",
+                    "recsys.release.build._verified",
                     side_effect=AssertionError("unsafe store reached full validation"),
                 ):
                     with self.assertRaisesRegex(ReleaseBuildError, "release_build_integrity_error"):
@@ -258,7 +259,7 @@ class ReleaseBuildTests(unittest.TestCase):
             shutil.copyfile(neighbor_path, outside_neighbor)
             before = {entry.name for entry in outside.iterdir()}
             with patch(
-                "recsys.release_build._verified",
+                "recsys.release.build._verified",
                 side_effect=AssertionError("build-parent ancestor reached full validation"),
             ):
                 with self.assertRaisesRegex(ReleaseBuildError, "release_build_integrity_error"):

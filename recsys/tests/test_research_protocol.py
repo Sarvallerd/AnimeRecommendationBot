@@ -1,8 +1,8 @@
 import hashlib
 import unittest
 
-from recsys.bundle import canonical_bytes
-from recsys.research_protocol import (
+from recsys.contracts.bundle import canonical_bytes
+from recsys.research.protocol import (
     ResearchError,
     load_protocol,
     order_hash,

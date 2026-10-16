@@ -1,0 +1,8 @@
+username,anime_id,status,score,is_rewatching,num_watched_episodes
+A,1,completed,8,False,1
+A,1,completed,8,False,1
+A,2,watching,9,False,1
+B,2,dropped,7,False,1
+C,2,plan_to_watch,0,False,1
+,1,completed,6,False,1
+A,2,plan_to_watch,0,False,1

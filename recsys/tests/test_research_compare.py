@@ -5,10 +5,10 @@ from pathlib import Path
 import numpy as np
 from research_support import ResearchFixture
 
-from recsys.research_artifacts import identity, read_json
-from recsys.research_compare import _policy, compare_evaluations
-from recsys.research_evaluate import evaluate_predictions
-from recsys.research_protocol import ResearchError, load_protocol
+from recsys.research.artifacts import identity, read_json
+from recsys.research.evaluation.compare import _policy, compare_evaluations
+from recsys.research.evaluation.evaluate import evaluate_predictions
+from recsys.research.protocol import ResearchError, load_protocol
 
 
 class CompareTests(unittest.TestCase):

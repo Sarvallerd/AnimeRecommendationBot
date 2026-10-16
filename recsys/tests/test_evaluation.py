@@ -10,9 +10,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from recsys.assessment import canonical, sha
-from recsys.evaluation import (
-    CODE_FILES,
+from recsys.contracts.provenance import SOURCE_FILES, SOURCE_LAYOUT
+from recsys.data.sources import load_registry
+from recsys.historical.assessment import canonical, sha
+from recsys.historical.comparison import (
     DISTRIBUTIONS,
     ORIGINAL_HASHES,
     ORIGINALS,
@@ -27,8 +28,7 @@ from recsys.evaluation import (
     _worker,
     compare,
 )
-from recsys.quality import genre_neighbors
-from recsys.sources import load_registry
+from recsys.historical.genre_baseline import genre_neighbors
 
 
 class RootLockOriginalsTests(unittest.TestCase):
@@ -48,18 +48,18 @@ class RootLockOriginalsTests(unittest.TestCase):
                 target = root / name
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(raw)
-            with patch("recsys.evaluation.ORIGINAL_HASHES", expected):
-                self.assertEqual(_verify_originals(lock), expected)
+            with patch("recsys.historical.comparison.ORIGINAL_HASHES", expected):
+                self.assertEqual(_verify_originals(lock, originals_root=root), expected)
                 changed = root / ORIGINALS[0]
                 changed.write_bytes(changed.read_bytes() + b"changed")
                 with self.assertRaisesRegex(
                     EvaluationError, "original notebook or ranker SHA256 mismatch"
                 ):
-                    _verify_originals(lock)
+                    _verify_originals(lock, originals_root=root)
                 changed.write_bytes(original_bytes[ORIGINALS[0]])
                 changed.unlink()
-                with self.assertRaises(FileNotFoundError):
-                    _verify_originals(lock)
+                with self.assertRaisesRegex(EvaluationError, "historical originals missing"):
+                    _verify_originals(lock, originals_root=root)
 
 
 class EvaluationTests(unittest.TestCase):
@@ -140,7 +140,7 @@ class EvaluationTests(unittest.TestCase):
             }
             with (
                 patch.dict(os.environ, thread_env),
-                patch("recsys.evaluation._load_pins", return_value=pins),
+                patch("recsys.historical.comparison._load_pins", return_value=pins),
             ):
                 _worker(request, output)
             result = json.loads(output.read_text())
@@ -164,7 +164,7 @@ class EvaluationTests(unittest.TestCase):
         self.assertTrue(all(pool["num_threads"] == 1 for pool in result["effective_threadpools"]))
 
     def test_provenance_rejects_null_wrong_source_and_garbage_digest(self):
-        import recsys.evaluation as evaluation
+        import recsys.historical.comparison as evaluation
 
         registry, registry_sha = load_registry()
         descriptors = {entry["id"]: entry for entry in registry["sources"]}
@@ -176,7 +176,7 @@ class EvaluationTests(unittest.TestCase):
                 descriptors["glove_300d"],
             )
         ]
-        code_dir = Path(evaluation.__file__).parent
+        code_dir = Path(evaluation.__file__).parents[1]
         provenance = {
             "registry_sha256": registry_sha,
             "raw_sources": raw_sources,
@@ -186,7 +186,8 @@ class EvaluationTests(unittest.TestCase):
             "normalization_report_sha256": "c" * 64,
             "build_report_sha256": "d" * 64,
             "code_revision": "e" * 40,
-            "code_files": {name: sha((code_dir / name).read_bytes()) for name in CODE_FILES},
+            "source_layout": SOURCE_LAYOUT,
+            "code_files": {name: sha((code_dir / name).read_bytes()) for name in SOURCE_FILES},
             "lockfile_sha256": "f" * 64,
             "versions": {name: importlib.metadata.version(name) for name in DISTRIBUTIONS},
             "legacy_originals": ORIGINAL_HASHES,
@@ -207,7 +208,7 @@ class EvaluationTests(unittest.TestCase):
                     _validate_provenance(mutated, "1" * 64)
 
     def test_bundle_provenance_links_to_actual_files(self):
-        from recsys.bundle import read_canonical
+        from recsys.contracts.bundle import read_canonical
 
         fixture = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "bundle"
         _, catalog_raw = read_canonical(fixture / "catalog.json")
@@ -254,7 +255,7 @@ class EvaluationTests(unittest.TestCase):
                 _validate_bundle_links(wrong, bundle / "catalog.json", catalog_raw)
 
     def test_diagnostics_digest_must_match_actual_bytes(self):
-        from recsys.legacy import FEATURES, KMEANS, RETAINED_SHA256
+        from recsys.historical.legacy_vectors import FEATURES, KMEANS, RETAINED_SHA256
 
         registry, _ = load_registry()
         glove = next(item for item in registry["sources"] if item["id"] == "glove_300d")
@@ -431,8 +432,14 @@ if __name__ == "__main__":
 
 class SummaryReportTests(unittest.TestCase):
     def test_summary_includes_methods_machine_scope_and_short_counts(self):
-        from recsys.assessment import make_packet, make_template
-        from recsys.evaluation import METHODS, PARAMETERS, THREAD_ENVIRONMENT, VERSIONS, summarize
+        from recsys.historical.assessment import make_packet, make_template
+        from recsys.historical.comparison import (
+            METHODS,
+            PARAMETERS,
+            THREAD_ENVIRONMENT,
+            VERSIONS,
+            summarize,
+        )
 
         def record(title):
             return {
@@ -544,9 +551,9 @@ class SummaryReportTests(unittest.TestCase):
             ):
                 (root / name).write_bytes(canonical(value))
             with (
-                patch("recsys.evaluation._validate_comparison"),
-                patch("recsys.evaluation._validate_bundle_links"),
-                patch("recsys.evaluation._performance", return_value=perf),
+                patch("recsys.historical.comparison._validate_comparison"),
+                patch("recsys.historical.comparison._validate_bundle_links"),
+                patch("recsys.historical.comparison._performance", return_value=perf),
             ):
                 summarize(
                     root / "comparison.json",

@@ -2,7 +2,7 @@ import contextlib
 import io
 import unittest
 
-from recsys.cli import build_parser, main
+from recsys.cli.main import build_parser, main
 
 
 class ResearchCliTests(unittest.TestCase):

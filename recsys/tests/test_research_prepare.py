@@ -4,9 +4,9 @@ from pathlib import Path
 
 from research_support import ResearchFixture
 
-from recsys.research_artifacts import identity, read_json, stream_jsonl, stream_tsv
-from recsys.research_prepare import validate_preparation
-from recsys.research_protocol import ResearchError, split_user
+from recsys.research.artifacts import identity, read_json, stream_jsonl, stream_tsv
+from recsys.research.prepare import validate_preparation
+from recsys.research.protocol import ResearchError, split_user
 
 
 class PrepareTests(unittest.TestCase):
@@ -101,7 +101,7 @@ class PrepareTests(unittest.TestCase):
         source = self.fixture.dataset / "interactions.tsv.gz"
         raw = list(stream_tsv(source))
         source.unlink()
-        from recsys.research_artifacts import StreamWriter
+        from recsys.research.artifacts import StreamWriter
 
         writer = StreamWriter(source)
         changed = False

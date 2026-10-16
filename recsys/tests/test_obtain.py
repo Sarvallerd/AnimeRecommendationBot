@@ -15,8 +15,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
-from recsys.obtain import obtain
-from recsys.sources import SourceError, load_registry
+from recsys.data.obtain import obtain
+from recsys.data.sources import SourceError, load_registry
 
 
 def descriptor(source_id, filename, content, **origin):
@@ -333,7 +333,7 @@ class ObtainTests(unittest.TestCase):
             registry = self.two_csv_registry(server)
             registry["sources"][0]["url"] = "https://user:synthetic-secret@example.invalid/path"
             with patch(
-                "recsys.obtain.urllib.request.urlopen",
+                "recsys.data.obtain.urllib.request.urlopen",
                 side_effect=urllib.error.URLError("token=synthetic-secret"),
             ):
                 with self.assertRaises(SourceError) as caught:
@@ -374,7 +374,9 @@ class ObtainTests(unittest.TestCase):
                 raise http.client.IncompleteRead(b"", 1)
 
         with LocalServer({}) as server:
-            with patch("recsys.obtain.urllib.request.urlopen", return_value=InterruptedStream()):
+            with patch(
+                "recsys.data.obtain.urllib.request.urlopen", return_value=InterruptedStream()
+            ):
                 with self.assertRaisesRegex(SourceError, "download failed"):
                     obtain(self.data, registry=self.two_csv_registry(server))
         self.assertFalse((self.data / "details.csv").exists())

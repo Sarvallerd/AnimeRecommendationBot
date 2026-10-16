@@ -5,10 +5,10 @@ from unittest.mock import patch
 
 from research_support import ResearchFixture
 
-from recsys.bundle import canonical_bytes
-from recsys.research_artifacts import identity, read_json, stream_jsonl
-from recsys.research_evaluate import evaluate_predictions, metrics
-from recsys.research_protocol import ResearchError
+from recsys.contracts.bundle import canonical_bytes
+from recsys.research.artifacts import identity, read_json, stream_jsonl
+from recsys.research.evaluation.evaluate import evaluate_predictions, metrics
+from recsys.research.protocol import ResearchError
 
 
 class EvaluateTests(unittest.TestCase):
@@ -64,7 +64,7 @@ class EvaluateTests(unittest.TestCase):
         self.assertFalse(list(Path(self.tmp.name).glob(".evaluation.*")))
 
     def test_full_catalog_score_row_failures(self):
-        from recsys.research_artifacts import StreamWriter
+        from recsys.research.artifacts import StreamWriter
 
         manifest_path = self.prediction / "prediction-manifest.json"
         original_manifest, _ = read_json(manifest_path)
@@ -92,7 +92,7 @@ class EvaluateTests(unittest.TestCase):
                 self.assertFalse((Path(self.tmp.name) / name).exists())
 
     def test_null_abstention_keeps_target_denominator(self):
-        from recsys.research_artifacts import StreamWriter
+        from recsys.research.artifacts import StreamWriter
 
         manifest_path = self.prediction / "prediction-manifest.json"
         manifest, _ = read_json(manifest_path)

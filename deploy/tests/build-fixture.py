@@ -12,19 +12,20 @@ from importlib import resources
 from pathlib import Path
 
 from recsys import __version__
-from recsys.aliases import CSV_COLUMNS as ALIAS_COLUMNS
-from recsys.aliases import AliasSpec, _derive, normalize_aliases
-from recsys.build import build
-from recsys.bundle import canonical_bytes, check_bundle
-from recsys.dataset import DatasetSpec, normalize_dataset, validate_dataset
-from recsys.dataset_interactions import CSV_COLUMNS as RATING_COLUMNS
-from recsys.dataset_metadata import DETAIL_COLUMNS
-from recsys.export import export_bundle
-from recsys.normalize import normalize
-from recsys.obtain import obtain
-from recsys.release import compose_release
-from recsys.release_build import build_release, export_release_bundle
-from recsys.release_prepare import prepare_release
+from recsys.content.glove import build
+from recsys.contracts.bundle import canonical_bytes, check_bundle
+from recsys.contracts.provenance import SOURCE_LAYOUT, source_fingerprints
+from recsys.data.aliases import CSV_COLUMNS as ALIAS_COLUMNS
+from recsys.data.aliases import AliasSpec, _derive, normalize_aliases
+from recsys.data.dataset import DatasetSpec, normalize_dataset, validate_dataset
+from recsys.data.interactions import CSV_COLUMNS as RATING_COLUMNS
+from recsys.data.mal2020 import normalize
+from recsys.data.metadata import DETAIL_COLUMNS
+from recsys.data.obtain import obtain
+from recsys.release.build import build_release, export_release_bundle
+from recsys.release.catalog import compose_release
+from recsys.release.export import export_bundle
+from recsys.release.prepare import prepare_release
 
 root = Path(os.environ.get("ARB_FIXTURE_DATA_DIR", "/data"))
 raw = root / "raw"
@@ -311,7 +312,9 @@ base_counts = {
     "mixed_unset_pairs": 1,
 }
 base_expected_template = json.loads(
-    resources.files("recsys").joinpath("neelagiri_2025_v1_expectations.json").read_bytes()
+    resources.files("recsys")
+    .joinpath("resources/expectations/neelagiri_2025_v1_expectations.json")
+    .read_bytes()
 )
 base_counts = {key: base_counts.get(key, 0) for key in base_expected_template["counts"]}
 base_expected = {
@@ -472,9 +475,8 @@ fixture_candidate = export_release_bundle(
 fixture_report = json.loads(fixture_report_path.read_bytes())
 fixture_catalog = json.loads((release_dir / "catalog.json").read_bytes())["anime"]
 fixture_neighbors = json.loads((fixture_candidate / "neighbors.json").read_bytes())["neighbors"]
-package_dir = Path(__import__("recsys").__file__).parent
 fixture_lock = {
-    "schema_version": 1,
+    "schema_version": 2,
     "kind": "arb-release-lock",
     "release_id": "fixture-v1",
     "inputs": {
@@ -507,10 +509,8 @@ fixture_lock = {
             "package_version": __version__,
             "python_version": platform.python_version(),
             "numpy_version": __import__("numpy").__version__,
-            "code_files_sha256": {
-                name: hashlib.sha256((package_dir / name).read_bytes()).hexdigest()
-                for name in ("release.py", "build.py", "release_build.py", "export.py", "bundle.py")
-            },
+            "source_layout": SOURCE_LAYOUT,
+            "code_files_sha256": source_fingerprints(),
         },
     },
     "semantic_expectations": {

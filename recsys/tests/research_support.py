@@ -5,10 +5,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from recsys.bundle import canonical_bytes
-from recsys.research_artifacts import StreamWriter, identity, read_json, stream_jsonl, write_json
-from recsys.research_prepare import prepare_research
-from recsys.research_protocol import sha
+from recsys.contracts.bundle import canonical_bytes
+from recsys.research.artifacts import StreamWriter, identity, read_json, stream_jsonl, write_json
+from recsys.research.prepare import prepare_research
+from recsys.research.protocol import sha
 
 
 class ResearchFixture:
@@ -95,10 +95,10 @@ class ResearchFixture:
         output = self.root / name
         with (
             patch(
-                "recsys.research_prepare._release", return_value=(self.lock, self.catalog, {}, b"")
+                "recsys.research.prepare._release", return_value=(self.lock, self.catalog, {}, b"")
             ),
             patch(
-                "recsys.research_prepare.validate_dataset",
+                "recsys.research.prepare.validate_dataset",
                 return_value=SimpleNamespace(identity=self.lock["inputs"]["base"]["identity"]),
             ),
         ):

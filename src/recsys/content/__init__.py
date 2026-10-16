@@ -1,0 +1,1 @@
+"""Deterministic content vector construction."""

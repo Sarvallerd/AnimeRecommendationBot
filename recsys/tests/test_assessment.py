@@ -3,7 +3,7 @@
 import copy
 import unittest
 
-from recsys.assessment import (
+from recsys.historical.assessment import (
     AssessmentError,
     make_packet,
     make_template,

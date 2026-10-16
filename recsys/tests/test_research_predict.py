@@ -5,14 +5,14 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
-from research_model_support import ModelFixture
+from research_model_support import ModelFixture, patch_release_info
 
-from recsys.research_artifacts import read_json, stream_jsonl
-from recsys.research_compare import compare_evaluations
-from recsys.research_evaluate import evaluate_predictions
-from recsys.research_models import ScoreVector
-from recsys.research_predict import _encode_vector, _query, predict_validation
-from recsys.research_protocol import ResearchError, load_protocol
+from recsys.research.artifacts import read_json, stream_jsonl
+from recsys.research.evaluation.compare import compare_evaluations
+from recsys.research.evaluation.evaluate import evaluate_predictions
+from recsys.research.models.types import ScoreVector
+from recsys.research.predict import _encode_vector, _query, predict_validation
+from recsys.research.protocol import ResearchError, load_protocol
 
 
 class PredictionTests(unittest.TestCase):
@@ -149,8 +149,8 @@ class PredictionTests(unittest.TestCase):
         model = {"variant_id": "content-mean", "producer": {"code_revision": "a" * 40}}
         output = self.fixture.root / "partial"
         with (
-            patch("recsys.research_models.release_info", return_value=self.fixture.lock),
-            patch("recsys.research_predict.load_model", return_value=(model, scorer)),
+            patch_release_info(self.fixture.lock),
+            patch("recsys.research.predict.load_model", return_value=(model, scorer)),
         ):
             with self.assertRaises(ResearchError):
                 predict_validation(

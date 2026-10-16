@@ -4,7 +4,7 @@ import importlib.util
 import sys
 from pathlib import Path
 
-_module_path = Path(__file__).resolve().parents[1] / "src" / "recsys" / "bundle.py"
+_module_path = Path(__file__).resolve().parents[1] / "src" / "recsys" / "contracts" / "bundle.py"
 _spec = importlib.util.spec_from_file_location("_checkout_bundle", _module_path)
 _module = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_module)

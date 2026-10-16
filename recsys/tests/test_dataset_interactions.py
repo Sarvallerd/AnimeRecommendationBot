@@ -8,8 +8,8 @@ import traceback
 import unittest
 from pathlib import Path
 
-from recsys.dataset_interactions import CSV_COLUMNS, WS, build_interactions, user_key
-from recsys.dataset_metadata import MetadataResult
+from recsys.data.interactions import CSV_COLUMNS, WS, build_interactions, user_key
+from recsys.data.metadata import MetadataResult
 
 
 def _metadata(n=16):

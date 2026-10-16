@@ -6,12 +6,12 @@ from unittest.mock import patch
 
 from research_support import ResearchFixture
 
-from recsys.bundle import canonical_bytes
-from recsys.research_artifacts import identity, read_json, stream_jsonl, write_json
-from recsys.research_compare import compare_evaluations
-from recsys.research_evaluate import evaluate_predictions
-from recsys.research_finalize import export_test_queries, finalize_selection
-from recsys.research_protocol import ResearchError
+from recsys.contracts.bundle import canonical_bytes
+from recsys.research.artifacts import identity, read_json, stream_jsonl, write_json
+from recsys.research.evaluation.compare import compare_evaluations
+from recsys.research.evaluation.evaluate import evaluate_predictions
+from recsys.research.evaluation.finalize import export_test_queries, finalize_selection
+from recsys.research.protocol import ResearchError
 
 
 class FinalizeTests(unittest.TestCase):
@@ -58,7 +58,7 @@ class FinalizeTests(unittest.TestCase):
             manifest, _ = read_json(self.comparison / "comparison-manifest.json")
         raw = canonical_bytes(report)
         (self.comparison / "comparison.json").write_bytes(raw)
-        from recsys.research_protocol import sha
+        from recsys.research.protocol import sha
 
         manifest["report"] = {"bytes": len(raw), "sha256": sha(raw)}
         (self.comparison / "comparison-manifest.json").write_bytes(canonical_bytes(manifest))
@@ -227,7 +227,7 @@ class FinalizeTests(unittest.TestCase):
         )
         manifest, _ = read_json(prediction / "prediction-manifest.json")
         manifest["code_revision"] = "b" * 40
-        from recsys.bundle import canonical_bytes
+        from recsys.contracts.bundle import canonical_bytes
 
         (prediction / "prediction-manifest.json").write_bytes(canonical_bytes(manifest))
         with self.assertRaises(ResearchError):
@@ -244,7 +244,9 @@ class FinalizeTests(unittest.TestCase):
     def test_changed_n_rejected_before_test_labels(self):
         self.decision["n"] = 2
         self.decision_path.write_bytes(
-            __import__("recsys.bundle", fromlist=["canonical_bytes"]).canonical_bytes(self.decision)
+            __import__("recsys.contracts.bundle", fromlist=["canonical_bytes"]).canonical_bytes(
+                self.decision
+            )
         )
         with self.assertRaises(ResearchError):
             finalize_selection(

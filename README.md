@@ -38,11 +38,11 @@ UV_PROJECT_ENVIRONMENT=.tools/lint-venv uv run --locked --only-group lint ruff c
 UV_PROJECT_ENVIRONMENT=.tools/lint-venv uv run --locked --only-group lint ruff format --check .
 ```
 
-Правила: Python 3.12, 100 колонок, четыре пробела, двойные кавычки, LF, базовые E4/E7/E9/F и порядок импортов I. Пока `src/recsys/` исключён из Ruff до версионированной миграции исходников в ARB-054; она удалит исключение и распространит те же проверки на основной пакет.
+Правила: Python 3.12, 100 колонок, четыре пробела, двойные кавычки, LF, базовые E4/E7/E9/F и порядок импортов I. Проверка охватывает весь основной Python-пакет `src/recsys/`; [запись о миграции layout](docs/migrations/arb054-recsys-layout-v2.json) фиксирует физические пути и исторические producer-хеши.
 
 Для сравнения качества добавьте `uv sync --locked --extra quality` и передавайте `--extra quality` в последующих `uv run`. Бот читает переменные окружения напрямую; для локального запуска подготовьте `TELOXIDE_TOKEN`, `DATABASE_URL` и `ARTIFACTS_DIR` в своём `.env` и явно передайте его: `uv run --locked --env-file .env bot --check-config`, затем `uv run --locked --env-file .env bot`. Проверка конфигурации не обращается к базе или Telegram. Подробности и поведение редактируемой установки — в [руководстве по единому окружению](dev/environment.md). Для полной сборки пакета и запуска без локального Rust/Python окружения используйте Docker ниже.
 
-Исходные лицензии и версии записаны в [реестре источников](src/recsys/source_registry.json) и [руководстве Python-пакета](recsys/README.md): MAL 2020 закреплён коммитом `9a1d7f5`, GloVe — SHA-256 архива и текста. Контрольные суммы обнаруживают повреждение и подмену входных байтов, но сами по себе не подтверждают происхождение источника.
+Исходные лицензии и версии записаны в [реестре источников](src/recsys/resources/registries/source_registry.json) и [руководстве Python-пакета](recsys/README.md): MAL 2020 закреплён коммитом `9a1d7f5`, GloVe — SHA-256 архива и текста. Контрольные суммы обнаруживают повреждение и подмену входных байтов, но сами по себе не подтверждают происхождение источника.
 
 ## Первый запуск через Docker Compose
 
@@ -76,7 +76,24 @@ ARB_BOT_ENV=/absolute/path/to/.arb/local/secrets/bot.env
 ARB_POSTGRES_ENV=/absolute/path/to/.arb/local/secrets/postgres.env
 ```
 
-До первого экспорта `ARB_BUNDLE_DIR` может указывать на будущий путь; бот запускается только после выбора созданного пакета. Создайте `data/raw` от имени `ARB_UID` и выполните:
+До первого экспорта `ARB_BUNDLE_DIR` может указывать на будущий путь; бот запускается только после выбора созданного пакета.
+
+**Перед первой подготовкой нового `current` восстановите принятый пакет v1 из исходного производителя.** Версия 0.2 проверяет и повторно использует его артефакты, но не создаёт выпуск с прежними хешами версии 0.1. Сначала разместите проверенные Neelagiri base и Nafiul aliases, исходный кэш Nafiul и текст GloVe в одном приватном каталоге. В командах замените `/private/DATA` на абсолютный `ARB_DATA_DIR` из `compose.env` (`$LOCAL/data` в примере выше) согласно [контракту данных и выпуска в Notion](https://app.notion.com/p/3fb3908d6b1f8136a1dfff3c4a12108e). Из корня чистой рабочей копии создайте отдельный checkout исходного коммита и проверьте его SHA:
+
+```bash
+git worktree add --detach /private/arb-reference-v1 1441573fbbbffc4693c7e1100aaae4458d9e88d4
+cd /private/arb-reference-v1
+test "$(git rev-parse HEAD)" = 1441573fbbbffc4693c7e1100aaae4458d9e88d4
+test -z "$(git status --porcelain)"
+uv sync --python 3.12.14 --locked --no-editable --extra quality
+test "$(uv run --python 3.12.14 --locked --no-editable --extra quality recsys --version)" = "recsys 0.1.0"
+uv run --python 3.12.14 --locked --no-editable --extra quality recsys release prepare --release current --data-dir /private/DATA
+cd "$ROOT"
+```
+
+Если Python 3.12.14 ещё не установлен для `uv`, сначала выполните `uv python install 3.12.14`. Используйте именно проверенные входные байты и исходный lock; не переписывайте manifest и producer-хеши. После подготовки вернитесь в checkout версии 0.2, укажите тот же каталог данных и проверьте сохранённые `catalog release` и `bundle` перед выбором пакета для бота. При отсутствии старого производителя текущая команда выдаёт `release_reference_producer_required` до записи. Это восстановление не является новой приёмкой полного каталога; полную приёмку v1 запускают из закреплённого checkout, а проверка старых свидетельств в текущем дереве остаётся доступной.
+
+Создайте `data/raw` от имени `ARB_UID` и выполните:
 
 ```bash
 compose() { docker compose --env-file "$SETTINGS" -p "$PROJECT" -f "$COMPOSE_FILE" "$@"; }
