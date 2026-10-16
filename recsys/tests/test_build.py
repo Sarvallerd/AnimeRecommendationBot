@@ -8,7 +8,7 @@ from pathlib import Path
 
 import numpy as np
 
-from recsys.build import (
+from recsys.content.glove import (
     BuildError,
     _canonical,
     build,

@@ -1,0 +1,381 @@
+"""Fixed, supervised and resumable validation-only ML-02 campaign.
+
+The worker entry uses only the standard library until the generation gate has
+been acquired and checked. All expensive scientific work runs in workers.
+"""
+
+from __future__ import annotations
+
+import hashlib
+from pathlib import Path
+
+from recsys.research.campaign.artifacts import _phase_path, _verify_phase
+from recsys.research.campaign.common import (
+    AUX_PHASE,
+    AUX_VARIANTS,
+    FIT_SECONDS,
+    PHASES,
+    VARIANTS,
+    _bytes_equal,
+    _canonical,
+    _digest,
+    _fail,
+    _read_private,
+)
+from recsys.research.campaign.journal import _Journal, _successes
+from recsys.research.campaign.plan import (
+    _component_phase,
+    _expected_nodes,
+    _source_receipt,
+    _validate_plan_structure,
+)
+
+
+def _public_projection(root, plan, successes, prepared_dir):
+    """Build only anonymous validation aggregates from strictly paired rows."""
+    import numpy as np
+
+    from recsys.research.artifacts import file_descriptor, read_json
+    from recsys.research.evaluation.compare import _bootstrap, _evaluation, _primary, _quantile
+    from recsys.research.evaluation.evaluate import _aggregate, _prepared
+    from recsys.research.protocol import load_protocol
+
+    prepared, protocol, catalog, fit, fit_identity, stats = _prepared(
+        prepared_dir, plan["prepared_identity"]
+    )
+    if fit_identity != plan["fit_identity"] or protocol != load_protocol():
+        _fail("research_campaign_input_invalid")
+    all_rows = {}
+    variants = []
+    auxiliaries = []
+    journal_events = _Journal(root / "journal.jsonl").events
+    _, attempts, charged, _, _ = _successes(journal_events)
+    reference_metadata = None
+    reference_n0 = None
+    for variant in VARIANTS:
+        paths = {phase: _phase_path(root, successes, variant, phase) for phase in PHASES}
+        if any(value is None for value in paths.values()):
+            _fail("research_campaign_incomplete")
+        model, model_raw = read_json(paths["fit"] / "model-manifest.json")
+        prediction, prediction_raw = read_json(paths["predict"] / "prediction-manifest.json")
+        evaluation, evaluation_identity, rows = _evaluation(
+            paths["evaluate"], plan["prepared_identity"]
+        )
+        initial_report, _ = read_json(
+            paths["evaluate"] / "report.json", evaluation["files"]["report.json"]
+        )
+        recomputed = _aggregate(rows.values(), catalog, stats)
+        expected_report = {
+            "schema_version": 1,
+            "kind": "arb-ml-evaluation-report",
+            "split": "validation",
+            "prediction_identity": _digest(prediction_raw),
+            "prepared_identity": plan["prepared_identity"],
+            "queries": len(rows) // 2,
+            "groups": recomputed,
+        }
+        if _canonical(initial_report) != _canonical(expected_report):
+            _fail("research_campaign_aggregate_mismatch")
+        if (
+            model["variant_id"] != variant
+            or prediction["model_id"] != variant
+            or prediction["config_sha256"] != hashlib.sha256(model_raw).hexdigest()
+            or evaluation["model_id"] != variant
+            or evaluation["prediction_identity"] != _digest(prediction_raw)
+            or evaluation["config_sha256"] != prediction["config_sha256"]
+            or evaluation["prediction_code_revision"] != plan["code_revision"]
+            or evaluation["selection_identity"] is not None
+            or prediction["split"] != "validation"
+            or file_descriptor(paths["predict"] / "scores.jsonl.gz")
+            != {key: prediction["scores"][key] for key in ("bytes", "sha256")}
+        ):
+            _fail("research_campaign_chain_invalid")
+        for name in ("report.json", "user-metrics.jsonl.gz", "evaluation-manifest.json"):
+            if (paths["evaluate"] / name).read_bytes() != (paths["replay"] / name).read_bytes():
+                _fail("research_campaign_replay_mismatch")
+        metadata = {
+            key: (
+                row["user_key"],
+                row["split"],
+                row["cohort"],
+                row["mask"],
+                row["order"],
+                row["n"],
+                row["history_bin"],
+                row["seed_band"],
+                row["recent_2024_seed_count"],
+            )
+            for key, row in rows.items()
+        }
+        n0 = {key: (row["ranking"], row["metrics"]) for key, row in rows.items() if row["n"] == 0}
+        if reference_metadata is None:
+            reference_metadata, reference_n0 = metadata, n0
+        elif metadata != reference_metadata or n0 != reference_n0:
+            _fail("research_campaign_unpaired")
+        all_rows[variant] = rows
+        phase_resources = {}
+        for phase in PHASES:
+            event = successes[(variant, phase)]
+            evidence = event["resources"]
+            if (
+                type(evidence) is not dict
+                or evidence.get("outcome") != "ok"
+                or evidence.get("cleanup_complete") is not True
+            ):
+                _fail("research_campaign_resource_invalid")
+            phase_resources[phase] = {
+                key: evidence[key]
+                for key in (
+                    "elapsed_seconds",
+                    "sampled_peak_rss_bytes",
+                    "wait4_peak_rss_bytes",
+                    "observed_peak_rss_bytes",
+                    "rss_samples",
+                    "max_sample_gap_seconds",
+                )
+            }
+        measurement = None
+        if plan["variants"][VARIANTS.index(variant)]["backend"] == "gpu":
+            measured, _ = _read_private(paths["predict"].parent / "resources" / "measurement.json")
+            pool = measured.get("dedicated_pool_session_including_admission")
+            if (
+                measured.get("status") != "published"
+                or type(pool) is not dict
+                or set(pool)
+                != {
+                    "pool_used_bytes",
+                    "pool_reserved_bytes",
+                    "pool_limit_bytes",
+                    "pool_peak_used_bytes",
+                    "pool_peak_reserved_bytes",
+                }
+                or any(type(value) is not int or value < 0 for value in pool.values())
+            ):
+                _fail("research_campaign_measurement_invalid")
+            measurement = {
+                "gpu_admission_seconds": measured["gpu_admission_seconds"],
+                "queries": measured["queries"],
+                "score_pairs": measured["score_pairs"],
+                "synchronized_scoring_seconds": measured["synchronized_scoring_seconds"],
+                "encoding_gzip_write_seconds": measured["encoding_gzip_write_seconds"],
+                "dedicated_pool_session_including_admission": dict(pool),
+                "memory_scope": "dedicated-pool-only-excludes-context-and-cublas",
+            }
+        variants.append(
+            {
+                "variant_id": variant,
+                "backend": plan["variants"][VARIANTS.index(variant)]["backend"],
+                "model_identity": _digest(model_raw),
+                "prediction_identity": _digest(prediction_raw),
+                "evaluation_identity": evaluation_identity,
+                "replay_identity": _digest(
+                    (paths["replay"] / "evaluation-manifest.json").read_bytes()
+                ),
+                "evaluation_replay_bytes_equal": True,
+                "queries": initial_report["queries"],
+                "scores_compressed_bytes": prediction["scores"]["bytes"],
+                "scores_uncompressed_bytes": prediction["scores"]["uncompressed_bytes"],
+                "resources": phase_resources,
+                "predict_measurement": measurement,
+                "fit_budget": {
+                    "primary_charged_seconds": charged.get((variant, "fit"), 0.0),
+                    "auxiliary_charged_seconds": charged.get((variant, AUX_PHASE), 0.0),
+                    "all_attempts_charged_seconds": charged.get((variant, "fit"), 0.0)
+                    + charged.get((variant, AUX_PHASE), 0.0),
+                    "remaining_seconds": FIT_SECONDS
+                    - charged.get((variant, "fit"), 0.0)
+                    - charged.get((variant, AUX_PHASE), 0.0),
+                },
+                "checked_groups": recomputed,
+            }
+        )
+    for variant in AUX_VARIANTS if plan["auxiliary_fits"] else ():
+        path = _phase_path(root, successes, variant, AUX_PHASE)
+        if path is None:
+            _fail("research_campaign_incomplete")
+        manifest, raw = read_json(path / "model-manifest.json")
+        if (
+            manifest["variant_id"] != variant
+            or manifest["producer"]["execution"]["backend"] != "cpu"
+        ):
+            _fail("research_campaign_component_invalid")
+        evidence = successes[(variant, AUX_PHASE)]["resources"]
+        if evidence.get("outcome") != "ok" or evidence.get("cleanup_complete") is not True:
+            _fail("research_campaign_resource_invalid")
+        auxiliaries.append(
+            {
+                "variant_id": variant,
+                "backend": "cpu",
+                "phase": AUX_PHASE,
+                "status": "complete",
+                "component_identity": _digest(raw),
+                "consumer": "hybrid",
+                "fit_budget_owner": variant,
+                "resources": {
+                    key: evidence[key]
+                    for key in (
+                        "elapsed_seconds",
+                        "sampled_peak_rss_bytes",
+                        "wait4_peak_rss_bytes",
+                        "observed_peak_rss_bytes",
+                        "rss_samples",
+                        "max_sample_gap_seconds",
+                    )
+                },
+            }
+        )
+    hybrid_path = _phase_path(root, successes, "hybrid", "fit")
+    hybrid_manifest, _ = read_json(hybrid_path / "model-manifest.json")
+    if hybrid_manifest["producer"]["execution"]["backend"] != "cpu":
+        _fail("research_campaign_component_invalid")
+    for part, variant in (("content", "content-mean"), ("svd", "puresvd")):
+        origin = _phase_path(root, successes, variant, _component_phase(plan))
+        source, raw = read_json(origin / "model-manifest.json")
+        if hybrid_manifest["metadata"]["components"][part]["identity"] != _digest(raw):
+            _fail("research_campaign_component_invalid")
+        if not _bytes_equal(
+            origin / "model-manifest.json", hybrid_path / (part + "_manifest.json")
+        ):
+            _fail("research_campaign_component_invalid")
+        prefix = "content_" if part == "content" else "svd_"
+        for logical in source["files"]:
+            if not _bytes_equal(origin / logical, hybrid_path / (prefix + logical)):
+                _fail("research_campaign_component_invalid")
+    reference_users, reference_cells = _primary(all_rows["popularity"])
+    main_users = len(reference_users)
+    for variant in VARIANTS[1:]:
+        users, cells = _primary(all_rows[variant])
+        if users != reference_users or any(
+            cells[user][arm][0] != reference_cells[user][arm][0]
+            for user in users
+            for arm in reference_cells[user]
+        ):
+            _fail("research_campaign_unpaired")
+    primary = paired = None
+    if main_users >= 20:
+        matrices = {}
+        for variant in VARIANTS:
+            _, cells = _primary(all_rows[variant])
+            matrices[variant] = np.asarray(
+                [
+                    [
+                        sum(cells[user][(f"random-liked-{order}", n)][1] for order in (1, 2, 3)) / 3
+                        for n in range(1, 11)
+                    ]
+                    for user in reference_users
+                ],
+                dtype=np.float64,
+            )
+        primary = {
+            variant: {
+                "users": main_users,
+                "mean_ndcg5_by_n": [float(x) for x in matrix.mean(axis=0)],
+            }
+            for variant, matrix in matrices.items()
+        }
+        paired = {}
+        comparison = protocol["comparison"]
+        for variant in VARIANTS[1:]:
+            delta = matrices[variant] - matrices["popularity"]
+            sample = _bootstrap(delta, comparison["seed"], comparison["bootstrap_replicates"])
+            paired[variant] = {
+                "users": main_users,
+                "mean_difference_by_n": [float(x) for x in delta.mean(axis=0)],
+                "pointwise_ci95_by_n": [
+                    [
+                        _quantile(sample[:, index], 0.025, "lower"),
+                        _quantile(sample[:, index], 0.975, "higher"),
+                    ]
+                    for index in range(10)
+                ],
+                "bootstrap_replicates": comparison["bootstrap_replicates"],
+                "bootstrap_seed": comparison["seed"],
+            }
+    return {
+        "variants": variants,
+        "auxiliary_fits": auxiliaries,
+        "execution_config_count": plan["execution_config_count"],
+        "planned_nodes": len(_expected_nodes(plan)),
+        "actual_completed_model_packages": sum(
+            phase in ("fit", AUX_PHASE) for _variant, phase in successes
+        ),
+        "actual_attempts_started": sum(attempts.values()),
+        "actual_attempts_completed": sum(
+            event["event"] == "attempt_finished" for event in journal_events
+        ),
+        "hybrid_admission": {"status": "not_applicable", "reason": "declared_cpu_execution"},
+        "primary_users": main_users,
+        "primary_ndcg5": primary,
+        "paired_vs_popularity": paired,
+        "small_cohort_suppressed": main_users < 20,
+    }
+
+
+def validate_campaign(
+    prepared_dir, campaign_dir, *, expected_prepared_identity, expected_campaign_identity
+):
+    """Revalidate retained artifacts and published anonymous aggregates."""
+    from recsys.research.artifacts import safe_path, separate
+
+    prepared_dir = Path(prepared_dir).absolute()
+    root = Path(campaign_dir).absolute()
+    separate(prepared_dir, root)
+    safe_path(prepared_dir, directory=True)
+    safe_path(root, directory=True)
+    plan, raw = _read_private(root / "campaign-plan.json")
+    configured = _validate_plan_structure(plan)
+    if (
+        _digest(raw) != expected_campaign_identity
+        or plan["prepared_identity"] != expected_prepared_identity
+        or plan["producer"] != _source_receipt(configured)
+        or tuple(entry["variant_id"] for entry in plan["variants"]) != VARIANTS
+    ):
+        _fail("research_campaign_plan_mismatch")
+    journal = _Journal(root / "journal.jsonl")
+    successes, attempts, charged, starts, failed = _successes(journal.events)
+    if starts or failed or set(successes) != _expected_nodes(plan):
+        _fail("research_campaign_incomplete")
+    for (variant, phase), event in successes.items():
+        identity, _ = _verify_phase(
+            root,
+            plan,
+            successes,
+            variant,
+            phase,
+            event["attempt"],
+            event["generation"],
+            prepared_dir,
+        )
+        if identity != event["output_identity"]:
+            _fail("research_campaign_chain_invalid")
+    projection = _public_projection(root, plan, successes, prepared_dir)
+    report, report_raw = _read_private(root / "campaign-report.json")
+    manifest, _ = _read_private(root / "campaign-report-manifest.json")
+    expected_fields = {
+        "schema_version": 1,
+        "kind": "arb-ml02-campaign-report",
+        "plan_identity": expected_campaign_identity,
+        "prepared_identity": expected_prepared_identity,
+        "status": "complete",
+        "failure_code": None,
+        "diagnostics": {
+            "single_query_latency": "not_measured",
+            "batch_throughput": "not_measured",
+            "reason": "standalone_benchmark_not_scheduled",
+        },
+    }
+    if (
+        any(report.get(key) != value for key, value in expected_fields.items())
+        or any(report.get(key) != value for key, value in projection.items())
+        or set(report) != {*expected_fields, *projection}
+        or manifest
+        != {
+            "schema_version": 1,
+            "kind": "arb-ml02-campaign-report-manifest",
+            "plan_identity": expected_campaign_identity,
+            "status": "complete",
+            "report": {"bytes": len(report_raw), "sha256": hashlib.sha256(report_raw).hexdigest()},
+        }
+    ):
+        _fail("research_campaign_report_invalid")
+    return report

@@ -9,9 +9,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from recsys import __version__
-from recsys.build import _canonical, build
-from recsys.bundle import ContractError, check_bundle
-from recsys.export import ALGORITHM, export_bundle
+from recsys.content.glove import _canonical, build
+from recsys.contracts.bundle import ContractError, check_bundle
+from recsys.release.export import ALGORITHM, export_bundle
 
 
 def sha(raw):
@@ -232,14 +232,16 @@ class ExportTests(unittest.TestCase):
 
     def test_stage_validation_failure_leaves_no_published_directory(self):
         store = self.root / "failed"
-        with patch("recsys.export.check_bundle", side_effect=ContractError("staged failure")):
+        with patch(
+            "recsys.release.export.check_bundle", side_effect=ContractError("staged failure")
+        ):
             with self.assertRaisesRegex(ContractError, "staged failure"):
                 self.export("failed")
         self.assertEqual([p.name for p in store.iterdir()], [".publication.lock"])
 
     def test_staged_write_failure_and_symlink_lock_are_safe(self):
         store = self.root / "write-failed"
-        with patch("recsys.export.os.fsync", side_effect=OSError("sync failed")):
+        with patch("recsys.release.export.os.fsync", side_effect=OSError("sync failed")):
             with self.assertRaisesRegex(OSError, "sync failed"):
                 self.export("write-failed")
         self.assertEqual([p.name for p in store.iterdir()], [".publication.lock"])

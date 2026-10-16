@@ -17,12 +17,14 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
-from research_model_support import ModelFixture
+from research_model_support import ModelFixture, patch_release_info
 from test_research_model_content import _glove
 
 import recsys
-from recsys.research_artifacts import StreamWriter, read_json, stream_jsonl
-from recsys.research_campaign import (
+from recsys.research.artifacts import StreamWriter, read_json, stream_jsonl
+from recsys.research.campaign.plan import _validate_plan_structure
+from recsys.research.campaign.report import validate_campaign
+from recsys.research.campaign.runner import (
     FIT_SECONDS,
     _canonical,
     _digest,
@@ -33,12 +35,10 @@ from recsys.research_campaign import (
     _remaining,
     _successes,
     _worker_env,
-    _worker_main,
-    _worker_request,
     run_campaign,
-    validate_campaign,
 )
-from recsys.research_protocol import ResearchError, load_protocol, split_user
+from recsys.research.campaign.worker import _worker_main, _worker_request
+from recsys.research.protocol import ResearchError, load_protocol, split_user
 
 
 def _stable_utc_clock():
@@ -132,9 +132,27 @@ class _InterimSupervisor(_Supervisor):
 
 class CampaignTests(unittest.TestCase):
     def setUp(self):
-        clock = patch("recsys.research_campaign._now", side_effect=_stable_utc_clock())
+        clock = patch("recsys.research.campaign.runner._now", side_effect=_stable_utc_clock())
         clock.start()
         self.addCleanup(clock.stop)
+
+    def test_old_campaign_plan_rejects_before_science(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = ModelFixture(temporary)
+            glove = Path(temporary) / "glove.txt"
+            fixture.lock["inputs"]["embeddings"] = _glove(glove)
+            prepared, identity = fixture.make_prepared()
+            with patch_release_info(fixture.lock):
+                plan = _plan(
+                    prepared, identity, "a" * 40, glove, "cpu", 2, datetime.now(timezone.utc)
+                )
+            plan["schema_version"] = 1
+            plan["producer"].pop("source_layout")
+            with patch(
+                "recsys.research.models.spec.campaign", side_effect=AssertionError("science loaded")
+            ):
+                with self.assertRaisesRegex(ResearchError, "research_source_layout_unsupported"):
+                    _validate_plan_structure(plan)
 
     def test_published_orphan_without_success_event_blocks_resume(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -144,8 +162,8 @@ class CampaignTests(unittest.TestCase):
             prepared, identity = fixture.make_prepared()
             output = Path(temporary) / "campaign"
             with (
-                patch("recsys.research_models.release_info", return_value=fixture.lock),
-                patch("recsys.research_resources.ResourceSupervisor", _Supervisor),
+                patch_release_info(fixture.lock),
+                patch("recsys.research.resources.ResourceSupervisor", _Supervisor),
             ):
                 manifest_path = run_campaign(
                     prepared,
@@ -215,8 +233,8 @@ class CampaignTests(unittest.TestCase):
             prepared, identity = fixture.make_prepared()
             output = Path(temporary) / "campaign"
             with (
-                patch("recsys.research_models.release_info", return_value=fixture.lock),
-                patch("recsys.research_resources.ResourceSupervisor", _Supervisor),
+                patch_release_info(fixture.lock),
+                patch("recsys.research.resources.ResourceSupervisor", _Supervisor),
             ):
                 manifest_path = run_campaign(
                     prepared,
@@ -304,10 +322,12 @@ class CampaignTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             journal = _Journal(Path(temporary) / "journal.jsonl")
             first = datetime.now(timezone.utc) - timedelta(seconds=10)
-            with patch("recsys.research_campaign._now", return_value=first):
+            with patch("recsys.research.campaign.journal._now", return_value=first):
                 journal.append("run_started", generation="g")
             original = journal.path.read_bytes()
-            with patch("recsys.research_campaign._now", return_value=first - timedelta(seconds=1)):
+            with patch(
+                "recsys.research.campaign.journal._now", return_value=first - timedelta(seconds=1)
+            ):
                 with self.assertRaisesRegex(ResearchError, "research_campaign_clock_invalid"):
                     journal.append("run_started", generation="later")
             self.assertEqual(journal.path.read_bytes(), original)
@@ -386,8 +406,8 @@ class CampaignTests(unittest.TestCase):
             output = Path(temporary) / "campaign"
             _InterimSupervisor.starts = 0
             with (
-                patch("recsys.research_models.release_info", return_value=fixture.lock),
-                patch("recsys.research_resources.ResourceSupervisor", _InterimSupervisor),
+                patch_release_info(fixture.lock),
+                patch("recsys.research.resources.ResourceSupervisor", _InterimSupervisor),
             ):
                 run_campaign(
                     prepared,
@@ -419,8 +439,8 @@ class CampaignTests(unittest.TestCase):
             prepared, identity = fixture.make_prepared()
             output = Path(temporary) / "campaign"
             with (
-                patch("recsys.research_models.release_info", return_value=fixture.lock),
-                patch("recsys.research_resources.ResourceSupervisor", _Supervisor),
+                patch_release_info(fixture.lock),
+                patch("recsys.research.resources.ResourceSupervisor", _Supervisor),
             ):
                 manifest_path = run_campaign(
                     prepared,
@@ -553,7 +573,7 @@ class CampaignTests(unittest.TestCase):
                     )
 
     def test_stale_generation_real_isolated_worker_never_reaches_science(self):
-        from recsys.research_resources import ResourceSupervisor
+        from recsys.research.resources import ResourceSupervisor
 
         with tempfile.TemporaryDirectory() as temporary:
             fixture = ModelFixture(temporary)
@@ -562,7 +582,7 @@ class CampaignTests(unittest.TestCase):
             prepared, identity = fixture.make_prepared()
             root = Path(temporary) / "worker-root"
             root.mkdir(mode=0o700)
-            with patch("recsys.research_models.release_info", return_value=fixture.lock):
+            with patch_release_info(fixture.lock):
                 plan = _plan(
                     prepared,
                     identity,
@@ -611,7 +631,7 @@ class CampaignTests(unittest.TestCase):
                         sys.executable,
                         "-I",
                         "-m",
-                        "recsys.research_campaign",
+                        "recsys.research.campaign.worker",
                         "--worker-request",
                         str(attempt / "request.json"),
                     ],
@@ -654,7 +674,7 @@ def _isolated_fixture_python(root, lock):
         "import json, os\n"
         "if 'ARB_TEST_LOCK_JSON' in os.environ:\n"
         " from pathlib import Path\n"
-        " import recsys.research_models as models\n"
+        " import recsys.release.lock as models\n"
         " fixture_lock = json.loads(Path(os.environ['ARB_TEST_LOCK_JSON']).read_text())\n"
         " models.release_info = lambda: fixture_lock\n"
     )
@@ -674,9 +694,9 @@ class RealProcessCampaignTests(unittest.TestCase):
             executable, lock_path = _isolated_fixture_python(root, fixture.lock)
             output = root / f"{backend}-real-campaign"
             with (
-                patch("recsys.research_models.release_info", return_value=fixture.lock),
-                patch("recsys.research_campaign.sys.executable", str(executable)),
-                patch("recsys.research_campaign._now", side_effect=_stable_utc_clock()),
+                patch_release_info(fixture.lock),
+                patch("recsys.research.campaign.runner.sys.executable", str(executable)),
+                patch("recsys.research.campaign.runner._now", side_effect=_stable_utc_clock()),
                 patch.dict(os.environ, {"ARB_TEST_LOCK_JSON": str(lock_path)}),
             ):
                 manifest_path = run_campaign(
@@ -691,7 +711,7 @@ class RealProcessCampaignTests(unittest.TestCase):
                 manifest, _ = read_json(manifest_path)
                 if manifest["status"] != "complete":
                     retention = os.getenv("ARB_RESEARCH_FAILURE_DIR")
-                    if backend == "gpu" and retention:
+                    if retention:
                         target = Path(retention) / ("gpu-fixture-" + uuid.uuid4().hex)
                         shutil.copytree(root, target, symlinks=True)
                     events = _Journal(output / "journal.jsonl").events
@@ -750,7 +770,7 @@ class RealProcessCampaignTests(unittest.TestCase):
 @unittest.skipUnless(os.getenv("ARB_RESEARCH_GPU_TEST") == "1", "hardware opt-in")
 class GPUCampaignTests(unittest.TestCase):
     def setUp(self):
-        clock = patch("recsys.research_campaign._now", side_effect=_stable_utc_clock())
+        clock = patch("recsys.research.campaign.runner._now", side_effect=_stable_utc_clock())
         clock.start()
         self.addCleanup(clock.stop)
 
@@ -762,8 +782,8 @@ class GPUCampaignTests(unittest.TestCase):
             prepared, identity = fixture.make_prepared()
             output = Path(temporary) / "gpu-campaign"
             with (
-                patch("recsys.research_models.release_info", return_value=fixture.lock),
-                patch("recsys.research_resources.ResourceSupervisor", _Supervisor),
+                patch_release_info(fixture.lock),
+                patch("recsys.research.resources.ResourceSupervisor", _Supervisor),
             ):
                 path = run_campaign(
                     prepared,

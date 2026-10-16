@@ -38,11 +38,11 @@ UV_PROJECT_ENVIRONMENT=.tools/lint-venv uv run --locked --only-group lint ruff c
 UV_PROJECT_ENVIRONMENT=.tools/lint-venv uv run --locked --only-group lint ruff format --check .
 ```
 
-Правила: Python 3.12, 100 колонок, четыре пробела, двойные кавычки, LF, базовые E4/E7/E9/F и порядок импортов I. Пока `src/recsys/` исключён из Ruff до версионированной миграции исходников в ARB-054; она удалит исключение и распространит те же проверки на основной пакет.
+Правила: Python 3.12, 100 колонок, четыре пробела, двойные кавычки, LF, базовые E4/E7/E9/F и порядок импортов I. Проверка охватывает весь основной Python-пакет `src/recsys/`; [запись о миграции layout](docs/migrations/arb054-recsys-layout-v2.json) фиксирует физические пути и исторические producer-хеши.
 
 Для сравнения качества добавьте `uv sync --locked --extra quality` и передавайте `--extra quality` в последующих `uv run`. Бот читает переменные окружения напрямую; для локального запуска подготовьте `TELOXIDE_TOKEN`, `DATABASE_URL` и `ARTIFACTS_DIR` в своём `.env` и явно передайте его: `uv run --locked --env-file .env bot --check-config`, затем `uv run --locked --env-file .env bot`. Проверка конфигурации не обращается к базе или Telegram. Подробности и поведение редактируемой установки — в [руководстве по единому окружению](dev/environment.md). Для полной сборки пакета и запуска без локального Rust/Python окружения используйте Docker ниже.
 
-Исходные лицензии и версии записаны в [реестре источников](src/recsys/source_registry.json) и [руководстве Python-пакета](recsys/README.md): MAL 2020 закреплён коммитом `9a1d7f5`, GloVe — SHA-256 архива и текста. Контрольные суммы обнаруживают повреждение и подмену входных байтов, но сами по себе не подтверждают происхождение источника.
+Исходные лицензии и версии записаны в [реестре источников](src/recsys/resources/registries/source_registry.json) и [руководстве Python-пакета](recsys/README.md): MAL 2020 закреплён коммитом `9a1d7f5`, GloVe — SHA-256 архива и текста. Контрольные суммы обнаруживают повреждение и подмену входных байтов, но сами по себе не подтверждают происхождение источника.
 
 ## Первый запуск через Docker Compose
 
@@ -84,6 +84,8 @@ compose --profile tools build builder bot
 compose --profile tools run --rm --no-deps builder obtain --snapshot nafiul-2026-v1 --data-dir /data/raw/nafiul-2026-v1
 compose --profile tools run --rm --no-deps --entrypoint /usr/local/bin/prepare-artifacts builder
 ```
+
+**Перед первой подготовкой нового `current` восстановите принятый пакет v1 в отдельной закреплённой рабочей копии.** Источники 0.2 умеют проверять и повторно использовать его исходные артефакты, но не могут честно пересоздать выпуск с хешами производителя 0.1. Выполните подготовку на том же приватном каталоге данных из Git checkout `1441573fbbbffc4693c7e1100aaae4458d9e88d4` с Python 3.12.14 и исходным lock; подробный порядок входов — в [руководстве выпуска](recsys/RELEASE.md). Не переписывайте lock, manifest или producer-хеши. В новом checkout сначала проверьте сохранённый `catalog release` и `bundle`, затем выполняйте приведённые ниже команды Compose. Если старого пакета нет, команда подготовки 0.2 завершится `release_reference_producer_required` до записи. Отдельная полная приёмка v1 также запускается из закреплённого checkout; в текущем дереве её режим проверки сохранённых свидетельств остаётся доступен.
 
 Последняя команда запускает `recsys release prepare --release current --data-dir /data`. До запуска разместите проверенные immutable base и aliases в `/data/datasets/sha256-...` и `/data/aliases/sha256-...`, кэш Nafiul в `/data/raw/nafiul-2026-v1`, текст GloVe в `/data/raw/glove-6b-300d-v1`. Команда работает offline, проверяет lock и печатает путь проверенного пакета и подсказку `ARB_BUNDLE_DIR`. Выбор работающего пакета в `compose.env` остаётся отдельным шагом.
 

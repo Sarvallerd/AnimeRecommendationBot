@@ -389,18 +389,15 @@ class ReleaseEvidenceTests(unittest.TestCase):
         self.assertIn("source_registry_glove_6b_300d_v1.json", r.probe_code())
         with self.assertRaisesRegex(r.ReleaseError, "BUILD_MISMATCH"):
             r.check_probe({**probe, "registry_sha256": "0" * 64}, profile)
-        actual_file_sha = r.file_sha
-        with mock.patch.object(
-            r,
-            "file_sha",
-            side_effect=lambda path: (
-                "0" * 64
-                if pathlib.Path(path).name == "source_registry_glove_6b_300d_v1.json"
-                else actual_file_sha(path)
-            ),
-        ):
+        with self.assertRaisesRegex(r.ReleaseError, "BUILD_MISMATCH"):
+            r.require_v1_reference_checkout()
+        with mock.patch.object(r, "source_head", side_effect=AssertionError("preflight escaped")):
             with self.assertRaisesRegex(r.ReleaseError, "BUILD_MISMATCH"):
-                r.check_probe(probe, profile)
+                r.run(SimpleNamespace())
+
+        with mock.patch.object(r, "file_sha", return_value="0" * 64):
+            with self.assertRaisesRegex(r.ReleaseError, "BUILD_MISMATCH"):
+                r.require_v1_reference_checkout()
 
     def test_retained_input_mutation_stops_next_prepare(self):
         for changed in ("input", "old_bundle"):

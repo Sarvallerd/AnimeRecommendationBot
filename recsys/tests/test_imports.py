@@ -15,7 +15,7 @@ import sys
 
 sys.argv = ["recsys", "--invalid"]
 before = set(pathlib.Path.cwd().iterdir())
-for name in ("recsys", "recsys.cli", "recsys.__main__", "recsys.sources", "recsys.obtain", "recsys.normalize", "recsys.dataset", "recsys.dataset_metadata", "recsys.dataset_interactions", "recsys.aliases", "recsys.release", "recsys.release_build", "recsys.release_prepare", "recsys.build", "recsys.bundle", "recsys.export", "recsys.legacy", "recsys.evaluation", "recsys.assessment", "recsys.research_protocol", "recsys.research_artifacts", "recsys.research_prepare", "recsys.research_evaluate", "recsys.research_compare", "recsys.research_finalize", "recsys.research_models", "recsys.research_predict", "recsys.research_model_popularity", "recsys.research_gpu"):
+for name in ("recsys", "recsys.cli.main", "recsys.__main__", "recsys.data.sources", "recsys.data.obtain", "recsys.data.mal2020", "recsys.data.dataset", "recsys.data.metadata", "recsys.data.interactions", "recsys.data.aliases", "recsys.release.catalog", "recsys.release.build", "recsys.release.prepare", "recsys.content.glove", "recsys.contracts.bundle", "recsys.release.export", "recsys.historical.legacy_vectors", "recsys.historical.comparison", "recsys.historical.assessment", "recsys.research.protocol", "recsys.research.artifacts", "recsys.research.prepare", "recsys.research.evaluation.evaluate", "recsys.research.evaluation.compare", "recsys.research.evaluation.finalize", "recsys.research.models.package", "recsys.research.predict", "recsys.research.models.popularity", "recsys.research.gpu"):
     importlib.import_module(name)
 assert set(pathlib.Path.cwd().iterdir()) == before
 assert not any(name == "numpy" or name.startswith("numpy.") for name in sys.modules)

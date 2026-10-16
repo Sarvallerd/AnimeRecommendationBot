@@ -9,8 +9,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from recsys.normalize import BOILERPLATES, normalize
-from recsys.sources import SourceError
+from recsys.data.mal2020 import BOILERPLATES, normalize
+from recsys.data.sources import SourceError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from contracts.check_bundle import check_catalog, read_canonical  # noqa: E402

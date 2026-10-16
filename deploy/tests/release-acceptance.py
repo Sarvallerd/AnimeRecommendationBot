@@ -70,6 +70,10 @@ class ReleaseError(ValueError):
         self.code = code
 
 
+class ReferenceCheckoutRequired(ReleaseError):
+    """Current source cannot reproduce the accepted v1 producer bytes."""
+
+
 def need(condition, code):
     if not condition:
         raise ReleaseError(code)
@@ -410,15 +414,6 @@ def check_probe(probe, profile):
         and probe["code_files_sha256"] == ref["code_files_sha256"]
         and probe["lock_sha256"] == profile.lock_sha256
         and probe["registry_sha256"] == profile.inputs["embeddings"]["registry_sha256"],
-        "BUILD_MISMATCH",
-    )
-    need(
-        all(
-            file_sha(ROOT / "src/recsys" / name) == digest
-            for name, digest in ref["code_files_sha256"].items()
-        )
-        and file_sha(ROOT / "src/recsys/source_registry_glove_6b_300d_v1.json")
-        == profile.inputs["embeddings"]["registry_sha256"],
         "BUILD_MISMATCH",
     )
 
@@ -1024,7 +1019,29 @@ def verify_record(evidence):
     return report
 
 
+def require_v1_reference_checkout():
+    """Reject a fresh v1 build from moved 0.2 source before any state mutation."""
+    profile = p.load_profile(NEW)
+    expected = profile.reference["producer"]["code_files_sha256"]
+    source = ROOT / "src/recsys"
+    if any(
+        not (source / name).is_file() or file_sha(source / name) != digest
+        for name, digest in expected.items()
+    ):
+        raise ReferenceCheckoutRequired("BUILD_MISMATCH")
+    if not (source / "source_registry_glove_6b_300d_v1.json").is_file() or (
+        file_sha(source / "source_registry_glove_6b_300d_v1.json")
+        != profile.inputs["embeddings"]["registry_sha256"]
+    ):
+        raise ReferenceCheckoutRequired("BUILD_MISMATCH")
+    return profile
+
+
 def run(args):
+    # The accepted production v1 procedure runs only from the pinned 1441573f
+    # checkout with Python 3.12.14. This gate is read-only and precedes locks,
+    # evidence creation, Docker, and dataset inspection.
+    require_v1_reference_checkout()
     import fcntl
 
     head = source_head()
@@ -1142,7 +1159,8 @@ def _run_locked(args, head, data, settings, evidence, values, old_path, old, pro
         p.regular_bytes(p.PROFILE_DIR / p.PROFILE_FILES[p.LEGACY_RELEASE]),
     )
     saved_records["lock"] = private_file(
-        evidence / "release-lock.json", p.regular_bytes(ROOT / "src/recsys" / p.LOCK_RESOURCE)
+        evidence / "release-lock.json",
+        p.regular_bytes(ROOT / "src/recsys/resources/releases" / p.LOCK_RESOURCE),
     )
     saved_records["original_settings"] = private_file(
         evidence / "original-settings.env", original_raw
@@ -1530,6 +1548,11 @@ def main(argv=None):
             ),
             file=sys.stderr,
         )
+        if isinstance(exc, ReferenceCheckoutRequired):
+            print(
+                "Use pinned v1 source checkout 1441573fbbbffc4693c7e1100aaae4458d9e88d4 with Python 3.12.14 to reconstruct the accepted release.",
+                file=sys.stderr,
+            )
         return 1
     print("PASS full-inputs-offline-compatibility; live PENDING; production history PENDING")
     return 0

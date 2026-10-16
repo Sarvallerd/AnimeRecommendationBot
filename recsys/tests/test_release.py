@@ -8,8 +8,8 @@ from unittest.mock import patch
 
 from test_aliases import Fixture, record
 
-from recsys.bundle import canonical_bytes
-from recsys.release import ReleaseError, compose_release, validate_release
+from recsys.contracts.bundle import canonical_bytes
+from recsys.release.catalog import ReleaseError, compose_release, validate_release
 
 
 class ReleaseTests(unittest.TestCase):
@@ -142,13 +142,13 @@ class ReleaseTests(unittest.TestCase):
             with self.assertRaisesRegex(ReleaseError, "release_integrity_error"):
                 self.validate(output)
         historical = json.loads(canonical_bytes(original))
-        historical["normalizer"]["code_files_sha256"]["release.py"] = "0" * 64
+        historical["normalizer"]["code_files_sha256"]["release/catalog.py"] = "0" * 64
         historical["producer"]["python_version"] = "3.12.3"
         manifest_path.write_bytes(canonical_bytes(historical))
         self.assertEqual(self.validate(output).catalog_count, 2)
 
     def test_one_upstream_call_and_consumed_mutation(self):
-        import recsys.release as release
+        import recsys.release.catalog as release
 
         real = release.validate_aliases
         calls = []

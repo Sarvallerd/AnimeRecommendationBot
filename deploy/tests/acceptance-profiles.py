@@ -189,7 +189,7 @@ def load_profile(
     lock_raw = (
         _lock_bytes
         if _lock_bytes is not None
-        else regular_bytes(ROOT / "src/recsys" / LOCK_RESOURCE)
+        else regular_bytes(ROOT / "src/recsys/resources/releases" / LOCK_RESOURCE)
     )
     if _lock_bytes is None:
         need(digest(lock_raw) == TRUSTED_LOCK_SHA, "LOCK_SHA_MISMATCH")
@@ -259,7 +259,7 @@ def load_profile(
 
 
 def _bundle_module():
-    path = ROOT / "src/recsys/bundle.py"
+    path = ROOT / "src/recsys/contracts/bundle.py"
     spec = importlib.util.spec_from_file_location("arb_acceptance_bundle_contract", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

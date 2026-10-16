@@ -26,10 +26,10 @@ BACKEND_VARIANTS = {
     "hybrid",
 }
 BACKEND_MODULES = {
-    "research_model_popularity",
-    "research_model_content",
-    "research_model_cf",
-    "research_model_hybrid",
+    "popularity",
+    "content",
+    "collaborative",
+    "hybrid",
 }
 
 
@@ -314,7 +314,7 @@ def _dispatch_targets(tree: ast.Module, policy: dict, raw: bytes) -> set[str]:
         and expression.right.slice.id == "variant_id"
     ):
         raise PolicyError("dynamic_dispatch_changed: loader expression changed")
-    return {"recsys." + name for name in values}
+    return {cfg["source"].rpartition(".")[0] + "." + name for name in values}
 
 
 def _scc(nodes: set[str], edges: set[tuple[str, str]]) -> list[set[str]]:

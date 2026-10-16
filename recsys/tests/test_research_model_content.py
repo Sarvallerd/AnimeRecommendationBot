@@ -7,12 +7,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
-from research_model_support import ModelFixture
+from research_model_support import ModelFixture, patch_release_info
 
-from recsys.research_artifacts import read_json, write_json
-from recsys.research_evaluate import evaluate_predictions
-from recsys.research_model_content import ContentScorer, fit
-from recsys.research_models import fit_model, load_model, read_scoring_inputs
+from recsys.research.artifacts import read_json, write_json
+from recsys.research.evaluation.evaluate import evaluate_predictions
+from recsys.research.models.content import ContentScorer, fit
+from recsys.research.models.package import fit_model, load_model, read_scoring_inputs
 
 
 def _vectors(rows):
@@ -85,7 +85,7 @@ class ContentMathTests(unittest.TestCase):
         np.testing.assert_array_equal(original.values, repeat.values)
         scorer.cache.entries.clear()
         scorer.cache.bytes = 0
-        with patch("recsys.research_model_content.CACHE_BYTES", 440):
+        with patch("recsys.research.models.content.CACHE_BYTES", 440):
             np.testing.assert_array_equal(original.values, scorer.score(seeds).values)
             self.assertLessEqual(scorer.cache.bytes, 440)
             np.testing.assert_array_equal(
@@ -110,7 +110,7 @@ class ContentFitTests(unittest.TestCase):
             fixture.lock["inputs"]["embeddings"] = _glove(glove)
             prepared, prepared_identity = fixture.make_prepared()
             assets = {"glove": glove}
-            with patch("recsys.research_models.release_info", return_value=fixture.lock):
+            with patch_release_info(fixture.lock):
                 first = Path(directory) / "mean-a"
                 second = Path(directory) / "mean-b"
                 fit_model(
@@ -133,7 +133,7 @@ class ContentFitTests(unittest.TestCase):
                 manifest, scorer = load_model(first, inputs=inputs)
             for variant in ("content-max", "content-union"):
                 sibling = Path(directory) / variant
-                with patch("recsys.research_models.release_info", return_value=fixture.lock):
+                with patch_release_info(fixture.lock):
                     fit_model(
                         prepared,
                         sibling,
@@ -191,7 +191,7 @@ class ContentFitTests(unittest.TestCase):
                 return original_open(path, *args, **kwargs)
 
             with (
-                patch("recsys.research_models.release_info", return_value=fixture.lock),
+                patch_release_info(fixture.lock),
                 patch.object(Path, "open", guard),
             ):
                 fit_model(
@@ -202,7 +202,7 @@ class ContentFitTests(unittest.TestCase):
                     code_revision="a" * 40,
                     assets={"glove": glove},
                 )
-            with patch("recsys.research_models.release_info", return_value=fixture.lock):
+            with patch_release_info(fixture.lock):
                 inputs = read_scoring_inputs(prepared, expected_prepared_identity=prepared_identity)
                 manifest, scorer = load_model(model, inputs=inputs)
             self.assertEqual(manifest["metadata"]["ready_items"], 11)
@@ -217,7 +217,7 @@ class ContentFitTests(unittest.TestCase):
             glove = Path(directory) / "glove.txt"
             fixture.lock["inputs"]["embeddings"] = _glove(glove)
             prepared, prepared_identity = fixture.make_prepared()
-            with patch("recsys.research_models.release_info", return_value=fixture.lock):
+            with patch_release_info(fixture.lock):
                 inputs = read_scoring_inputs(prepared, expected_prepared_identity=prepared_identity)
                 stage = Path(directory) / "stage"
                 stage.mkdir()
@@ -247,7 +247,7 @@ class ContentFitTests(unittest.TestCase):
             fixture.lock["inputs"]["embeddings"] = _glove(glove)
             prepared, prepared_identity = fixture.make_prepared()
             model = Path(directory) / "model"
-            with patch("recsys.research_models.release_info", return_value=fixture.lock):
+            with patch_release_info(fixture.lock):
                 fit_model(
                     prepared,
                     model,

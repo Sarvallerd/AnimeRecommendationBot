@@ -9,8 +9,8 @@ from unittest.mock import patch
 
 import numpy as np
 
-from recsys import research_gpu as gpu
-from recsys.research_protocol import ResearchError
+from recsys.research import gpu
+from recsys.research.protocol import ResearchError
 
 
 class FakeCuda:
@@ -120,7 +120,7 @@ class CoreTests(unittest.TestCase):
     def test_import_has_no_array_or_cuda_side_effects(self):
         code = (
             "import os, sys; before = set(os.listdir('/proc/self/fd')); "
-            "import recsys.research_gpu as gpu; "
+            "import recsys.research.gpu as gpu; "
             "assert 'numpy' not in sys.modules and 'cupy' not in sys.modules; "
             "assert gpu._SESSION is None and before == set(os.listdir('/proc/self/fd'))"
         )
@@ -301,8 +301,8 @@ class CoreTests(unittest.TestCase):
         code = textwrap.dedent("""\
             import fcntl
             import os
-            from recsys import research_gpu as gpu
-            from recsys.research_protocol import ResearchError
+            from recsys.research import gpu
+            from recsys.research.protocol import ResearchError
             fd = gpu._lease()
             gpu._SESSION = gpu._Session(fd, None, {}, 1)
             child = os.fork()
@@ -437,8 +437,8 @@ class HardwareTests(unittest.TestCase):
     def test_other_process_busy_then_acquires(self):
         gpu.probe_gpu()
         code = (
-            "from recsys.research_gpu import probe_gpu; "
-            "from recsys.research_protocol import ResearchError; "
+            "from recsys.research.gpu import probe_gpu; "
+            "from recsys.research.protocol import ResearchError; "
             "import sys; "
             "exec('try:\\n probe_gpu()\\nexcept ResearchError as e:\\n "
             'sys.exit(0 if str(e) == \\"research_gpu_busy\\" else 2)\\n\'); '
@@ -450,7 +450,7 @@ class HardwareTests(unittest.TestCase):
             )
             self.assertEqual(busy.returncode, 0, busy.stderr)
         released = subprocess.run(
-            [sys.executable, "-I", "-c", "from recsys.research_gpu import probe_gpu; probe_gpu()"],
+            [sys.executable, "-I", "-c", "from recsys.research.gpu import probe_gpu; probe_gpu()"],
             capture_output=True,
             text=True,
         )

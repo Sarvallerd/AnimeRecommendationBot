@@ -10,16 +10,16 @@ import unittest
 from importlib import resources
 from pathlib import Path
 
-from recsys.bundle import canonical_bytes
-from recsys.dataset import (
+from recsys.contracts.bundle import canonical_bytes
+from recsys.data.dataset import (
     DatasetError,
     DatasetSpec,
     _validate_interactions,
     normalize_dataset,
     validate_dataset,
 )
-from recsys.dataset_interactions import CSV_COLUMNS, HEADER
-from recsys.dataset_metadata import DETAIL_COLUMNS
+from recsys.data.interactions import CSV_COLUMNS, HEADER
+from recsys.data.metadata import DETAIL_COLUMNS
 
 
 def _write_csv(path, fields, records):
@@ -111,7 +111,7 @@ class Fixture:
             key: 0
             for key in json.loads(
                 resources.files("recsys")
-                .joinpath("neelagiri_2025_v1_expectations.json")
+                .joinpath("resources/expectations/neelagiri_2025_v1_expectations.json")
                 .read_text()
             )["counts"]
         }
@@ -248,7 +248,9 @@ class DatasetTests(unittest.TestCase):
         )
         audit = next(item for item in report["candidates"] if item["id"] == "neelagiri-2025-v1")
         pinned = json.loads(
-            resources.files("recsys").joinpath("neelagiri_2025_v1_expectations.json").read_bytes()
+            resources.files("recsys")
+            .joinpath("resources/expectations/neelagiri_2025_v1_expectations.json")
+            .read_bytes()
         )
         pairs = {
             "raw_rows": "raw_interaction_rows",
@@ -320,7 +322,7 @@ class DatasetTests(unittest.TestCase):
         manifest_path = output / "dataset-manifest.json"
         manifest = json.loads(manifest_path.read_bytes())
         original = validate_dataset(output, _spec=self.fixture.spec).identity
-        manifest["normalizer"]["code_files_sha256"]["dataset.py"] = "0" * 64
+        manifest["normalizer"]["code_files_sha256"]["data/dataset.py"] = "0" * 64
         manifest["producer"]["duckdb_version"] = "1.5.0"
         manifest_path.write_bytes(canonical_bytes(manifest))
         self.assertNotEqual(validate_dataset(output, _spec=self.fixture.spec).identity, original)

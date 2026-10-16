@@ -6,7 +6,7 @@ import shlex
 import unittest
 from pathlib import Path
 
-from recsys.sources import (
+from recsys.data.sources import (
     DEFAULT_SNAPSHOT,
     SNAPSHOT_IDS,
     SourceError,

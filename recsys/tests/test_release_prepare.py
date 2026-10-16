@@ -14,10 +14,12 @@ import numpy as np
 from test_aliases import Fixture
 
 from recsys import __version__
-from recsys.bundle import canonical_bytes
-from recsys.release import compose_release
-from recsys.release_build import build_release, export_release_bundle
-from recsys.release_prepare import PrepareError, _lock, prepare_release, release_info
+from recsys.contracts.bundle import canonical_bytes
+from recsys.contracts.provenance import SOURCE_LAYOUT, source_fingerprints
+from recsys.release.build import build_release, export_release_bundle
+from recsys.release.catalog import compose_release
+from recsys.release.lock import _lock, release_info
+from recsys.release.prepare import PrepareError, prepare_release
 
 
 def sha(raw):
@@ -125,9 +127,8 @@ class PrepareTests(unittest.TestCase):
         neighbors = json.loads((candidate / "neighbors.json").read_bytes())["neighbors"]
         nonready = report["coverage"]["zero_vector_ids"]
         self.assertEqual(nonready, [])
-        code_dir = Path(__import__("recsys").__file__).parent
         self.lock = {
-            "schema_version": 1,
+            "schema_version": 2,
             "kind": "arb-release-lock",
             "release_id": "fixture-v1",
             "inputs": {
@@ -157,16 +158,8 @@ class PrepareTests(unittest.TestCase):
                     "package_version": __version__,
                     "python_version": platform.python_version(),
                     "numpy_version": np.__version__,
-                    "code_files_sha256": {
-                        name: sha((code_dir / name).read_bytes())
-                        for name in (
-                            "release.py",
-                            "build.py",
-                            "release_build.py",
-                            "export.py",
-                            "bundle.py",
-                        )
-                    },
+                    "source_layout": SOURCE_LAYOUT,
+                    "code_files_sha256": source_fingerprints(),
                 },
             },
             "semantic_expectations": {
@@ -270,7 +263,7 @@ class PrepareTests(unittest.TestCase):
                 raw = canonical_bytes(changed)
                 with patch.object(Path, "read_bytes", return_value=b"") as source_read:
                     with patch(
-                        "recsys.release_prepare.tempfile.mkdtemp",
+                        "recsys.release.prepare.tempfile.mkdtemp",
                         side_effect=AssertionError("publication"),
                     ) as work_create:
                         with patch.object(
@@ -364,7 +357,7 @@ class PrepareTests(unittest.TestCase):
         self.assertEqual(list((self.data / "bundles").iterdir()), [])
 
     def test_prepare_uses_one_own_upstream_validation(self):
-        import recsys.release as release_module
+        import recsys.release.catalog as release_module
 
         original = release_module._verified_release
         with patch.object(release_module, "_verified_release", wraps=original) as observed:
@@ -378,7 +371,7 @@ class PrepareTests(unittest.TestCase):
 
     def test_producer_mismatch_precedes_build(self):
         bad = json.loads(self.lock_bytes)
-        bad["reference"]["producer"]["code_files_sha256"]["build.py"] = "0" * 64
+        bad["reference"]["producer"]["code_files_sha256"]["release/build.py"] = "0" * 64
         with self.assertRaisesRegex(PrepareError, "release_producer_mismatch"):
             prepare_release(
                 self.data,
@@ -392,7 +385,7 @@ class PrepareTests(unittest.TestCase):
     def test_reuse_uses_historical_producer_fingerprint(self):
         target = self.data / "bundles" / self.lock["reference"]["bundle_identity"].replace(":", "-")
         shutil.copytree(self.candidate, target)
-        with patch("recsys.release_prepare._producer", side_effect=AssertionError("rebuild")):
+        with patch("recsys.release.prepare._producer", side_effect=AssertionError("rebuild")):
             path, identity, count = prepare_release(self.data, **self.common)
         self.assertEqual(
             (path, identity, count), (target, self.lock["reference"]["bundle_identity"], 2)
