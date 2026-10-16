@@ -1,5 +1,6 @@
 """Small verified inputs exercise the same locked prepare checks as production."""
 
+import copy
 import hashlib
 import json
 import platform
@@ -21,7 +22,7 @@ from recsys.data.dataset import DatasetSpec
 from recsys.release.build import build_release, export_release_bundle
 from recsys.release.catalog import compose_release
 from recsys.release.lock import ReleaseLock, _lock, release_info
-from recsys.release.prepare import PrepareError, prepare_release
+from recsys.release.prepare import PrepareError, _report_pins, prepare_release
 
 
 def sha(raw: bytes) -> str:
@@ -203,6 +204,27 @@ class PrepareTests(unittest.TestCase):
             _glove_registry_bytes=self.glove_registry,
         )
         self.candidate = candidate
+
+    def test_report_pins_hash_first_and_nested_records(self) -> None:
+        report_raw = (self.data / "work" / "reference-build" / "build-report.json").read_bytes()
+        neighbor_raw = (self.data / "work" / "reference-build" / "neighbors.json").read_bytes()
+        for changed_report in (
+            b"{}\n",
+            canonical_bytes({**json.loads(report_raw), "inputs": []}),
+            canonical_bytes({**json.loads(report_raw), "coverage": None}),
+        ):
+            with self.subTest(report=changed_report[:30]):
+                with self.assertRaisesRegex(PrepareError, "release_reference_mismatch"):
+                    _report_pins(changed_report, neighbor_raw, self.lock)
+                pinned = copy.deepcopy(self.lock)
+                pinned["reference"]["build_report_sha256"] = sha(changed_report)
+                with self.assertRaisesRegex(PrepareError, "release_reference_mismatch"):
+                    _report_pins(changed_report, neighbor_raw, pinned)
+        changed_neighbors = canonical_bytes({"schema_version": 1, "neighbors": {"1": [True]}})
+        pinned = copy.deepcopy(self.lock)
+        pinned["reference"]["neighbors_sha256"] = sha(changed_neighbors)
+        with self.assertRaisesRegex(PrepareError, "release_reference_mismatch"):
+            _report_pins(report_raw, changed_neighbors, pinned)
 
     def test_current_alias_and_lock_schema(self) -> None:
         self.assertEqual(release_info()["release_id"], "neelagiri-2025-nafiul-2026-v1")

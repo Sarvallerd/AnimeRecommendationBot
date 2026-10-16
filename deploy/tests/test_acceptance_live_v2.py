@@ -430,6 +430,29 @@ class LiveV2Tests(unittest.TestCase):
             "BOT_NOT_RECREATED", lambda: v.verify_operation(plan(), "initial-update", *changed)
         )
 
+    def test_operation_rejects_consistently_malformed_database_rows(self) -> None:
+        mutations: tuple[tuple[str, str, int | str | None], ...] = (
+            ("users", "created_at", None),
+            ("requests", "created_at", None),
+            ("users", "created_at", 7),
+            ("requests", "created_at", 7),
+            ("delivered", "id", True),
+            ("delivered", "id", "position-id"),
+        )
+        for table, field, replacement in mutations:
+            with self.subTest(table=table, field=field, replacement=replacement):
+                captures = copy.deepcopy(sequence())
+                for capture in captures:
+                    row = capture["state"]["database"][table][0]
+                    if replacement is None:
+                        row.pop(field)
+                    else:
+                        row[field] = replacement
+                self.fail_code(
+                    "INVALID_DATABASE_SNAPSHOT",
+                    lambda: v.verify_operation(plan(), "initial-update", *captures),
+                )
+
     def test_poller_inventory_identifies_the_selected_bot(self) -> None:
         value = plan()
         running = shot(4, "target", bot_item=bot(B, "target", "accepted-bot", 2.5))

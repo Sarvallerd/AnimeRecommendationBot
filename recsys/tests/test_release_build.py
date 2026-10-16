@@ -176,7 +176,10 @@ class ReleaseBuildTests(unittest.TestCase):
             (("algorithm", "parameters", "token_weight"), True),
             (("execution", "requested_block_rows"), 1.0),
             (("coverage", "catalog_count"), 2.0),
+            (("coverage", "neighbor_count_histogram"), []),
+            (("producer",), []),
             (("producer", "code_files", "build.py"), "0" * 64),
+            (("anime", "1"), []),
             (("sources", 0, "version"), "forged"),
             (("inputs", "catalog.json", "bytes"), 1),
         ):

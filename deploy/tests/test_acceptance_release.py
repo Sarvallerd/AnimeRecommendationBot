@@ -534,6 +534,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
                 state_flag = {"begun": False}
 
                 def first_phase(*args: object) -> tuple[dict[str, str], str, str]:
+                    state_flag["begun"] = True  # Mock the first Compose switch attempt.
                     (item if changed == "input" else old / "manifest.json").write_bytes(b"changed")
                     return ({"label": "old"}, "prepare-1", "2026-10-01T00:02:00Z")
 
@@ -560,6 +561,79 @@ class ReleaseEvidenceTests(unittest.TestCase):
                         )
                     self.assertEqual(prepare.call_count, 1)
                     self.assertTrue(state_flag["begun"])
+
+    def test_rollback_arms_only_after_phase_guard(self) -> None:
+        with tempfile.TemporaryDirectory() as scratch:
+            root = pathlib.Path(scratch)
+            settings = root / "settings.env"
+            settings.write_bytes(b"original")
+            original_state = (
+                r.sha(settings.read_bytes()),
+                settings.stat().st_uid,
+                settings.stat().st_gid,
+                stat.S_IMODE(settings.stat().st_mode),
+            )
+            selected = {name: {"path": root / name} for name in ("old", "new-A", "new-B")}
+            by_label = {label: settings for label in r.LABELS}
+            transport = mock.Mock(project="arb033-test", settings=settings)
+            for failure, armed in (("guard", False), ("compose", True)):
+                with self.subTest(failure=failure):
+                    transport.reset_mock()
+                    switch_state = {"begun": False}
+                    with (
+                        mock.patch.object(r, "clean"),
+                        mock.patch.object(r, "check_retained"),
+                        mock.patch.object(r.e, "container", return_value=None),
+                        mock.patch.object(
+                            r,
+                            "quiescent",
+                            side_effect=(
+                                r.ReleaseError("BOT_RUNNING") if failure == "guard" else None
+                            ),
+                        ),
+                        mock.patch.object(r, "restore_old", return_value="PASS") as restore,
+                    ):
+                        if failure == "compose":
+                            transport.compose.side_effect = r.ReleaseError("TRANSPORT_TIMEOUT")
+                        with self.assertRaises(r.ReleaseError):
+                            r.run_prepare_sequence(
+                                transport,
+                                root,
+                                settings,
+                                original_state,
+                                "f" * 40,
+                                {"captured_at": "2026-10-01T00:01:00Z"},
+                                selected,
+                                by_label,
+                                "bot-image",
+                                {},
+                                {},
+                                root / "old",
+                                switch_state,
+                            )
+                        self.assertEqual(switch_state["begun"], armed)
+                        if failure == "guard":
+                            transport.compose.assert_not_called()
+                        else:
+                            transport.compose.assert_called_once_with(
+                                "up", "-d", "--no-deps", "--force-recreate", "prepare"
+                            )
+                        restoration = r.restore_after_failure(
+                            switch_state,
+                            transport,
+                            settings,
+                            original_state,
+                            settings,
+                            root / "old",
+                            mock.Mock(),
+                            {},
+                            {},
+                        )
+                        self.assertEqual(restoration, "PASS" if armed else "PENDING")
+                        if armed:
+                            restore.assert_called_once()
+                        else:
+                            restore.assert_not_called()
 
     def test_restore_is_bounded_and_refuses_changed_settings_or_running_bot(self) -> None:
         with tempfile.TemporaryDirectory() as scratch:
@@ -705,6 +779,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
                     baseline["captured_at"],
                     "bot-image",
                     pg,
+                    {"begun": False},
                 )
                 self.assertEqual(identifier, "prepare-2")
                 self.assertEqual(captured, shot["captured_at"])
@@ -730,6 +805,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
                         baseline["captured_at"],
                         "bot-image",
                         pg,
+                        {"begun": False},
                     )
                 with self.assertRaisesRegex(r.ReleaseError, "PHASE_MISMATCH"):
                     r.snapshot_phase(
@@ -743,6 +819,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
                         baseline["captured_at"],
                         "bot-image",
                         pg,
+                        {"begun": False},
                     )
                 with (
                     mock.patch.object(
@@ -761,6 +838,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
                         baseline["captured_at"],
                         "bot-image",
                         pg,
+                        {"begun": False},
                     )
 
     def test_recompute_and_historical_read_only(self) -> None:

@@ -300,6 +300,36 @@ class EvidenceTests(unittest.TestCase):
             callback()
         self.assertEqual(caught.exception.code, code)
 
+    def test_historical_database_keeps_partially_validated_rows(self) -> None:
+        minimal = database()
+        minimal["users"][0].pop("created_at")
+        minimal["requests"][0].pop("created_at")
+        minimal["delivered"][0]["id"] = True
+        e.validate_database(minimal)
+        minimal["delivered"][0]["id"] = "historical-position"
+        e.validate_database(minimal)
+
+    def test_historical_string_event_identifiers_remain_accepted(self) -> None:
+        historical = database()
+        historical["anime_events"].append(
+            {"id": "event-1", "request_id": 1, "tg_id": 42, "mal_id": 1, "score": 5}
+        )
+        historical["anime_current"].append(
+            {
+                "tg_id": 42,
+                "mal_id": 1,
+                "current_event_id": "event-1",
+                "created_at": TIME,
+                "updated_at": TIME,
+            }
+        )
+        e.validate_database(historical)
+        self.assertEqual(e.historical_max(["event-1", "event-2"]), "event-2")
+        self.assertTrue(e.historical_greater("event-2", "event-1"))
+        self.assert_rejected("INVALID_TIMESTAMP", lambda: e.utc(7))
+        with self.assertRaises(AttributeError):
+            e.historical_action_parts(7)
+
     def test_new_offline_report_is_rejected_before_actor_binding(self) -> None:
         report = {
             "schema_version": 2,

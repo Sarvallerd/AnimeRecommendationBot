@@ -10,10 +10,14 @@ from typing import cast
 
 from recsys import __version__
 from recsys.contracts.bundle import (
+    ContractError,
     Manifest,
     ManifestSource,
     Neighbors,
     check_bundle_bytes,
+    check_catalog,
+    check_neighbors,
+    exact_fields,
     parse_canonical,
 )
 from recsys.contracts.provenance import SOURCE_LAYOUT, source_fingerprints
@@ -21,7 +25,6 @@ from recsys.contracts.resources import resource_bytes
 from recsys.data.aliases import AliasSpec
 from recsys.data.dataset import DatasetSpec
 from recsys.data.sources import SourceRegistry
-from recsys.release.build import BuildReport
 from recsys.release.catalog import VerifiedRelease
 from recsys.release.lock import (
     CURRENT_RELEASE,
@@ -208,11 +211,81 @@ def _bundle_files(
     return files, identity, count
 
 
-def _report_pins(report_raw: bytes, neighbors_raw: bytes, lock: ReleaseLock) -> None:
+def _report_pins(
+    report_raw: bytes,
+    neighbors_raw: bytes,
+    lock: ReleaseLock,
+    *,
+    verified: VerifiedRelease | None = None,
+    registry: SourceRegistry | None = None,
+    registry_sha: str | None = None,
+) -> None:
     ref, inp, sem = lock["reference"], lock["inputs"], lock["semantic_expectations"]
-    report = cast("BuildReport", parse_canonical(report_raw, "build-report.json"))
-    neighbors = cast("Neighbors", parse_canonical(neighbors_raw, "neighbors.json"))
-    glove_input = cast("dict[str, object]", report["inputs"]["glove.6B.300d.txt"])
+    if (
+        _sha(report_raw) != ref["build_report_sha256"]
+        or _sha(neighbors_raw) != ref["neighbors_sha256"]
+    ):
+        _fail("release_reference_mismatch")
+    try:
+        from recsys.release.build import REPORT_FIELDS as CURRENT_REPORT_FIELDS
+        from recsys.release.export import REPORT_FIELDS as LEGACY_REPORT_FIELDS
+        from recsys.release.export import _strict_equal
+
+        report = exact_fields(
+            parse_canonical(report_raw, "build-report.json"),
+            CURRENT_REPORT_FIELDS if lock["schema_version"] == 2 else LEGACY_REPORT_FIELDS,
+            "build-report.json",
+        )
+        inputs = exact_fields(
+            report["inputs"],
+            {"release-manifest.json", "catalog.json", "glove.6B.300d.txt"}
+            if lock["schema_version"] == 2
+            else {"catalog.json", "normalization-report.json", "glove.6B.300d.txt"},
+            "build-report.json.inputs",
+        )
+        glove_input = exact_fields(
+            inputs["glove.6B.300d.txt"],
+            {"size", "sha256"},
+            "build-report.json.inputs.glove.6B.300d.txt",
+        )
+        coverage = exact_fields(
+            report["coverage"],
+            {
+                "catalog_count",
+                "vocabulary_count",
+                "matched_vocabulary_count",
+                "token_occurrences",
+                "matched_token_occurrences",
+                "vector_status_counts",
+                "zero_vector_ids",
+                "neighbor_count_histogram",
+            },
+            "build-report.json.coverage",
+        )
+        neighbors = exact_fields(
+            parse_canonical(neighbors_raw, "neighbors.json"),
+            {"schema_version", "neighbors"},
+            "neighbors.json",
+        )
+        neighbor_entries = neighbors["neighbors"]
+        if not isinstance(neighbor_entries, dict):
+            _fail("release_reference_mismatch")
+        check_neighbors(neighbors, set(neighbor_entries))
+        if verified is not None and registry is not None and registry_sha is not None:
+            from recsys.release.build import _validate_release_report
+
+            check_neighbors(neighbors, check_catalog(verified.catalog))
+            _validate_release_report(
+                report,
+                verified,
+                cast("Neighbors", neighbors),  # Complete neighbor validation above.
+                neighbors_raw,
+                registry,
+                registry_sha,
+                enforce_current=True,
+            )
+    except ContractError as exc:
+        raise PrepareError("release_reference_mismatch") from exc
     if lock["schema_version"] == 2:
         producer = ref["producer"]
         if (
@@ -232,22 +305,24 @@ def _report_pins(report_raw: bytes, neighbors_raw: bytes, lock: ReleaseLock) -> 
     elif report.get("schema_version") != 2 or report.get("builder_version") != "arb031-v1":
         _fail("release_reference_mismatch")
     if (
-        _sha(report_raw) != ref["build_report_sha256"]
-        or _sha(neighbors_raw) != ref["neighbors_sha256"]
-        or report["algorithm"] != inp["algorithm"]
+        not _strict_equal(report["algorithm"], inp["algorithm"])
         or report["catalog_release_identity"] != inp["catalog_release"]["identity"]
         or report["registry_sha256"] != inp["embeddings"]["registry_sha256"]
-        or glove_input
-        != {"size": inp["embeddings"]["text_size"], "sha256": inp["embeddings"]["text_sha256"]}
-        or report["coverage"]["catalog_count"] != sem["catalog_count"]
-        or report["coverage"]["vector_status_counts"] != sem["vector_status_counts"]
-        or report["coverage"]["zero_vector_ids"] != sem["zero_vector_ids"]
-        or report["coverage"]["neighbor_count_histogram"] != sem["neighbor_count_histogram"]
-        or [item["mal_id"] for item in neighbors["neighbors"][str(sem["smoke_seed"]["mal_id"])]]
+        or not _strict_equal(
+            glove_input,
+            {"size": inp["embeddings"]["text_size"], "sha256": inp["embeddings"]["text_sha256"]},
+        )
+        or not _strict_equal(coverage["catalog_count"], sem["catalog_count"])
+        or not _strict_equal(coverage["vector_status_counts"], sem["vector_status_counts"])
+        or not _strict_equal(coverage["zero_vector_ids"], sem["zero_vector_ids"])
+        or not _strict_equal(coverage["neighbor_count_histogram"], sem["neighbor_count_histogram"])
+        or len(neighbor_entries) != sem["catalog_count"]
+        or str(sem["smoke_seed"]["mal_id"]) not in neighbor_entries
+        or [item["mal_id"] for item in neighbor_entries[str(sem["smoke_seed"]["mal_id"])]]
         != sem["smoke_seed"]["neighbor_ids"]
         or (
             sem["empty_seed"] is not None
-            and neighbors["neighbors"][str(sem["empty_seed"]["mal_id"])] != []
+            and neighbor_entries.get(str(sem["empty_seed"]["mal_id"])) != []
         )
     ):
         _fail("release_reference_mismatch")
@@ -267,7 +342,7 @@ def _prepare_current(
     _alias_spec: AliasSpec | None = None,
     _glove_registry_bytes: bytes | None = None,
 ) -> tuple[Path, str, int]:
-    from recsys.release.build import build_release, export_release_bundle
+    from recsys.release.build import _glove_registry, build_release, export_release_bundle
     from recsys.release.catalog import _verified_release, compose_release
     from recsys.release.export import _publish
 
@@ -364,7 +439,15 @@ def _prepare_current(
             _glove_registry_bytes=_glove_registry_bytes,
         )
         neighbors = build_dir / "neighbors.json"
-        _report_pins(_read(report), _read(neighbors), lock)
+        registry, registry_sha = _glove_registry(_glove_registry_bytes)
+        _report_pins(
+            _read(report),
+            _read(neighbors),
+            lock,
+            verified=verified,
+            registry=registry,
+            registry_sha=registry_sha,
+        )
         candidate = export_release_bundle(
             release,
             neighbors,

@@ -5,6 +5,7 @@ import hashlib
 import importlib.metadata
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -33,11 +34,113 @@ from recsys.historical.comparison import (
     _validate_bundle_links,
     _validate_legacy_diagnostics,
     _validate_provenance,
+    _validated_worker_output,
+    _validated_worker_task,
     _verify_originals,
     _worker,
     compare,
 )
 from recsys.historical.genre_baseline import GenreAnime, GenreQuery, genre_neighbors
+
+
+class WorkerBoundaryTests(unittest.TestCase):
+    def test_malformed_worker_task_is_domain_error(self) -> None:
+        with self.assertRaisesRegex(EvaluationError, "invalid worker task fields"):
+            _validated_worker_task({})
+        with tempfile.TemporaryDirectory() as temporary:
+            request = Path(temporary) / "request.json"
+            request.write_text("{}")
+            with self.assertRaises(EvaluationError):
+                _worker(request, Path(temporary) / "output.json")
+        with self.assertRaisesRegex(EvaluationError, "invalid worker task paths"):
+            _validated_worker_task({"method": "genre-jaccard", "paths": {"bundle_dir": True}})
+
+    def test_malformed_worker_output_is_domain_error(self) -> None:
+        cases: list[object] = [
+            {},
+            {
+                "result": None,
+                "prepare_wall_ns": 1,
+                "rank20_wall_ns": 1,
+                "peak_rss_bytes": 1,
+                "effective_threadpools": [],
+                "worker_wall_ns": 2,
+            },
+        ]
+        for value in cases:
+            with self.subTest(value=value):
+                with self.assertRaises(EvaluationError):
+                    _validated_worker_output(value, "genre-jaccard", [1])
+
+    def test_worker_output_rejects_nested_and_bool_fields(self) -> None:
+        valid = {
+            "result": {
+                "method": "genre-jaccard",
+                "universe_count": 2,
+                "universe_ids_sha256": "a" * 64,
+                "queries": [
+                    {
+                        "query_mal_id": 1,
+                        "status": "ok",
+                        "reasons": [],
+                        "recommendations": [{"rank": 1, "mal_id": 2, "score": 0.5}],
+                    }
+                ],
+                "extra": {},
+            },
+            "prepare_wall_ns": 1,
+            "rank20_wall_ns": 1,
+            "peak_rss_bytes": 1,
+            "effective_threadpools": [],
+            "worker_wall_ns": 2,
+        }
+        _validated_worker_output(valid, "genre-jaccard", [1])
+        for path, replacement in (
+            (("result", "queries", 0, "query_mal_id"), True),
+            (("result", "queries", 0, "recommendations", 0, "rank"), True),
+            (("result", "queries", 0, "recommendations", 0, "score"), True),
+            (("prepare_wall_ns",), True),
+            (("effective_threadpools",), [{"num_threads": True}]),
+        ):
+            with self.subTest(path=path):
+                changed = json.loads(json.dumps(valid))
+                target = changed
+                for key in path[:-1]:
+                    target = target[key]
+                target[path[-1]] = replacement
+                with self.assertRaises(EvaluationError):
+                    _validated_worker_output(changed, "genre-jaccard", [1])
+
+    def test_zero_exit_malformed_worker_output_is_domain_error(self) -> None:
+        def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            Path(command[-1]).write_text("{}")
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with (
+                patch(
+                    "recsys.historical.comparison._load_pins",
+                    return_value={
+                        "provenance": {},
+                        "queries": [{"mal_id": 1}],
+                    },
+                ),
+                patch("recsys.historical.comparison.subprocess.run", side_effect=fake_run),
+            ):
+                with self.assertRaisesRegex(EvaluationError, "invalid worker output"):
+                    compare(
+                        root / "bundle",
+                        root / "normalization.json",
+                        root / "build.json",
+                        root / "anime.csv",
+                        root / "synopsis.csv",
+                        root / "glove.txt",
+                        root / "uv.lock",
+                        "a" * 40,
+                        root / "output",
+                        repetitions=1,
+                    )
 
 
 class RootLockOriginalsTests(unittest.TestCase):
@@ -176,6 +279,7 @@ class EvaluationTests(unittest.TestCase):
             ):
                 _worker(request, output)
             result = json.loads(output.read_text())
+            _validated_worker_output(result, "glove-selected", [1, 3])
         rows = result["result"]["queries"]
         self.assertEqual(result["result"]["universe_count"], 3)
         self.assertEqual(
@@ -477,6 +581,15 @@ class EvaluationTests(unittest.TestCase):
         mutations.append(wrong)
         wrong = copy.deepcopy(measurements)
         wrong["workers"][0]["peak_rss_bytes"] = -1
+        mutations.append(wrong)
+        wrong = copy.deepcopy(measurements)
+        wrong["schedule"][0]["repetition"] = True
+        mutations.append(wrong)
+        wrong = copy.deepcopy(measurements)
+        wrong["workload"]["universe_counts"]["glove-selected"] = True
+        mutations.append(wrong)
+        wrong = copy.deepcopy(measurements)
+        wrong["runtime"]["python"] = 3  # type: ignore[assignment]
         mutations.append(wrong)
         for mutated in mutations:
             with self.subTest(mutated=mutated):

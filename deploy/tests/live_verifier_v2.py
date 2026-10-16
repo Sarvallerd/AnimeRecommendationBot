@@ -447,6 +447,81 @@ FLOW = {
 }
 
 
+_DATABASE_FIELDS: dict[str, dict[str, tuple[type[object], ...]]] = {
+    "migrations": {"version": (int,)},
+    "users": {"tg_id": (int,), "created_at": (str,)},
+    "requests": {
+        "id": (int,),
+        "tg_id": (int,),
+        "action_key": (str,),
+        "raw_query": (str,),
+        "created_at": (str,),
+        "seed_mal_id": (int, type(None)),
+        "bundle_id": (str, type(None)),
+    },
+    "delivered": {
+        "id": (int,),
+        "request_id": (int,),
+        "rank": (int,),
+        "mal_id": (int,),
+        "tg_id": (int,),
+        "chat_id": (int,),
+        "message_id": (int,),
+    },
+    "anime_events": {
+        "id": (int,),
+        "request_id": (int,),
+        "tg_id": (int,),
+        "mal_id": (int,),
+        "score": (int,),
+    },
+    "anime_current": {
+        "tg_id": (int,),
+        "mal_id": (int,),
+        "created_at": (str,),
+        "updated_at": (str,),
+        "current_event_id": (int,),
+    },
+    "recommendation_ratings": {
+        "position_id": (int,),
+        "tg_id": (int,),
+        "score": (int,),
+    },
+    "feedback": {
+        "id": (int,),
+        "tg_id": (int,),
+        "action_key": (str,),
+        "body": (str,),
+    },
+}
+
+
+def _validated_database(value: object) -> DatabaseRecord:
+    tables_expected = set(_DATABASE_FIELDS) | {
+        "legacy_users",
+        "legacy_requests",
+        "legacy_feedback",
+    }
+    need(type(value) is dict and set(value) == tables_expected, "INVALID_DATABASE_SNAPSHOT")
+    tables = cast("dict[str, object]", value)
+    for table, rows in tables.items():
+        need(type(rows) is list, "INVALID_DATABASE_SNAPSHOT")
+        for row in cast("list[object]", rows):
+            need(type(row) is dict, "INVALID_DATABASE_SNAPSHOT")
+            if table in _DATABASE_FIELDS:
+                fields = _DATABASE_FIELDS[table]
+                entry = cast("dict[str, object]", row)
+                need(
+                    all(
+                        field in entry and type(entry[field]) in accepted
+                        for field, accepted in fields.items()
+                    ),
+                    "INVALID_DATABASE_SNAPSHOT",
+                )
+    e.validate_database(value)
+    return cast("DatabaseRecord", value)
+
+
 def digest(value: object) -> str:
     return sha(canonical(value))
 
@@ -541,7 +616,7 @@ def _valid_capture(
             pg.get("running") is True and guards.get("postgres_health") == "healthy",
             "DATABASE_UNHEALTHY",
         )
-        e.validate_database(state["database"])
+        _validated_database(state["database"])
         return cast("ValidatedState", state)
     return state
 
@@ -1371,9 +1446,7 @@ def _case_result(
 
 
 def _full_database(capture: LiveCaptureRecord) -> DatabaseRecord:
-    database = capture["state"]["database"]
-    e.validate_database(database)
-    return cast("DatabaseRecord", database)
+    return _validated_database(capture["state"]["database"])
 
 
 def _required_container(

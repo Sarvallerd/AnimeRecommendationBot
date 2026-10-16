@@ -9,6 +9,7 @@ import datetime as dt
 import hashlib
 import importlib.util
 import json
+import operator
 import os
 import re
 import stat
@@ -29,42 +30,25 @@ if TYPE_CHECKING:
         PathBundleContract,
         SnapshotRecord,
     )
-    from deploy.tests.live_verifier_v2 import (
-        AnimeEventRow,
-        CurrentRow,
-        DeliveredRow,
-        FeedbackRow,
-        MigrationRow,
-        RatingRow,
-        UserRow,
-    )
 
     from recsys.contracts.bundle import Neighbors
 
 
-class HistoricalRequestRow(TypedDict):
-    id: int
-    tg_id: int
-    action_key: str
-    raw_query: str
-    created_at: str
-    seed_mal_id: int | None
-    bundle_id: str | None
-    resolved_at: str | None
+type HistoricalRow = dict[str, object]
 
 
 class HistoricalDatabaseRecord(TypedDict):
-    migrations: list[MigrationRow]
-    users: list[UserRow]
-    requests: list[HistoricalRequestRow]
-    delivered: list[DeliveredRow]
-    anime_events: list[AnimeEventRow]
-    anime_current: list[CurrentRow]
-    recommendation_ratings: list[RatingRow]
-    feedback: list[FeedbackRow]
-    legacy_users: list[dict[str, object]]
-    legacy_requests: list[dict[str, object]]
-    legacy_feedback: list[dict[str, object]]
+    migrations: list[HistoricalRow]
+    users: list[HistoricalRow]
+    requests: list[HistoricalRow]
+    delivered: list[HistoricalRow]
+    anime_events: list[HistoricalRow]
+    anime_current: list[HistoricalRow]
+    recommendation_ratings: list[HistoricalRow]
+    feedback: list[HistoricalRow]
+    legacy_users: list[HistoricalRow]
+    legacy_requests: list[HistoricalRow]
+    legacy_feedback: list[HistoricalRow]
 
 
 class HistoricalFullRuntime(TypedDict):
@@ -85,13 +69,13 @@ class HistoricalFullSnapshot(TypedDict):
 
 
 class HistoricalDelta(TypedDict):
-    requests: list[HistoricalRequestRow]
-    delivered: list[DeliveredRow]
-    anime_events: list[AnimeEventRow]
-    anime_current: list[CurrentRow]
-    recommendation_ratings: list[RatingRow]
-    feedback: list[FeedbackRow]
-    users: list[UserRow]
+    requests: list[HistoricalRow]
+    delivered: list[HistoricalRow]
+    anime_events: list[HistoricalRow]
+    anime_current: list[HistoricalRow]
+    recommendation_ratings: list[HistoricalRow]
+    feedback: list[HistoricalRow]
+    users: list[HistoricalRow]
 
 
 class HistoricalBundleReference(TypedDict):
@@ -479,8 +463,10 @@ def snapshot(project: str, settings: Path, runtime_only: bool = False) -> Snapsh
     }
 
 
-def utc(value: str) -> dt.datetime:
+def utc(value: object) -> dt.datetime:
     try:
+        if not isinstance(value, str):
+            raise AttributeError("timestamp has no replace method")
         parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
     except (ValueError, AttributeError) as exc:
         raise EvidenceError("INVALID_TIMESTAMP") from exc
@@ -490,6 +476,35 @@ def utc(value: str) -> dt.datetime:
 
 def integer(value: object, low: int | None = None, high: int | None = None) -> bool:
     return type(value) is int and (low is None or value >= low) and (high is None or value <= high)
+
+
+type HistoricalComparable = int | float | str | list[object]
+
+
+def historical_greater(left: object, right: object) -> bool:
+    if not isinstance(left, (int, float, str, list)) or not isinstance(
+        right, (int, float, str, list)
+    ):
+        raise TypeError("historical values are not comparable")
+    return bool(
+        operator.gt(cast("HistoricalComparable", left), cast("HistoricalComparable", right))
+    )
+
+
+def historical_max(values: list[object]) -> object:
+    if not values:
+        raise ValueError("max() arg is an empty sequence")
+    largest = values[0]
+    for value in values[1:]:
+        if historical_greater(value, largest):
+            largest = value
+    return largest
+
+
+def historical_action_parts(value: object) -> list[str]:
+    if not isinstance(value, str):
+        raise AttributeError(f"'{type(value).__name__}' object has no attribute 'split'")
+    return value.split(":")
 
 
 def index_rows[T: Mapping[str, object]](
@@ -509,7 +524,6 @@ def validate_database(db: object, bundle: LegacyBundle | None = None) -> None:
     require(isinstance(db, dict) and set(db) == set(TABLES), "INVALID_DATABASE_SNAPSHOT")
     row_tables = cast("dict[str, list[dict[str, object]]]", db)
     maps = {table: index_rows(row_tables[table], fields) for table, fields in KEYS.items()}
-    db = cast("HistoricalDatabaseRecord", db)
     require(set(maps["migrations"]) == {(1,)}, "MIGRATION_MISMATCH")
     for table in LEGACY:
         require(
@@ -517,10 +531,11 @@ def validate_database(db: object, bundle: LegacyBundle | None = None) -> None:
             and all(isinstance(row, dict) for row in row_tables[table]),
             "INVALID_ROWS",
         )
-    users = cast("dict[tuple[object, ...], UserRow]", maps["users"])
-    requests = cast("dict[tuple[object, ...], HistoricalRequestRow]", maps["requests"])
-    delivered = cast("dict[tuple[object, ...], DeliveredRow]", maps["delivered"])
-    events = cast("dict[tuple[object, ...], AnimeEventRow]", maps["anime_events"])
+    db = cast("HistoricalDatabaseRecord", db)
+    users = maps["users"]
+    requests = maps["requests"]
+    delivered = maps["delivered"]
+    events = maps["anime_events"]
     positions = {(row["request_id"], row["rank"]) for row in db["delivered"]}
     require(len(positions) == len(delivered), "DUPLICATE_RANK")
     require(
@@ -575,8 +590,9 @@ def validate_database(db: object, bundle: LegacyBundle | None = None) -> None:
         if bundle is not None and request["bundle_id"] == bundle["id"]:
             neighbors = bundle["neighbors"][str(request["seed_mal_id"])]
             require(
-                delivery_row["rank"] <= len(neighbors)
-                and neighbors[delivery_row["rank"] - 1]["mal_id"] == delivery_row["mal_id"],
+                cast("int", delivery_row["rank"]) <= len(neighbors)
+                and neighbors[cast("int", delivery_row["rank"]) - 1]["mal_id"]
+                == delivery_row["mal_id"],
                 "DELIVERY_ORDER",
             )
     for event_row in db["anime_events"]:
@@ -599,7 +615,8 @@ def validate_database(db: object, bundle: LegacyBundle | None = None) -> None:
         ]
         require(
             bool(matching)
-            and current_row["current_event_id"] == max(event["id"] for event in matching),
+            and current_row["current_event_id"]
+            == historical_max([event["id"] for event in matching]),
             "CURRENT_POINTER",
         )
     require(
@@ -715,12 +732,12 @@ def context_from_anchor(
         and request["action_key"].count(":") == 2,
         "ANCHOR_ACTION",
     )
-    chat = int(request["action_key"].split(":")[1])
+    chat = int(cast("str", request["action_key"]).split(":")[1])
     require(chat == request["tg_id"], "ANCHOR_CHAT")
     selected_bundle = load_bundle(Path(a["path"]))
     require(selected_bundle["id"] == a["identity"], "ANCHOR_BUNDLE")
     positions = [r for r in after["database"]["delivered"] if r["request_id"] == request["id"]]
-    ordered = sorted(positions, key=lambda row: row["rank"])
+    ordered = sorted(positions, key=lambda row: cast("int", row["rank"]))
     expected_ids = [row["mal_id"] for row in selected_bundle["neighbors"]["1"]]
     require(
         len(ordered) == 5
@@ -743,7 +760,11 @@ def context_from_anchor(
         "schema_version": 1,
         "project": after["deployment"]["project"],
         "database_volume": after["runtime"]["postgres"]["database_volume"],
-        "actor": {"tg_id": request["tg_id"], "chat_id": chat, "anchor_request_id": request["id"]},
+        "actor": {
+            "tg_id": cast("int", request["tg_id"]),
+            "chat_id": chat,
+            "anchor_request_id": cast("int", request["id"]),
+        },
         "bundles": report["bundles"],
         "anchor": {
             "before_sha256": before_hash,
@@ -854,7 +875,7 @@ def verify_transition(
                 "UNRELATED_RESOLUTION",
             )
             pending.append(current_request)
-    for new_user in cast("list[UserRow]", new_rows(old, current, "users")):
+    for new_user in new_rows(old, current, "users"):
         require(new_user["tg_id"] == actor, "UNRELATED_WRITE")
     old_users = index_rows(old["users"], ("tg_id",))
     for current_user in current["users"]:
@@ -882,7 +903,7 @@ def verify_transition(
                 "USER_HISTORY_CHANGED",
             )
     old_pointers = index_rows(old["anime_current"], ("tg_id", "mal_id"))
-    new_events = cast("list[AnimeEventRow]", new_rows(old, current, "anime_events"))
+    new_events = new_rows(old, current, "anime_events")
     current_pointers = index_rows(current["anime_current"], ("tg_id", "mal_id"))
     for key, old_pointer in old_pointers.items():
         later = current_pointers.get(key)
@@ -896,7 +917,7 @@ def verify_transition(
             if later is None:
                 raise EvidenceError("CURRENT_POINTER")
             require(
-                later["current_event_id"] > old_pointer["current_event_id"]
+                historical_greater(later["current_event_id"], old_pointer["current_event_id"])
                 and utc(later["updated_at"]) >= utc(old_pointer["updated_at"]),
                 "CURRENT_POINTER",
             )
@@ -921,7 +942,7 @@ def verify_transition(
     require(len(pending) <= 1, "UNRELATED_RESOLUTION")
     require(len(delta["requests"]) + len(pending) <= 1, "AMBIGUOUS_REQUEST")
     for changed_request in delta["requests"] + pending:
-        parts = changed_request["action_key"].split(":")
+        parts = cast("str", changed_request["action_key"]).split(":")
         require(
             len(parts) == 3
             and parts[0] == "msg"
@@ -931,7 +952,7 @@ def verify_transition(
             "INVALID_ACTION_KEY",
         )
     for changed_feedback in delta["feedback"]:
-        parts = changed_feedback["action_key"].split(":")
+        parts = historical_action_parts(changed_feedback["action_key"])
         require(
             len(parts) == 3
             and parts[0] == "msg"
@@ -970,7 +991,7 @@ def verify_transition(
             "WRONG_SELECTION",
         )
         if case in ("recommendations", "empty", "update", "rollback"):
-            ordered = sorted(delta["delivered"], key=lambda row: row["rank"])
+            ordered = sorted(delta["delivered"], key=lambda row: cast("int", row["rank"]))
             targets = [item["mal_id"] for item in bundle["neighbors"][str(seed)]]
             require(
                 len(ordered) == len(targets)

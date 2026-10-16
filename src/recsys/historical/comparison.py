@@ -151,6 +151,150 @@ class WorkerOutput(TypedDict):
     worker_wall_ns: int
 
 
+WORKER_PATHS = {
+    "bundle_dir",
+    "normalization_report",
+    "build_report",
+    "anime_csv",
+    "synopsis_csv",
+    "glove",
+    "lockfile",
+}
+
+
+def _validated_worker_task(value: object) -> WorkerTask:
+    if not isinstance(value, dict) or set(value) != {"method", "paths"}:
+        raise EvaluationError("invalid worker task fields")
+    if value["method"] not in METHODS:
+        raise EvaluationError("unknown worker method")
+    paths = value["paths"]
+    if (
+        not isinstance(paths, dict)
+        or not WORKER_PATHS <= set(paths) <= WORKER_PATHS | {"originals_root"}
+        or any(
+            type(key) is not str or type(path) is not str or not path for key, path in paths.items()
+        )
+    ):
+        raise EvaluationError("invalid worker task paths")
+    return cast("WorkerTask", value)  # Complete task and path mapping checked above.
+
+
+def _validated_worker_output(value: object, method: str, query_ids: list[int]) -> WorkerOutput:
+    import math
+
+    if not isinstance(value, dict) or set(value) != {
+        "result",
+        "prepare_wall_ns",
+        "rank20_wall_ns",
+        "peak_rss_bytes",
+        "effective_threadpools",
+        "worker_wall_ns",
+    }:
+        raise EvaluationError("invalid worker output fields")
+    result = value["result"]
+    if not isinstance(result, dict) or set(result) != {
+        "method",
+        "universe_count",
+        "universe_ids_sha256",
+        "queries",
+        "extra",
+    }:
+        raise EvaluationError("invalid worker result fields")
+    if (
+        result["method"] != method
+        or type(result["universe_count"]) is not int
+        or result["universe_count"] < 1
+        or not isinstance(result["universe_ids_sha256"], str)
+        or re.fullmatch(r"[0-9a-f]{64}", result["universe_ids_sha256"]) is None
+        or not isinstance(result["extra"], dict)
+        or any(type(key) is not str for key in result["extra"])
+    ):
+        raise EvaluationError("invalid worker result metadata")
+    extra_keys = (
+        {"glove"}
+        if method == "glove-selected"
+        else {"legacy_diagnostics"}
+        if method == "legacy-repaired"
+        else set()
+    )
+    if set(result["extra"]) != extra_keys:
+        raise EvaluationError("invalid worker result extras")
+    rows = result["queries"]
+    if not isinstance(rows, list) or len(rows) != len(query_ids):
+        raise EvaluationError("invalid worker queries")
+    for row, query_id in zip(rows, query_ids):
+        if (
+            not isinstance(row, dict)
+            or set(row) != {"query_mal_id", "status", "reasons", "recommendations"}
+            or type(row["query_mal_id"]) is not int
+            or row["query_mal_id"] != query_id
+            or not isinstance(row["status"], str)
+            or not isinstance(row["reasons"], list)
+            or any(type(reason) is not str for reason in row["reasons"])
+        ):
+            raise EvaluationError("invalid worker query")
+        allowed = (
+            {"ok", "no_tokens", "oov_only", "zero_vector", "no_positive_candidates"}
+            if method == "glove-selected"
+            else {"ok", "empty_genres", "no_positive_candidates"}
+            if method == "genre-jaccard"
+            else {
+                "ok",
+                "legacy_exclusion",
+                "no_tokens",
+                "oov_only",
+                "zero_vector",
+                "no_candidates_after_cluster",
+            }
+        )
+        recommendations = row["recommendations"]
+        if (
+            row["status"] not in allowed
+            or not isinstance(recommendations, list)
+            or len(recommendations) > 5
+            or (row["status"] == "ok") != bool(recommendations)
+        ):
+            raise EvaluationError("invalid worker query status or recommendations")
+        seen: set[int] = set()
+        for rank, rec in enumerate(recommendations, 1):
+            if (
+                not isinstance(rec, dict)
+                or set(rec) != {"rank", "mal_id", "score"}
+                or type(rec["rank"]) is not int
+                or rec["rank"] != rank
+                or type(rec["mal_id"]) is not int
+                or rec["mal_id"] < 1
+                or rec["mal_id"] == query_id
+                or rec["mal_id"] in seen
+                or type(rec["score"]) not in (int, float)
+                or not math.isfinite(rec["score"])
+                or not -1 - 1e-12 <= rec["score"] <= 1 + 1e-12
+                or (method != "legacy-repaired" and rec["score"] <= 0)
+            ):
+                raise EvaluationError("invalid worker recommendation")
+            seen.add(rec["mal_id"])
+    for key in ("prepare_wall_ns", "rank20_wall_ns", "peak_rss_bytes", "worker_wall_ns"):
+        if type(value[key]) is not int or value[key] <= 0:
+            raise EvaluationError("invalid worker timing")
+    if value["prepare_wall_ns"] + value["rank20_wall_ns"] > value["worker_wall_ns"]:
+        raise EvaluationError("invalid worker timing")
+    pools = value["effective_threadpools"]
+    if not isinstance(pools, list) or (method != "genre-jaccard" and not pools):
+        raise EvaluationError("invalid worker threadpool metadata")
+    for pool in pools:
+        if (
+            not isinstance(pool, dict)
+            or type(pool.get("num_threads")) is not int
+            or pool["num_threads"] != 1
+            or not isinstance(pool.get("user_api"), str)
+            or not pool["user_api"]
+            or not isinstance(pool.get("internal_api"), str)
+            or not pool["internal_api"]
+        ):
+            raise EvaluationError("invalid worker threadpool metadata")
+    return cast("WorkerOutput", value)  # Entire result, queries, timing and pools checked.
+
+
 class RawSource(TypedDict):
     id: str
     size: int
@@ -566,7 +710,10 @@ def _worker(input_path: str | Path, output_path: str | Path) -> None:
     import threadpoolctl
 
     started = time.perf_counter_ns()
-    task = cast("WorkerTask", json.loads(Path(input_path).read_text()))
+    try:
+        task = _validated_worker_task(json.loads(Path(input_path).read_text()))
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise EvaluationError("invalid worker task JSON") from exc
     method = task["method"]
     paths = {k: Path(v) for k, v in task["paths"].items()}
     with threadpoolctl.threadpool_limits(limits=1):
@@ -715,8 +862,16 @@ def compare(
                     raise EvaluationError(
                         f"{method} repetition {repetition} worker failed: {process.stderr[-3000:]}"
                     )
-                output = cast("WorkerOutput", json.loads(output_path.read_text()))
-                output_path.unlink(missing_ok=True)
+                try:
+                    output = _validated_worker_output(
+                        json.loads(output_path.read_text()),
+                        method,
+                        [query["mal_id"] for query in pins["queries"]],
+                    )
+                except (OSError, UnicodeError, ValueError) as exc:
+                    raise EvaluationError("invalid worker output JSON") from exc
+                finally:
+                    output_path.unlink(missing_ok=True)
                 result = output["result"]
                 if method == "glove-selected":
                     for row in result["queries"]:
@@ -1204,7 +1359,7 @@ def _performance(
     }
     if not isinstance(measurements, dict) or set(measurements) != fields:
         raise EvaluationError("invalid measurements fields")
-    measurements = cast("MeasurementArtifact", measurements)
+    measurements = cast("dict[str, object]", measurements)  # Exact top-level mapping checked.
     if (
         type(measurements["schema_version"]) is not int
         or measurements["schema_version"] != 1
@@ -1243,7 +1398,18 @@ def _performance(
             method["id"]: method["universe_count"] for method in comparison["methods"]
         },
     }
-    if measurements["workload"] != expected_workload:
+    workload = measurements["workload"]
+    if (
+        not isinstance(workload, dict)
+        or set(workload) != {"query_count", "universe_counts"}
+        or type(workload["query_count"]) is not int
+        or not isinstance(workload["universe_counts"], dict)
+        or any(
+            type(key) is not str or type(count) is not int
+            for key, count in workload["universe_counts"].items()
+        )
+        or workload != expected_workload
+    ):
         raise EvaluationError("measurement workload mismatch")
     workers = measurements["workers"]
     if not isinstance(workers, list) or not workers or len(workers) % 3:
@@ -1257,8 +1423,18 @@ def _performance(
         for i in range(1, repetitions + 1)
     ]
     if (
-        schedule != expected_schedule
+        not isinstance(schedule, list)
+        or any(
+            not isinstance(entry, dict)
+            or set(entry) != {"repetition", "order"}
+            or type(entry["repetition"]) is not int
+            or not isinstance(entry["order"], list)
+            or any(type(method) is not str for method in entry["order"])
+            for entry in schedule
+        )
+        or schedule != expected_schedule
         or any(not isinstance(worker, dict) for worker in workers)
+        or any(type(worker.get("repetition")) is not int for worker in workers)
         or [(worker.get("repetition"), worker.get("method")) for worker in workers]
         != [
             (entry["repetition"], method)

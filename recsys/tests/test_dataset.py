@@ -357,6 +357,39 @@ class DatasetTests(unittest.TestCase):
         with self.assertRaisesRegex(DatasetError, "dataset_integrity_error"):
             validate_dataset(output, _spec=self.fixture.spec)
 
+    def test_manifest_files_must_be_mapping(self) -> None:
+        output = self.fixture.run()
+        manifest_path = output / "dataset-manifest.json"
+        manifest = json.loads(manifest_path.read_bytes())
+        manifest["files"] = list(manifest["files"])
+        manifest_path.write_bytes(canonical_bytes(manifest))
+        with self.assertRaisesRegex(DatasetError, "dataset_integrity_error"):
+            validate_dataset(output, _spec=self.fixture.spec)
+
+    def test_unconsumed_qa_values_must_have_declared_types(self) -> None:
+        output = self.fixture.run()
+        manifest_path = output / "dataset-manifest.json"
+        qa_path = output / "dataset-qa.json"
+        original = json.loads(qa_path.read_bytes())
+        for section, key, value in (
+            ("counts", "future_count", True),
+            ("distributions", "future_distribution", {"one": "1"}),
+            ("metadata_diagnostics", "future_diagnostic", "1"),
+        ):
+            with self.subTest(section=section):
+                qa = json.loads(canonical_bytes(original))
+                qa[section][key] = value
+                raw = canonical_bytes(qa)
+                qa_path.write_bytes(raw)
+                manifest = json.loads(manifest_path.read_bytes())
+                manifest["files"]["dataset-qa.json"] = {
+                    "bytes": len(raw),
+                    "sha256": hashlib.sha256(raw).hexdigest(),
+                }
+                manifest_path.write_bytes(canonical_bytes(manifest))
+                with self.assertRaisesRegex(DatasetError, "dataset_integrity_error"):
+                    validate_dataset(output, _spec=self.fixture.spec)
+
     def test_invalid_fixture_expectations_cannot_bypass_pins(self) -> None:
         resource = json.loads(self.fixture.spec.expectations_bytes)
         del resource["counts"]["accepted_pairs"]

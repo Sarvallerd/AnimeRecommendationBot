@@ -9,7 +9,7 @@ import sys
 import tempfile
 import zlib
 from collections import Counter
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import date
 from importlib import metadata as package_metadata
@@ -618,10 +618,11 @@ def validate_dataset(
             or manifest["provenance"] != registry["provenance"]
             or manifest["sources"] != registry["sources"]
             or manifest["parameters"] != POLICIES
-            or set(cast("Iterable[str]", manifest["files"])) != set(OUTPUTS)
+            or not isinstance(manifest["files"], dict)
+            or set(manifest["files"]) != set(OUTPUTS)
         ):
             raise DatasetError("dataset_integrity_error")
-        manifest_files = cast("dict[str, object]", manifest["files"])  # Checked output set.
+        manifest_files = cast("dict[str, object]", manifest["files"])  # Checked mapping and keys.
         normalizer = manifest["normalizer"]
         if (
             not isinstance(normalizer, dict)
@@ -757,6 +758,21 @@ def validate_dataset(
             or not isinstance(qa["distributions"], dict)
         ):
             raise DatasetError("dataset_integrity_error")
+        counts = qa["counts"]
+        distributions = qa["distributions"]
+        if any(
+            type(key) is not str or type(value) is not int or value < 0
+            for key, value in counts.items()
+        ) or any(
+            type(key) is not str
+            or not isinstance(values, dict)
+            or any(
+                type(label) is not str or type(value) is not int or value < 0
+                for label, value in values.items()
+            )
+            for key, values in distributions.items()
+        ):
+            raise DatasetError("dataset_integrity_error")
         loss = qa["loss_reasons"]
         if (
             not isinstance(loss, dict)
@@ -772,6 +788,7 @@ def validate_dataset(
                 "accepted",
             }
             or any(type(v) is not int or v < 0 for v in loss["primary"].values())
+            or any(type(v) is not int or v < 0 for v in loss["overlap_flags"].values())
             or sum(loss["primary"].values()) != qa["counts"].get("raw_explicit_pairs")
             or loss["primary"].get("accepted", 0) != qa["counts"].get("accepted_pairs")
             or loss["overlap_flags"]
@@ -782,6 +799,10 @@ def validate_dataset(
                 "invalid_state": qa["counts"].get("invalid_state_pairs"),
             }
             or not isinstance(qa["metadata_diagnostics"], dict)
+            or any(
+                type(key) is not str or type(value) is not int or value < 0
+                for key, value in qa["metadata_diagnostics"].items()
+            )
             or qa["metadata_diagnostics"].get("metadata_rows") != qa["counts"].get("metadata_rows")
             or qa["metadata_diagnostics"].get("catalog_items") != qa["counts"].get("catalog_items")
         ):

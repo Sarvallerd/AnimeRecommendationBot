@@ -28,6 +28,8 @@ from test_research_model_content import _glove
 
 import recsys
 from recsys.research.artifacts import StreamDescriptor, StreamWriter, read_json, stream_jsonl
+from recsys.research.campaign.artifacts import _validate_gpu_measurement
+from recsys.research.campaign.common import _read_private
 from recsys.research.campaign.plan import CampaignPlan, _validate_plan_structure
 from recsys.research.campaign.report import validate_campaign
 from recsys.research.campaign.runner import (
@@ -266,6 +268,76 @@ class CampaignTests(unittest.TestCase):
         clock = patch("recsys.research.campaign.runner._now", side_effect=_stable_utc_clock())
         clock.start()
         self.addCleanup(clock.stop)
+
+    def test_malformed_retained_gpu_measurements_have_fixed_error(self) -> None:
+        valid: dict[str, object] = {
+            "backend": "gpu",
+            "status": "published",
+            "gpu_admission": {
+                "purpose": "parity-only-gpu-admission",
+                "canonical_queries": 1,
+                "nonempty_queries": 1,
+                "raw_atol": 1e-12,
+                "raw_rtol": 1e-12,
+                "raw_max_abs_difference": 0.0,
+                "encoded_score_differences": 0,
+                "complete_available_rankings_equal": True,
+                "model_sha256": "a" * 64,
+                "query_sha256": "b" * 64,
+                "scoring_provenance": {"backend": "cupy"},
+                "code_files_sha256": {"research_gpu.py": "c" * 64},
+            },
+            "dedicated_pool_session_including_admission": {
+                "pool_used_bytes": 0,
+                "pool_reserved_bytes": 0,
+                "pool_limit_bytes": 256,
+                "pool_peak_used_bytes": 0,
+                "pool_peak_reserved_bytes": 0,
+            },
+            "memory_scope": "dedicated-pool-only-excludes-context-and-cublas",
+            "queries": 1,
+            "score_pairs": 1,
+            "session_acquire_seconds": 0.0,
+            "input_validation_seconds": 0.0,
+            "model_validation_upload_seconds": 0.0,
+            "input_model_init_upload_seconds": 0.0,
+            "gpu_admission_seconds": 0.0,
+            "synchronized_scoring_seconds": 0.0,
+            "encoding_gzip_write_seconds": 0.0,
+            "staging_wall_seconds": 0.0,
+            "publication_wall_seconds": 0.0,
+        }
+        _validate_gpu_measurement(valid)
+        malformed: list[object] = [None, [], {}, {**valid, "gpu_admission": None}]
+        for missing in ("queries", "gpu_admission_seconds"):
+            altered = dict(valid)
+            del altered[missing]
+            malformed.append(altered)
+        malformed.extend(
+            (
+                {**valid, "queries": True},
+                {**valid, "gpu_admission_seconds": "zero"},
+                {**valid, "gpu_admission": {}},
+                {
+                    **valid,
+                    "gpu_admission": {
+                        **cast("dict[str, object]", valid["gpu_admission"]),
+                        "canonical_queries": True,
+                    },
+                },
+                {**valid, "dedicated_pool_session_including_admission": []},
+            )
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            measurement = Path(temporary) / "measurement.json"
+            for record in malformed:
+                with self.subTest(record=record):
+                    _private_file(measurement, _canonical(record))
+                    retained, _ = _read_private(measurement)
+                    with self.assertRaises(ResearchError) as caught:
+                        _validate_gpu_measurement(retained)
+                    self.assertEqual(str(caught.exception), "research_campaign_admission_invalid")
+                    measurement.unlink()
 
     def test_old_campaign_plan_rejects_before_science(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -622,6 +694,30 @@ class CampaignTests(unittest.TestCase):
                 self.assertNotIn("u1_", str(report))
                 self.assertNotIn("q1_", str(report))
                 self.assertNotIn(str(output), str(report))
+                fit_attempt = output / "variants" / "popularity" / "attempts" / "fit" / "1"
+                model_manifest = fit_attempt / "artifact" / "model-manifest.json"
+                worker_receipt = fit_attempt / "result.json"
+                original_model, original_receipt = (
+                    model_manifest.read_bytes(),
+                    worker_receipt.read_bytes(),
+                )
+                malformed_model = _canonical({})
+                model_manifest.write_bytes(malformed_model)
+                receipt = _object(worker_receipt)
+                receipt["manifest_sha256"] = _digest(malformed_model)
+                worker_receipt.write_bytes(_canonical(receipt))
+                try:
+                    with self.assertRaises(ResearchError) as caught:
+                        validate_campaign(
+                            prepared,
+                            output,
+                            expected_prepared_identity=identity,
+                            expected_campaign_identity=manifest["plan_identity"],
+                        )
+                    self.assertEqual(str(caught.exception), "research_integrity_error")
+                finally:
+                    model_manifest.write_bytes(original_model)
+                    worker_receipt.write_bytes(original_receipt)
                 before = (output / "journal.jsonl").read_bytes()
                 run_campaign(
                     prepared,

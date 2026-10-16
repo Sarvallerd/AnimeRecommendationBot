@@ -384,9 +384,8 @@ def _validate_release_report(
     registry_sha: str,
     *,
     enforce_current: bool,
-) -> None:
-    exact_fields(report, REPORT_FIELDS, "build-report.json")
-    report = cast("BuildReport", report)
+) -> BuildReport:
+    report = exact_fields(report, REPORT_FIELDS, "build-report.json")
     integer(report["schema_version"], "build-report.json.schema_version", 3, 3)
     _same(report["kind"], "arb-release-build", "build-report.json.kind")
     _same(report["builder_version"], BUILDER_VERSION, "build-report.json.builder_version")
@@ -426,9 +425,8 @@ def _validate_release_report(
         },
         "build-report.json.files",
     )
-    producer = report["producer"]
-    exact_fields(
-        producer,
+    producer = exact_fields(
+        report["producer"],
         {"package_version", "python_version", "numpy_version", "code_files", "source_layout"},
         "build-report.json.producer",
     )
@@ -442,7 +440,8 @@ def _validate_release_report(
     _same(producer["numpy_version"], "2.5.3", "build-report.json.producer.numpy_version")
     _same(producer["source_layout"], SOURCE_LAYOUT, "build-report.json.producer.source_layout")
     _same(producer["code_files"], source_fingerprints(), "build-report.json.producer.code_files")
-    _validate_diagnostics(cast("dict[str, object]", report), verified.catalog, neighbors)
+    _validate_diagnostics(report, verified.catalog, neighbors)
+    return cast("BuildReport", report)  # Every scalar and nested record checked above.
 
 
 def export_release_bundle(
@@ -489,7 +488,7 @@ def export_release_bundle(
         report = parse_canonical(report_raw, "build-report.json")
         check_neighbors(neighbors, check_catalog(verified.catalog))
         checked_neighbors = cast("Neighbors", neighbors)
-        _validate_release_report(
+        checked_report = _validate_release_report(
             report,
             verified,
             checked_neighbors,
@@ -498,7 +497,6 @@ def export_release_bundle(
             registry_sha,
             enforce_current=True,
         )
-        checked_report = cast("BuildReport", report)
         sources = [
             *checked_report["sources"],
             _source(

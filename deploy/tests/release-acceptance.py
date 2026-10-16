@@ -1090,9 +1090,11 @@ def snapshot_phase(
     previous_capture: str,
     bot_image: str,
     pg0: ContainerRecord,
+    switch_state: SwitchState,
 ) -> tuple[PhaseEntry, str, str]:
     t.settings = settings
     quiescent(t)
+    switch_state["begun"] = True
     t.compose("up", "-d", "--no-deps", "--force-recreate", "prepare")
     current = None
     for _ in range(120):
@@ -1173,7 +1175,6 @@ def run_prepare_sequence(
         )
         clean(head)
         check_retained(retained, old_path)
-        switch_state["begun"] = True
         entry, previous_id, previous_capture = snapshot_phase(
             t,
             evidence,
@@ -1185,6 +1186,7 @@ def run_prepare_sequence(
             previous_capture,
             bot_image,
             pg0,
+            switch_state,
         )
         sequence.append(entry)
     return sequence
@@ -1239,6 +1241,22 @@ def restore_old(
         return "PASS"
     except Exception:
         return "FAIL"
+
+
+def restore_after_failure(
+    switch_state: SwitchState,
+    t: Transport,
+    settings: Path,
+    original_state: tuple[str, int, int, int],
+    old_settings: Path | None,
+    old_path: Path,
+    old: BundleSummaryView,
+    pg0: ContainerRecord | None,
+    retained: Retained,
+) -> str:
+    if not switch_state["begun"] or old_settings is None or pg0 is None:
+        return "PENDING"
+    return restore_old(t, settings, original_state, old_settings, old_path, old, pg0, retained)
 
 
 def verify_record(evidence: Path) -> PreparationReport:
@@ -2113,11 +2131,9 @@ def _run_locked(
             if isinstance(exc, (ReleaseError, p.ProfileError, e.EvidenceError))
             else "BUILD_FAILED"
         )
-        restoration = "PENDING"
-        if switch_state["begun"] and old_settings is not None and pg0 is not None:
-            restoration = restore_old(
-                t, settings, original_state, old_settings, old_path, old, pg0, retained
-            )
+        restoration = restore_after_failure(
+            switch_state, t, settings, original_state, old_settings, old_path, old, pg0, retained
+        )
         try:
             save_json(
                 evidence / "failure-status.json",
