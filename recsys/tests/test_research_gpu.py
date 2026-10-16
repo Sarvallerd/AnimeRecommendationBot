@@ -1,8 +1,8 @@
 import os
 import subprocess
 import sys
-import threading
 import textwrap
+import threading
 import unittest
 import weakref
 from unittest.mock import patch
@@ -33,13 +33,22 @@ class FakeCuda:
         FakeCuda.instances.append(self)
 
     def open(self):
-        return ({
-            "backend": "cupy", "dtype": "float64", "device_index": 0,
-            "device_name": "Fake CUDA", "compute_capability": "89",
-            "cupy_version": "14.2.0", "cuda_runtime_version": 12090,
-            "cuda_driver_version": 13030, "memory_pool_max_bytes": gpu._POOL_MAX,
-            "query_batch_size": 128, "dot_block_rows": 128,
-        }, 256)
+        return (
+            {
+                "backend": "cupy",
+                "dtype": "float64",
+                "device_index": 0,
+                "device_name": "Fake CUDA",
+                "compute_capability": "89",
+                "cupy_version": "14.2.0",
+                "cuda_runtime_version": 12090,
+                "cuda_driver_version": 13030,
+                "memory_pool_max_bytes": gpu._POOL_MAX,
+                "query_batch_size": 128,
+                "dot_block_rows": 128,
+            },
+            256,
+        )
 
     def used_bytes(self):
         return self.current_used + self.base_used
@@ -109,12 +118,15 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(str(caught.exception), code)
 
     def test_import_has_no_array_or_cuda_side_effects(self):
-        code = ("import os, sys; before = set(os.listdir('/proc/self/fd')); "
-                "import recsys.research_gpu as gpu; "
-                "assert 'numpy' not in sys.modules and 'cupy' not in sys.modules; "
-                "assert gpu._SESSION is None and before == set(os.listdir('/proc/self/fd'))")
-        completed = subprocess.run([sys.executable, "-I", "-c", code],
-                                   capture_output=True, text=True)
+        code = (
+            "import os, sys; before = set(os.listdir('/proc/self/fd')); "
+            "import recsys.research_gpu as gpu; "
+            "assert 'numpy' not in sys.modules and 'cupy' not in sys.modules; "
+            "assert gpu._SESSION is None and before == set(os.listdir('/proc/self/fd'))"
+        )
+        completed = subprocess.run(
+            [sys.executable, "-I", "-c", code], capture_output=True, text=True
+        )
         self.assertEqual(completed.returncode, 0, completed.stderr)
 
     def test_missing_extra_and_platform_are_unavailable(self):
@@ -127,8 +139,13 @@ class CoreTests(unittest.TestCase):
         self.assert_code("research_gpu_closed", gpu.gpu_memory_usage)
         with gpu.gpu_execution():
             first = gpu.gpu_memory_usage()
-            fields = {"pool_used_bytes", "pool_reserved_bytes", "pool_limit_bytes",
-                      "pool_peak_used_bytes", "pool_peak_reserved_bytes"}
+            fields = {
+                "pool_used_bytes",
+                "pool_reserved_bytes",
+                "pool_limit_bytes",
+                "pool_peak_used_bytes",
+                "pool_peak_reserved_bytes",
+            }
             self.assertEqual(set(first), fields)
             self.assertTrue(all(type(value) is int for value in first.values()))
             self.assertEqual(first["pool_peak_used_bytes"], 0)
@@ -140,14 +157,13 @@ class CoreTests(unittest.TestCase):
                     self.assertEqual(dots.dot(self.left).tolist(), [[4.0, 5.0]])
                 after_dot = gpu.gpu_memory_usage()
                 self.assertEqual(after_dot["pool_used_bytes"], self.features.nbytes)
-                self.assertGreater(after_dot["pool_peak_used_bytes"],
-                                   after_dot["pool_used_bytes"])
-                self.assertGreaterEqual(after_dot["pool_peak_reserved_bytes"],
-                                        after_dot["pool_reserved_bytes"])
+                self.assertGreater(after_dot["pool_peak_used_bytes"], after_dot["pool_used_bytes"])
+                self.assertGreaterEqual(
+                    after_dot["pool_peak_reserved_bytes"], after_dot["pool_reserved_bytes"]
+                )
             after_close = gpu.gpu_memory_usage()
             self.assertEqual(after_close["pool_used_bytes"], 0)
-            self.assertEqual(after_close["pool_peak_used_bytes"],
-                             after_dot["pool_peak_used_bytes"])
+            self.assertEqual(after_close["pool_peak_used_bytes"], after_dot["pool_peak_used_bytes"])
         self.assert_code("research_gpu_closed", gpu.gpu_memory_usage)
         with gpu.gpu_execution():
             self.assertEqual(gpu.gpu_memory_usage()["pool_peak_used_bytes"], 0)
@@ -161,27 +177,42 @@ class CoreTests(unittest.TestCase):
                 self.assertEqual(nested, expected)
                 self.assertEqual(gpu.probe_gpu(), expected)
             self.assertEqual(len(FakeCuda.instances), 1)
-            for invalid in ({**expected, "query_batch_size": True},
-                            {**expected, "device_name": "wrong"},
-                            {**expected, "extra": 1}, [], None):
+            for invalid in (
+                {**expected, "query_batch_size": True},
+                {**expected, "device_name": "wrong"},
+                {**expected, "extra": 1},
+                [],
+                None,
+            ):
                 if invalid is None:
                     continue
-                self.assert_code("research_backend_mismatch",
-                                 lambda invalid=invalid: gpu.gpu_execution(invalid).__enter__())
+                self.assert_code(
+                    "research_backend_mismatch",
+                    lambda invalid=invalid: gpu.gpu_execution(invalid).__enter__(),
+                )
         self.assertTrue(FakeCuda.instances[0].closed)
 
     def test_inputs_outputs_and_closed_state(self):
         with gpu.CupyDenseDots(self.features) as dots:
             self.assertEqual(dots.dot(self.left).tolist(), [[4.0, 5.0]])
-            for bad in (self.left.astype(np.float32), self.left[:, :1],
-                        np.asarray([[float("nan"), 1.0]]),
-                        np.asarray([[float("inf"), 1.0]]),
-                        np.zeros((129, 2)), [[1.0, 2.0]]):
+            for bad in (
+                self.left.astype(np.float32),
+                self.left[:, :1],
+                np.asarray([[float("nan"), 1.0]]),
+                np.asarray([[float("inf"), 1.0]]),
+                np.zeros((129, 2)),
+                [[1.0, 2.0]],
+            ):
                 self.assert_code("research_gpu_input_invalid", lambda bad=bad: dots.dot(bad))
-            for bad in (self.features.astype(np.float32),
-                        np.asarray([[float("nan"), 1.0]]),
-                        np.zeros((0, 2)), self.features[:, ::-1]):
-                self.assert_code("research_gpu_input_invalid", lambda bad=bad: gpu.CupyDenseDots(bad))
+            for bad in (
+                self.features.astype(np.float32),
+                np.asarray([[float("nan"), 1.0]]),
+                np.zeros((0, 2)),
+                self.features[:, ::-1],
+            ):
+                self.assert_code(
+                    "research_gpu_input_invalid", lambda bad=bad: gpu.CupyDenseDots(bad)
+                )
         dots.close()
         self.assert_code("research_gpu_closed", lambda: dots.dot(self.left))
 
@@ -194,7 +225,9 @@ class CoreTests(unittest.TestCase):
             first.close()
             self.assertEqual(second.dot(self.left).tolist(), [[4.0, 5.0]])
             FakeCuda.instances[0].base_used = 240
-            self.assert_code("research_gpu_resource_limit", lambda: gpu.CupyDenseDots(self.features))
+            self.assert_code(
+                "research_gpu_resource_limit", lambda: gpu.CupyDenseDots(self.features)
+            )
             self.assertEqual(gpu._SESSION.refs, 1)
         finally:
             second.close()
@@ -296,8 +329,9 @@ class CoreTests(unittest.TestCase):
                 fcntl.flock(fd, fcntl.LOCK_UN)
                 os.close(fd)
         """)
-        completed = subprocess.run([sys.executable, "-I", "-c", code],
-                                   capture_output=True, text=True)
+        completed = subprocess.run(
+            [sys.executable, "-I", "-c", code], capture_output=True, text=True
+        )
         self.assertEqual(completed.returncode, 0, completed.stderr)
 
     def test_thread_and_fork_pid_guards(self):
@@ -305,8 +339,12 @@ class CoreTests(unittest.TestCase):
             found = []
 
             def other_thread():
-                for call in (gpu.probe_gpu, gpu.gpu_memory_usage,
-                             lambda: dots.dot(self.left), dots.close):
+                for call in (
+                    gpu.probe_gpu,
+                    gpu.gpu_memory_usage,
+                    lambda: dots.dot(self.left),
+                    dots.close,
+                ):
                     try:
                         call()
                     except ResearchError as exc:
@@ -341,9 +379,16 @@ class HardwareTests(unittest.TestCase):
             with gpu.gpu_execution(metadata) as scoring:
                 self.assertEqual(scoring, metadata)
                 before_dots = gpu.gpu_memory_usage()
-                self.assertEqual(set(before_dots), {
-                    "pool_used_bytes", "pool_reserved_bytes", "pool_limit_bytes",
-                    "pool_peak_used_bytes", "pool_peak_reserved_bytes"})
+                self.assertEqual(
+                    set(before_dots),
+                    {
+                        "pool_used_bytes",
+                        "pool_reserved_bytes",
+                        "pool_limit_bytes",
+                        "pool_peak_used_bytes",
+                        "pool_peak_reserved_bytes",
+                    },
+                )
                 self.assertTrue(all(type(value) is int for value in before_dots.values()))
                 first = gpu.CupyDenseDots(features)
                 second = gpu.CupyDenseDots(features.copy())
@@ -353,21 +398,24 @@ class HardwareTests(unittest.TestCase):
                     first.close()
                     output = second.dot(left)
                     measured = gpu.gpu_memory_usage()
-                    self.assertGreater(measured["pool_peak_used_bytes"],
-                                       measured["pool_used_bytes"])
-                    self.assertGreaterEqual(measured["pool_peak_reserved_bytes"],
-                                            measured["pool_reserved_bytes"])
-                    self.assertEqual(measured["pool_limit_bytes"],
-                                     gpu._SESSION.adapter.pool.get_limit())
+                    self.assertGreater(
+                        measured["pool_peak_used_bytes"], measured["pool_used_bytes"]
+                    )
+                    self.assertGreaterEqual(
+                        measured["pool_peak_reserved_bytes"], measured["pool_reserved_bytes"]
+                    )
+                    self.assertEqual(
+                        measured["pool_limit_bytes"], gpu._SESSION.adapter.pool.get_limit()
+                    )
                     self.assertEqual(output.shape, (128, 128))
                     self.assertEqual(output.dtype, np.float64)
                     self.assertTrue(np.isfinite(output).all())
-                    np.testing.assert_allclose(output, left @ features.T,
-                                               rtol=1e-12, atol=1e-12)
-                    integer_features = np.asarray([[1., 0.], [1., 0.], [0., 1.]])
+                    np.testing.assert_allclose(output, left @ features.T, rtol=1e-12, atol=1e-12)
+                    integer_features = np.asarray([[1.0, 0.0], [1.0, 0.0], [0.0, 1.0]])
                     with gpu.CupyDenseDots(integer_features) as ties:
-                        self.assertEqual(ties.dot(np.asarray([[1., 0.]])).tolist(),
-                                         [[1.0, 1.0, 0.0]])
+                        self.assertEqual(
+                            ties.dot(np.asarray([[1.0, 0.0]])).tolist(), [[1.0, 1.0, 0.0]]
+                        )
                     self.assertLessEqual(gpu._SESSION.adapter.pool.get_limit(), gpu._POOL_MAX)
                     self.assertLessEqual(gpu._SESSION.adapter.used_bytes(), gpu._SESSION.limit)
                 finally:
@@ -375,30 +423,37 @@ class HardwareTests(unittest.TestCase):
                     first.close()
                 after_dots = gpu.gpu_memory_usage()
                 self.assertEqual(after_dots["pool_used_bytes"], 0)
-                self.assertEqual(after_dots["pool_peak_used_bytes"],
-                                 measured["pool_peak_used_bytes"])
+                self.assertEqual(
+                    after_dots["pool_peak_used_bytes"], measured["pool_peak_used_bytes"]
+                )
         self.assertIsNone(gpu._SESSION)
         self.assert_code("research_gpu_closed", gpu.gpu_memory_usage)
         with gpu.CupyDenseDots(np.asarray([[1.0]])) as again:
-            self.assertLess(gpu.gpu_memory_usage()["pool_peak_used_bytes"],
-                            measured["pool_peak_used_bytes"])
+            self.assertLess(
+                gpu.gpu_memory_usage()["pool_peak_used_bytes"], measured["pool_peak_used_bytes"]
+            )
             self.assertEqual(again.dot(np.asarray([[2.0]])).tolist(), [[2.0]])
 
     def test_other_process_busy_then_acquires(self):
         gpu.probe_gpu()
-        code = ("from recsys.research_gpu import probe_gpu; "
-                "from recsys.research_protocol import ResearchError; "
-                "import sys; "
-                "exec('try:\\n probe_gpu()\\nexcept ResearchError as e:\\n "
-                "sys.exit(0 if str(e) == \\\"research_gpu_busy\\\" else 2)\\n'); "
-                "sys.exit(3)")
+        code = (
+            "from recsys.research_gpu import probe_gpu; "
+            "from recsys.research_protocol import ResearchError; "
+            "import sys; "
+            "exec('try:\\n probe_gpu()\\nexcept ResearchError as e:\\n "
+            'sys.exit(0 if str(e) == \\"research_gpu_busy\\" else 2)\\n\'); '
+            "sys.exit(3)"
+        )
         with gpu.gpu_execution():
-            busy = subprocess.run([sys.executable, "-I", "-c", code],
-                                  capture_output=True, text=True)
+            busy = subprocess.run(
+                [sys.executable, "-I", "-c", code], capture_output=True, text=True
+            )
             self.assertEqual(busy.returncode, 0, busy.stderr)
-        released = subprocess.run([sys.executable, "-I", "-c",
-                                   "from recsys.research_gpu import probe_gpu; probe_gpu()"],
-                                  capture_output=True, text=True)
+        released = subprocess.run(
+            [sys.executable, "-I", "-c", "from recsys.research_gpu import probe_gpu; probe_gpu()"],
+            capture_output=True,
+            text=True,
+        )
         self.assertEqual(released.returncode, 0, released.stderr)
 
 

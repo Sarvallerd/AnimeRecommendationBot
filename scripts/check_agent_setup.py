@@ -84,7 +84,9 @@ def check_config() -> None:
         require_equal(config[key], expected, f".codex/config.toml {key}")
 
     agents = config["agents"]
-    require_equal(set(agents), set(EXPECTED_AGENT_SETTINGS) | set(ROLES), "agent settings and roles")
+    require_equal(
+        set(agents), set(EXPECTED_AGENT_SETTINGS) | set(ROLES), "agent settings and roles"
+    )
     for key, expected in EXPECTED_AGENT_SETTINGS.items():
         require_equal(agents[key], expected, f"agents.{key}")
 
@@ -98,7 +100,15 @@ def check_config() -> None:
         role_config = load_toml(CONFIG.parent / relative)
         require_equal(
             set(role_config),
-            {"name", "description", "model", "model_reasoning_effort", "sandbox_mode", "developer_instructions", "agents"},
+            {
+                "name",
+                "description",
+                "model",
+                "model_reasoning_effort",
+                "sandbox_mode",
+                "developer_instructions",
+                "agents",
+            },
             f"{relative} fields",
         )
         for key, expected in {
@@ -109,7 +119,10 @@ def check_config() -> None:
             "agents": {"enabled": False},
         }.items():
             require_equal(role_config[key], expected, f"{relative} {key}")
-        if not isinstance(role_config["description"], str) or not role_config["description"].strip():
+        if (
+            not isinstance(role_config["description"], str)
+            or not role_config["description"].strip()
+        ):
             fail(f"{relative} description must be nonempty")
         instructions = role_config["developer_instructions"]
         if not isinstance(instructions, str):
@@ -125,9 +138,25 @@ def check_guide() -> None:
     except OSError as exc:
         fail(f"AGENTS.md: {exc}")
     for phrase in (
-        "rust", "russian", "private-chat", "python", "mal 2020", "glove", "json", "mal_id",
-        "postgresql", "1–10", "0–5", "personalization", "worktree", "pull request",
-        "notion", "squash merge", "reviewed sha", "ci", "three child agents",
+        "rust",
+        "russian",
+        "private-chat",
+        "python",
+        "mal 2020",
+        "glove",
+        "json",
+        "mal_id",
+        "postgresql",
+        "1–10",
+        "0–5",
+        "personalization",
+        "worktree",
+        "pull request",
+        "notion",
+        "squash merge",
+        "reviewed sha",
+        "ci",
+        "three child agents",
     ):
         if phrase not in guide:
             fail(f"AGENTS.md missing {phrase!r}")
@@ -136,15 +165,22 @@ def check_guide() -> None:
 def check_ignore() -> None:
     try:
         result = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"], cwd=ROOT, capture_output=True, text=True, check=True
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
         )
     except (OSError, subprocess.CalledProcessError) as exc:
         fail(f"cannot locate Git root: {exc}")
     require_equal(Path(result.stdout.strip()).resolve(), ROOT, "Git root")
     for path, expected_ignored in IGNORE_CASES.items():
         result = subprocess.run(
-            ["git", "check-ignore", "--no-index", "--quiet", path], cwd=ROOT,
-            capture_output=True, text=True, check=False,
+            ["git", "check-ignore", "--no-index", "--quiet", path],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
         )
         if result.returncode not in (0, 1):
             fail(f"git check-ignore failed for {path}: {result.stderr.strip()}")

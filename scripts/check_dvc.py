@@ -4,26 +4,33 @@ from __future__ import annotations
 
 import gzip
 import hashlib
-from importlib.metadata import PackageNotFoundError, version
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
+from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 
 from dvc_local import StorageError, configure
-
 
 ROOT = Path(__file__).resolve().parents[1]
 DVC = [sys.executable, "-m", "dvc"]
 
 
 def run(argv: list[str], repo: Path, *, succeeds: bool = True) -> str:
-    result = subprocess.run(argv, cwd=repo, text=True, capture_output=True, check=False,
-                            env={**os.environ, "DVC_NO_ANALYTICS": "1"})
+    result = subprocess.run(
+        argv,
+        cwd=repo,
+        text=True,
+        capture_output=True,
+        check=False,
+        env={**os.environ, "DVC_NO_ANALYTICS": "1"},
+    )
     if (result.returncode == 0) != succeeds:
-        raise AssertionError(f"unexpected exit {result.returncode}: {' '.join(argv[:3])}\n{result.stdout}\n{result.stderr}")
+        raise AssertionError(
+            f"unexpected exit {result.returncode}: {' '.join(argv[:3])}\n{result.stdout}\n{result.stderr}"
+        )
     return (result.stdout + result.stderr).strip() if not succeeds else result.stdout.strip()
 
 
@@ -32,7 +39,11 @@ def digest(path: Path) -> str:
 
 
 def inventory(directory: Path) -> dict[str, str]:
-    return {str(path.relative_to(directory)): digest(path) for path in sorted(directory.rglob("*")) if path.is_file()}
+    return {
+        str(path.relative_to(directory)): digest(path)
+        for path in sorted(directory.rglob("*"))
+        if path.is_file()
+    }
 
 
 def files_snapshot(directory: Path) -> dict[str, str]:
@@ -139,10 +150,23 @@ def main() -> None:
             assert inventory(dest) == source_a
             pointer = repo / "data/snapshots/fixtures/example.dvc"
             assert pointer.is_file()
-            run(["git", "add", "data/snapshots/fixtures/example.dvc", "data/snapshots/fixtures/.gitignore"], repo)
+            run(
+                [
+                    "git",
+                    "add",
+                    "data/snapshots/fixtures/example.dvc",
+                    "data/snapshots/fixtures/.gitignore",
+                ],
+                repo,
+            )
             staged = run(["git", "diff", "--cached", "--name-only"], repo).splitlines()
-            assert staged == ["data/snapshots/fixtures/.gitignore", "data/snapshots/fixtures/example.dvc"]
-            metadata = pointer.read_text() + (repo / "data/snapshots/fixtures/.gitignore").read_text()
+            assert staged == [
+                "data/snapshots/fixtures/.gitignore",
+                "data/snapshots/fixtures/example.dvc",
+            ]
+            metadata = (
+                pointer.read_text() + (repo / "data/snapshots/fixtures/.gitignore").read_text()
+            )
             assert str(source) not in metadata and str(storage) not in metadata
             assert "deps:" not in metadata and "url:" not in metadata
             run(["git", "commit", "-qm", "Snapshot A"], repo)
@@ -155,7 +179,9 @@ def main() -> None:
             assert inventory(dest) == source_a
             for rel in source_a:
                 src, out = payload_a / rel, dest / rel
-                assert src.stat().st_ino != out.stat().st_ino or src.stat().st_dev != out.stat().st_dev
+                assert (
+                    src.stat().st_ino != out.stat().st_ino or src.stat().st_dev != out.stat().st_dev
+                )
                 assert not out.is_symlink()
 
             clone = base / "clone"
@@ -179,7 +205,11 @@ def main() -> None:
             commit_b = run(["git", "rev-parse", "HEAD"], repo)
             run(DVC + ["push", "-r", "local", str(pointer.relative_to(repo))], repo)
             assert inventory(dest) == source_b
-            for commit, expected in ((commit_a, source_a), (commit_b, source_b), (commit_a, source_a)):
+            for commit, expected in (
+                (commit_a, source_a),
+                (commit_b, source_b),
+                (commit_a, source_a),
+            ):
                 run(["git", "switch", "-q", "--detach", commit], repo)
                 run(DVC + ["checkout", "data/snapshots/fixtures/example.dvc"], repo)
                 assert inventory(dest) == expected
@@ -190,7 +220,9 @@ def main() -> None:
             assert inventory(payload_a) == source_a
             assert files_snapshot(storage / "cache") == cache_after
             assert files_snapshot(storage / "remote") == remote_after
-            assert remote_a.items() <= remote_after.items() and cache_a.items() <= cache_after.items()
+            assert (
+                remote_a.items() <= remote_after.items() and cache_a.items() <= cache_after.items()
+            )
 
             # A new cache must refuse the deliberately damaged remote object.
             object_id = hashlib.md5((payload_a / "item.json").read_bytes()).hexdigest()
@@ -203,8 +235,11 @@ def main() -> None:
             corrupt_cache = base / "corrupt-cache"
             corrupt_cache.mkdir()
             local_config(corrupt_clone, corrupt_cache, storage / "remote")
-            failure = run(DVC + ["pull", "-r", "local", "data/snapshots/fixtures/example.dvc"],
-                          corrupt_clone, succeeds=False).lower()
+            failure = run(
+                DVC + ["pull", "-r", "local", "data/snapshots/fixtures/example.dvc"],
+                corrupt_clone,
+                succeeds=False,
+            ).lower()
             assert "checkout failed" in failure and "example" in failure, failure
             assert not (corrupt_clone / "data/snapshots/fixtures/example/item.json").exists()
 
@@ -219,11 +254,16 @@ def main() -> None:
             # The repository's build context allowlist excludes the new data surface.
             dockerignore = (ROOT / ".dockerignore").read_text().splitlines()
             assert dockerignore[0] == "**"
-            assert not any(line.startswith("!data/") or line.startswith("!.dvc") or line.startswith("!docs/") for line in dockerignore)
+            assert not any(
+                line.startswith("!data/") or line.startswith("!.dvc") or line.startswith("!docs/")
+                for line in dockerignore
+            )
             assert inventory(payload_b) == source_b
     finally:
         os.umask(previous_umask)
-    print("DVC fixture: configuration, A/B/A, fresh pull, corruption, linked worktree, and hygiene OK")
+    print(
+        "DVC fixture: configuration, A/B/A, fresh pull, corruption, linked worktree, and hygiene OK"
+    )
 
 
 if __name__ == "__main__":

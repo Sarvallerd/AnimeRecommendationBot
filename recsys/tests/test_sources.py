@@ -3,11 +3,16 @@
 import copy
 import json
 import shlex
-from pathlib import Path
 import unittest
+from pathlib import Path
 
-from recsys.sources import (DEFAULT_SNAPSHOT, SNAPSHOT_IDS, SourceError,
-                            load_registry, validate_registry)
+from recsys.sources import (
+    DEFAULT_SNAPSHOT,
+    SNAPSHOT_IDS,
+    SourceError,
+    load_registry,
+    validate_registry,
+)
 
 
 class SourceTests(unittest.TestCase):
@@ -49,8 +54,10 @@ class SourceTests(unittest.TestCase):
         registry, digest = load_registry()
         self.assertEqual(digest, "49bb399935f0ac7ec649fe2f4bd7715444c09c8513704866fa90b9bea29d182f")
         self.assertEqual(DEFAULT_SNAPSHOT, "mal-2020-glove-v1")
-        self.assertEqual(SNAPSHOT_IDS, (DEFAULT_SNAPSHOT, "neelagiri-2025-v1", "nafiul-2026-v1",
-                                        "glove-6b-300d-v1"))
+        self.assertEqual(
+            SNAPSHOT_IDS,
+            (DEFAULT_SNAPSHOT, "neelagiri-2025-v1", "nafiul-2026-v1", "glove-6b-300d-v1"),
+        )
         self.assertEqual(
             [(item["filename"], item["size"]) for item in registry["sources"]],
             [
@@ -60,58 +67,81 @@ class SourceTests(unittest.TestCase):
                 ("glove.6B.300d.txt", 1037962819),
             ],
         )
-        self.assertEqual(registry["provenance"]["mal"]["commit"],
-                         "9a1d7f56482accbde99e24cd7cfcad65e2d24b1f")
+        self.assertEqual(
+            registry["provenance"]["mal"]["commit"], "9a1d7f56482accbde99e24cd7cfcad65e2d24b1f"
+        )
 
     def test_glove_selector_is_exact_legacy_projection(self):
         legacy, _ = load_registry()
         selected, _ = load_registry("glove-6b-300d-v1")
-        self.assertEqual(selected, {"schema_version": 1,
-                                    "provenance": {"glove": legacy["provenance"]["glove"]},
-                                    "sources": legacy["sources"][2:]})
+        self.assertEqual(
+            selected,
+            {
+                "schema_version": 1,
+                "provenance": {"glove": legacy["provenance"]["glove"]},
+                "sources": legacy["sources"][2:],
+            },
+        )
 
     def test_new_packaged_registry_matches_audit_pins(self):
         registry, digest = load_registry("neelagiri-2025-v1")
         self.assertEqual(len(digest), 64)
-        self.assertEqual([item["filename"] for item in registry["sources"]],
-                         ["details.csv", "ratings.csv"])
-        self.assertEqual([item["id"] for item in registry["sources"]],
-                         ["neelagiri_details_csv", "neelagiri_ratings_csv"])
-        self.assertEqual(registry["provenance"]["dataset"], {
-            "snapshot_id": "neelagiri-2025-v1",
-            "provider": "Kaggle",
-            "slug": "neelagiriaditya/anime-dataset-jan-1917-to-oct-2025",
-            "version": 1,
-            "page_url": "https://www.kaggle.com/datasets/neelagiriaditya/anime-dataset-jan-1917-to-oct-2025",
-            "declared_license": "CC BY-NC-SA 4.0",
-            "intake_scope": "noncommercial-research",
-            "exact_collection_date": None,
-        })
+        self.assertEqual(
+            [item["filename"] for item in registry["sources"]], ["details.csv", "ratings.csv"]
+        )
+        self.assertEqual(
+            [item["id"] for item in registry["sources"]],
+            ["neelagiri_details_csv", "neelagiri_ratings_csv"],
+        )
+        self.assertEqual(
+            registry["provenance"]["dataset"],
+            {
+                "snapshot_id": "neelagiri-2025-v1",
+                "provider": "Kaggle",
+                "slug": "neelagiriaditya/anime-dataset-jan-1917-to-oct-2025",
+                "version": 1,
+                "page_url": "https://www.kaggle.com/datasets/neelagiriaditya/anime-dataset-jan-1917-to-oct-2025",
+                "declared_license": "CC BY-NC-SA 4.0",
+                "intake_scope": "noncommercial-research",
+                "exact_collection_date": None,
+            },
+        )
         root = Path(__file__).resolve().parents[1]
         audit = json.loads((root / "reports/dataset-audit-v1/source-audit.json").read_text())
         selected = next(item for item in audit["candidates"] if item["id"] == "neelagiri-2025-v1")
         expected = {item["id"]: item for item in selected["artifacts"]}
-        for item, audit_id in zip(registry["sources"],
-                                  ("neelagiri_details_csv", "neelagiri_ratings_csv"), strict=True):
+        for item, audit_id in zip(
+            registry["sources"], ("neelagiri_details_csv", "neelagiri_ratings_csv"), strict=True
+        ):
             pin = expected[audit_id]
-            self.assertEqual((item["url"], item["size"], item["sha256"]),
-                             (pin["stable_url"], pin["observed_bytes"], pin["observed_sha256"]))
+            self.assertEqual(
+                (item["url"], item["size"], item["sha256"]),
+                (pin["stable_url"], pin["observed_bytes"], pin["observed_sha256"]),
+            )
         instructions = (root / "reports/dataset-audit-v1/README.md").read_text()
         self.assert_documented_download_pins(instructions, registry)
 
     def test_nafiul_metadata_only_registry_and_unchanged_legacy_pin(self):
         registry, digest = load_registry("nafiul-2026-v1")
         self.assertEqual(digest, "56383b6fca667d1352ff9df7034b2d01415ef3a08aad1a82734f537defb26879")
-        self.assertEqual(registry["sources"], [{
-            "id": "nafiul_anime_csv", "filename": "anime_info.csv", "size": 22314208,
-            "sha256": "e833476c0da3eadd4c033889e1e8defb2808baf95b0ae38b55009f45d5d72c35",
-            "url": "https://www.kaggle.com/api/v1/datasets/download/nafiulislam490/"
-                   "comprehensive-myanimelist-mal-dataset-2026/anime_info.csv?datasetVersionNumber=1",
-        }])
+        self.assertEqual(
+            registry["sources"],
+            [
+                {
+                    "id": "nafiul_anime_csv",
+                    "filename": "anime_info.csv",
+                    "size": 22314208,
+                    "sha256": "e833476c0da3eadd4c033889e1e8defb2808baf95b0ae38b55009f45d5d72c35",
+                    "url": "https://www.kaggle.com/api/v1/datasets/download/nafiulislam490/"
+                    "comprehensive-myanimelist-mal-dataset-2026/anime_info.csv?datasetVersionNumber=1",
+                }
+            ],
+        )
         self.assertEqual(registry["provenance"]["dataset"]["artifact_scope"], "anime-info-only")
         self.assertEqual(registry["provenance"]["dataset"]["exact_collection_date"], None)
-        self.assertEqual(load_registry()[1],
-                         "49bb399935f0ac7ec649fe2f4bd7715444c09c8513704866fa90b9bea29d182f")
+        self.assertEqual(
+            load_registry()[1], "49bb399935f0ac7ec649fe2f4bd7715444c09c8513704866fa90b9bea29d182f"
+        )
 
     def test_documented_pins_reject_hash_suffix_and_changed_version(self):
         registry, _ = load_registry("neelagiri-2025-v1")
@@ -125,9 +155,11 @@ class SourceTests(unittest.TestCase):
             )
         with self.assertRaises(AssertionError):
             self.assert_documented_download_pins(
-                instructions.replace(first["url"],
-                                     first["url"].replace("datasetVersionNumber=1",
-                                                          "datasetVersionNumber=10"), 1),
+                instructions.replace(
+                    first["url"],
+                    first["url"].replace("datasetVersionNumber=1", "datasetVersionNumber=10"),
+                    1,
+                ),
                 registry,
             )
 

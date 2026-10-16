@@ -1,8 +1,9 @@
 import tempfile
 import unittest
 
-from recsys.research_artifacts import read_json
 from research_model_support import ModelFixture
+
+from recsys.research_artifacts import read_json
 
 
 class PopularityTests(unittest.TestCase):

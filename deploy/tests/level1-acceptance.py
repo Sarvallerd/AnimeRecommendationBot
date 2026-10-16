@@ -76,12 +76,17 @@ class Interrupted(RuntimeError):
 class Runner:
     def __init__(self, scope: str):
         self.scope = scope
-        self.run_id = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + secrets.token_hex(5)
+        self.run_id = (
+            dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + secrets.token_hex(5)
+        )
         self.directory = OUTPUT / self.run_id
         self.directory.mkdir(parents=True, mode=0o700)
         self.directory.chmod(0o700)
-        self.env = {key: value for key, value in os.environ.items()
-                    if key not in SECRET_NAMES and not key.startswith(EXCLUDED)}
+        self.env = {
+            key: value
+            for key, value in os.environ.items()
+            if key not in SECRET_NAMES and not key.startswith(EXCLUDED)
+        }
         self.env["CARGO_TERM_COLOR"] = "never"
         self.project = "arb035-l1-" + secrets.token_hex(5)
         self.empty_env = self.directory / "empty.env"
@@ -98,9 +103,15 @@ class Runner:
             env.update(extra_env)
         log = self.directory / f"{name}.log"
         with log.open("w", encoding="utf-8") as output:
-            self.active = subprocess.Popen(argv, cwd=ROOT, env=env, stdout=output,
-                                           stderr=subprocess.STDOUT, start_new_session=True,
-                                           text=True)
+            self.active = subprocess.Popen(
+                argv,
+                cwd=ROOT,
+                env=env,
+                stdout=output,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                text=True,
+            )
             try:
                 code = self.active.wait(timeout=timeout)
             except BaseException:
@@ -126,9 +137,19 @@ class Runner:
         return content
 
     def compose(self, name, args, timeout=120):
-        cmd = ["docker", "compose", "--project-directory", str(ROOT),
-               "--env-file", str(self.empty_env), "-f", str(self.compose_file),
-               "-p", self.project, *args]
+        cmd = [
+            "docker",
+            "compose",
+            "--project-directory",
+            str(ROOT),
+            "--env-file",
+            str(self.empty_env),
+            "-f",
+            str(self.compose_file),
+            "-p",
+            self.project,
+            *args,
+        ]
         return self.command(name, cmd, timeout)
 
     def dialogue(self):
@@ -140,36 +161,61 @@ class Runner:
         if not match:
             raise RuntimeError("Disposable database did not publish an isolated loopback port")
         url = f"postgresql://arb_ci:arb_ci@127.0.0.1:{match.group(1)}/arb_ci_test?sslmode=disable"
-        result = self.command("rust-postgres", ["cargo", "+1.95.0", "test", "--locked", "--", "--ignored", "--test-threads=1"],
-                              1200, {"ARB_TEST_DATABASE_URL": url})
+        result = self.command(
+            "rust-postgres",
+            ["cargo", "+1.95.0", "test", "--locked", "--", "--ignored", "--test-threads=1"],
+            1200,
+            {"ARB_TEST_DATABASE_URL": url},
+        )
         require_cases(result, PG_TESTS | LEVEL1_TESTS)
         for name in sorted(PG_TESTS | LEVEL1_TESTS):
-            self.cases[name] = {"status": "PASS", "source": "Rust router or database integration test on disposable PostgreSQL"}
+            self.cases[name] = {
+                "status": "PASS",
+                "source": "Rust router or database integration test on disposable PostgreSQL",
+            }
         self.cleanup()
         if not self.cleanup_ok:
             raise RuntimeError("disposable dialogue PostgreSQL cleanup failed")
-        self.cases["dialogue"] = {"status": "PASS", "source": "FakeTelegram and disposable PostgreSQL",
-                                   "required_tests": len(PG_TESTS | LEVEL1_TESTS)}
+        self.cases["dialogue"] = {
+            "status": "PASS",
+            "source": "FakeTelegram and disposable PostgreSQL",
+            "required_tests": len(PG_TESTS | LEVEL1_TESTS),
+        }
 
     def synthetic_compose(self):
         # The shell harness owns its separate project and removes it before printing the final marker.
-        result = self.command("compose", ["bash", "deploy/tests/compose-acceptance.sh"], 1800,
-                              {"ARB_LEVEL1_OUTPUT": str(self.directory / "compose")})
+        result = self.command(
+            "compose",
+            ["bash", "deploy/tests/compose-acceptance.sh"],
+            1800,
+            {"ARB_LEVEL1_OUTPUT": str(self.directory / "compose")},
+        )
         require_markers(result)
         for marker in sorted(COMPOSE_MARKERS):
-            self.cases[marker] = {"status": "PASS", "source": "synthetic Compose fixture and database snapshot"}
-        self.cases["compose"] = {"status": "PASS", "source": "synthetic A-B-A Compose and full database snapshots"}
+            self.cases[marker] = {
+                "status": "PASS",
+                "source": "synthetic Compose fixture and database snapshot",
+            }
+        self.cases["compose"] = {
+            "status": "PASS",
+            "source": "synthetic A-B-A Compose and full database snapshots",
+        }
 
     def cleanup(self):
         if not self.started_pg:
             return
         try:
-            self.compose("pg-down", ["down", "--volumes", "--remove-orphans", "--timeout", "10"], 120)
+            self.compose(
+                "pg-down", ["down", "--volumes", "--remove-orphans", "--timeout", "10"], 120
+            )
             listed = self.compose("pg-verify-cleanup", ["ps", "-a", "-q"], 30).strip()
             if listed:
                 raise RuntimeError("owned PostgreSQL project still has containers")
             self.started_pg = False
-            self.cases["dialogue-postgres-cleanup"] = {"status": "PASS", "source": "scoped Docker Compose down and empty ps"}
+            self.cases["dialogue-postgres-cleanup"] = {
+                "status": "PASS",
+                "source": "scoped Docker Compose down and empty ps",
+            }
         except Exception as error:
             self.cleanup_ok = False
             self.cases["cleanup"] = {"status": "FAIL", "reason": str(error)}
@@ -177,18 +223,31 @@ class Runner:
     def report(self, status):
         source = self.command("source-head", ["git", "rev-parse", "HEAD"], 10).strip()
         dirty = bool(self.command("source-status", ["git", "status", "--porcelain"], 10).strip())
-        report = {"kind": "arb-level1", "schema_version": 1, "scope": self.scope,
-                  "status": status, "source_sha": source, "source_dirty": dirty,
-                  "cases": self.cases,
-                  "limits": {"real_telegram": "NOT_RUN", "human_ui": "NOT_RUN",
-                             "full_pinned_catalog": "NOT_RUN", "poller_process_restart": "NOT_RUN"}}
-        (self.directory / "report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        report = {
+            "kind": "arb-level1",
+            "schema_version": 1,
+            "scope": self.scope,
+            "status": status,
+            "source_sha": source,
+            "source_dirty": dirty,
+            "cases": self.cases,
+            "limits": {
+                "real_telegram": "NOT_RUN",
+                "human_ui": "NOT_RUN",
+                "full_pinned_catalog": "NOT_RUN",
+                "poller_process_restart": "NOT_RUN",
+            },
+        }
+        (self.directory / "report.json").write_text(
+            json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
         print(f"{status}: {self.directory / 'report.json'}")
 
 
 def main():
     def interrupted(signum, _frame):
         raise Interrupted(f"interrupted by signal {signum}")
+
     signal.signal(signal.SIGTERM, interrupted)
     signal.signal(signal.SIGINT, interrupted)
     parser = argparse.ArgumentParser(description=__doc__)

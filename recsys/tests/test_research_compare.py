@@ -3,12 +3,12 @@ import unittest
 from pathlib import Path
 
 import numpy as np
+from research_support import ResearchFixture
 
 from recsys.research_artifacts import identity, read_json
 from recsys.research_compare import _policy, compare_evaluations
 from recsys.research_evaluate import evaluate_predictions
 from recsys.research_protocol import ResearchError, load_protocol
-from research_support import ResearchFixture
 
 
 class CompareTests(unittest.TestCase):
@@ -20,8 +20,13 @@ class CompareTests(unittest.TestCase):
         self.prepared_identity = identity(self.prepared / "prepare-manifest.json")
         self.prediction = self.fixture.predictions(self.prepared, "prediction")
         self.evaluation = Path(self.tmp.name) / "evaluation"
-        evaluate_predictions(self.prepared, self.prediction, self.evaluation,
-                             split="validation", expected_prepared_identity=self.prepared_identity)
+        evaluate_predictions(
+            self.prepared,
+            self.prediction,
+            self.evaluation,
+            split="validation",
+            expected_prepared_identity=self.prepared_identity,
+        )
 
     def test_policy_equal_and_inconclusive(self):
         protocol = load_protocol()
@@ -38,11 +43,15 @@ class CompareTests(unittest.TestCase):
 
     def test_comparison_receipt_and_duplicate_rejection(self):
         output = Path(self.tmp.name) / "comparison"
-        compare_evaluations([self.evaluation], output,
-                            expected_prepared_identity=self.prepared_identity)
+        compare_evaluations(
+            [self.evaluation], output, expected_prepared_identity=self.prepared_identity
+        )
         report, _ = read_json(output / "comparison.json")
         self.assertEqual(report["users"], 8)
         self.assertEqual(report["models"][0]["n_policy"]["chosen_n"], 1)
         with self.assertRaises(ResearchError):
-            compare_evaluations([self.evaluation, self.evaluation], Path(self.tmp.name) / "bad",
-                                expected_prepared_identity=self.prepared_identity)
+            compare_evaluations(
+                [self.evaluation, self.evaluation],
+                Path(self.tmp.name) / "bad",
+                expected_prepared_identity=self.prepared_identity,
+            )

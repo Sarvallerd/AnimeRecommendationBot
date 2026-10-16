@@ -12,8 +12,9 @@ from recsys.quality import QualityError, genre_neighbors, run_baseline
 
 
 def canonical(value):
-    return (json.dumps(value, ensure_ascii=False, sort_keys=True,
-                       separators=(",", ":")) + "\n").encode("utf-8")
+    return (
+        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode("utf-8")
 
 
 class QualityTests(unittest.TestCase):
@@ -21,18 +22,28 @@ class QualityTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        self.catalog = {"schema_version": 1, "anime": {
-            str(mal_id): {"title": f"Title {mal_id}", "genres": ["Action"]}
-            for mal_id in range(1, 21)}}
-        self.spec = json.loads(resources.files("recsys").joinpath("quality_queries_v1.json").read_bytes())
+        self.catalog = {
+            "schema_version": 1,
+            "anime": {
+                str(mal_id): {"title": f"Title {mal_id}", "genres": ["Action"]}
+                for mal_id in range(1, 21)
+            },
+        }
+        self.spec = json.loads(
+            resources.files("recsys").joinpath("quality_queries_v1.json").read_bytes()
+        )
         self.spec["query_set_version"] = "fixture-v1"
         self.spec["queries"] = [
-            {"mal_id": mal_id, "title": f"Title {mal_id}",
-             "popularity_rank": (1, 101, 1001, 5001)[(mal_id - 1) // 5],
-             "members": 20 - mal_id,
-             "popularity_band": ("1-100", "101-1000", "1001-5000", "5001+")[(mal_id - 1) // 5],
-             "rationale": f"Fixture case {mal_id}"}
-            for mal_id in range(1, 21)]
+            {
+                "mal_id": mal_id,
+                "title": f"Title {mal_id}",
+                "popularity_rank": (1, 101, 1001, 5001)[(mal_id - 1) // 5],
+                "members": 20 - mal_id,
+                "popularity_band": ("1-100", "101-1000", "1001-5000", "5001+")[(mal_id - 1) // 5],
+                "rationale": f"Fixture case {mal_id}",
+            }
+            for mal_id in range(1, 21)
+        ]
         self._save_catalog()
 
     def _save_catalog(self):
@@ -56,15 +67,21 @@ class QualityTests(unittest.TestCase):
         }
         result = genre_neighbors(anime, 1)
         self.assertEqual([item["mal_id"] for item in result], [3, 2, 5, 6, 7])
-        self.assertEqual([item["score"] for item in result], [2/3, 1/2, 1/2, 1/2, 1/2])
+        self.assertEqual([item["score"] for item in result], [2 / 3, 1 / 2, 1 / 2, 1 / 2, 1 / 2])
         self.assertNotIn(1, [item["mal_id"] for item in result])
-        self.assertEqual([item["mal_id"] for item in genre_neighbors(anime, 1, 7)],
-                         [3, 2, 5, 6, 7, 10])
+        self.assertEqual(
+            [item["mal_id"] for item in genre_neighbors(anime, 1, 7)], [3, 2, 5, 6, 7, 10]
+        )
         self.assertEqual(genre_neighbors(anime, 8), [])
         self.assertEqual(genre_neighbors(anime, 4), [])
         self.assertEqual(genre_neighbors({"1": anime["1"]}, 1), [])
-        self.assertEqual([item["mal_id"] for item in genre_neighbors(
-            {key: anime[key] for key in ("1", "10", "2")}, 1)], [2, 10])
+        self.assertEqual(
+            [
+                item["mal_id"]
+                for item in genre_neighbors({key: anime[key] for key in ("1", "10", "2")}, 1)
+            ],
+            [2, 10],
+        )
 
     def test_outputs_are_deterministic_linked_and_unjudged(self):
         self.catalog["anime"]["2"]["title"] = "Title 1"
@@ -83,13 +100,17 @@ class QualityTests(unittest.TestCase):
         self.assertEqual(len(baseline["queries"]), 20)
         self.assertEqual(sum(len(row["recommendations"]) for row in baseline["queries"]), 100)
         self.assertEqual(len(template["judgments"]), 100)
-        self.assertEqual(template["runs"], [{"method_id": "genre-jaccard",
-                                             "sha256": hashlib.sha256(baseline_raw).hexdigest()}])
-        self.assertEqual(baseline["query_set_sha256"], hashlib.sha256(canonical(self.spec)).hexdigest())
-        self.assertEqual([(row["query_mal_id"], row["candidate_mal_id"])
-                          for row in template["judgments"]],
-                         sorted((row["query_mal_id"], row["candidate_mal_id"])
-                                for row in template["judgments"]))
+        self.assertEqual(
+            template["runs"],
+            [{"method_id": "genre-jaccard", "sha256": hashlib.sha256(baseline_raw).hexdigest()}],
+        )
+        self.assertEqual(
+            baseline["query_set_sha256"], hashlib.sha256(canonical(self.spec)).hexdigest()
+        )
+        self.assertEqual(
+            [(row["query_mal_id"], row["candidate_mal_id"]) for row in template["judgments"]],
+            sorted((row["query_mal_id"], row["candidate_mal_id"]) for row in template["judgments"]),
+        )
         for row in template["judgments"]:
             self.assertIsNone(row["relevance"])
             self.assertEqual(row["assessor_kind"], "unjudged")
@@ -110,8 +131,7 @@ class QualityTests(unittest.TestCase):
         self.assertEqual(baseline["queries"][0]["recommendations"], [])
         self.assertEqual(baseline["queries"][1]["recommendations"], [])
         self.assertEqual(len(template["judgments"]), 90)
-        self.assertTrue(all(len(row["recommendations"]) == 5
-                            for row in baseline["queries"][2:]))
+        self.assertTrue(all(len(row["recommendations"]) == 5 for row in baseline["queries"][2:]))
 
     def test_invalid_specs_and_catalog_fail_before_writes(self):
         cases = []
@@ -150,19 +170,51 @@ class QualityTests(unittest.TestCase):
         raw = resources.files("recsys").joinpath("quality_queries_v1.json").read_bytes()
         spec = json.loads(raw)
         self.assertEqual(raw, canonical(spec))
-        self.assertEqual([row["mal_id"] for row in spec["queries"]],
-                         [1, 20, 30, 199, 1535, 457, 440, 5680, 877, 10162,
-                          1065, 326, 885, 16664, 111, 35102, 1391, 3258, 1550, 39619])
-        self.assertEqual(spec["catalog_sha256"],
-                         "2ae604168ba10be67cca14cd8cba0235fc6f0d0de19fdc25b9fc91175ffd06d2")
-        self.assertEqual(spec["registry_sha256"],
-                         "49bb399935f0ac7ec649fe2f4bd7715444c09c8513704866fa90b9bea29d182f")
-        self.assertEqual(spec["source_provenance"]["mal_repository_commit"],
-                         "9a1d7f56482accbde99e24cd7cfcad65e2d24b1f")
-        self.assertEqual(spec["source_provenance"]["anime_csv_sha256"],
-                         "6e6d723f3e021e084a281d1ec557a0a10dfb9721d256b87596e02c27eb1f77e9")
-        self.assertEqual(spec["source_provenance"]["synopsis_csv_sha256"],
-                         "fc5065338f1d66063cc6b6ed328701c3e23118110689daa852d5876911674e33")
+        self.assertEqual(
+            [row["mal_id"] for row in spec["queries"]],
+            [
+                1,
+                20,
+                30,
+                199,
+                1535,
+                457,
+                440,
+                5680,
+                877,
+                10162,
+                1065,
+                326,
+                885,
+                16664,
+                111,
+                35102,
+                1391,
+                3258,
+                1550,
+                39619,
+            ],
+        )
+        self.assertEqual(
+            spec["catalog_sha256"],
+            "2ae604168ba10be67cca14cd8cba0235fc6f0d0de19fdc25b9fc91175ffd06d2",
+        )
+        self.assertEqual(
+            spec["registry_sha256"],
+            "49bb399935f0ac7ec649fe2f4bd7715444c09c8513704866fa90b9bea29d182f",
+        )
+        self.assertEqual(
+            spec["source_provenance"]["mal_repository_commit"],
+            "9a1d7f56482accbde99e24cd7cfcad65e2d24b1f",
+        )
+        self.assertEqual(
+            spec["source_provenance"]["anime_csv_sha256"],
+            "6e6d723f3e021e084a281d1ec557a0a10dfb9721d256b87596e02c27eb1f77e9",
+        )
+        self.assertEqual(
+            spec["source_provenance"]["synopsis_csv_sha256"],
+            "fc5065338f1d66063cc6b6ed328701c3e23118110689daa852d5876911674e33",
+        )
 
 
 if __name__ == "__main__":

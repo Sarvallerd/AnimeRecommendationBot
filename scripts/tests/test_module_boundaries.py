@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-from pathlib import Path
 import shutil
 import sys
 import tempfile
 import unittest
-
+from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "scripts"))
@@ -25,7 +24,9 @@ class BoundariesTest(unittest.TestCase):
         package.parent.mkdir(parents=True)
         shutil.copytree(REPO / "src/recsys", package)
         (self.root / "scripts").mkdir()
-        shutil.copy2(REPO / "scripts/module_boundaries.json", self.root / "scripts/module_boundaries.json")
+        shutil.copy2(
+            REPO / "scripts/module_boundaries.json", self.root / "scripts/module_boundaries.json"
+        )
 
     def source(self, module: str) -> Path:
         return self.root / "src/recsys" / f"{module}.py"
@@ -35,10 +36,14 @@ class BoundariesTest(unittest.TestCase):
             stream.write("\n" + code + "\n")
 
     def policy(self) -> dict:
-        return json.loads((self.root / "scripts/module_boundaries.json").read_text(encoding="utf-8"))
+        return json.loads(
+            (self.root / "scripts/module_boundaries.json").read_text(encoding="utf-8")
+        )
 
     def save_policy(self, policy: dict) -> None:
-        (self.root / "scripts/module_boundaries.json").write_text(json.dumps(policy), encoding="utf-8")
+        (self.root / "scripts/module_boundaries.json").write_text(
+            json.dumps(policy), encoding="utf-8"
+        )
 
     def assert_category(self, category: str) -> None:
         errors = check_repository(self.root)
@@ -54,7 +59,10 @@ class BoundariesTest(unittest.TestCase):
         self.assert_category("forbidden_dependency")
 
     def test_model_cannot_import_evaluation_or_prepare(self) -> None:
-        self.append("research_predict", "from .research_evaluate import evaluate\nfrom .research_prepare import prepare")
+        self.append(
+            "research_predict",
+            "from .research_evaluate import evaluate\nfrom .research_prepare import prepare",
+        )
         self.assert_category("forbidden_dependency")
 
     def test_lazy_type_checking_and_optional_imports_are_edges(self) -> None:
@@ -73,7 +81,9 @@ class BoundariesTest(unittest.TestCase):
     def test_new_cycle_and_new_internal_edge_in_existing_cycle(self) -> None:
         self.append("dataset_metadata", "from .dataset import HEADER")
         self.assert_category("new_cycle")
-        self.source("dataset_metadata").write_bytes((REPO / "src/recsys/dataset_metadata.py").read_bytes())
+        self.source("dataset_metadata").write_bytes(
+            (REPO / "src/recsys/dataset_metadata.py").read_bytes()
+        )
         self.append("research_model_cf", "from .research_model_content import fit")
         self.assert_category("new_cycle")
 
@@ -143,7 +153,9 @@ class BoundariesTest(unittest.TestCase):
         source.write_text(content, encoding="utf-8")
         self.assert_category("dynamic_dispatch_changed")
         policy = self.policy()
-        policy["dynamic_dispatch"]["source_sha256"] = hashlib.sha256(source.read_bytes()).hexdigest()
+        policy["dynamic_dispatch"]["source_sha256"] = hashlib.sha256(
+            source.read_bytes()
+        ).hexdigest()
         self.save_policy(policy)
         self.assert_category("dynamic_dispatch_changed")
 
@@ -151,11 +163,16 @@ class BoundariesTest(unittest.TestCase):
         source = self.source("research_models")
         content = source.read_text(encoding="utf-8")
         self.assertIn('BACKENDS = {"popularity": "research_model_popularity",', content)
-        content = content.replace('BACKENDS = {"popularity": "research_model_popularity",',
-                                  'BACKENDS = {"extra": "research_model_content", "popularity": "research_model_popularity",', 1)
+        content = content.replace(
+            'BACKENDS = {"popularity": "research_model_popularity",',
+            'BACKENDS = {"extra": "research_model_content", "popularity": "research_model_popularity",',
+            1,
+        )
         source.write_text(content, encoding="utf-8")
         policy = self.policy()
-        policy["dynamic_dispatch"]["source_sha256"] = hashlib.sha256(source.read_bytes()).hexdigest()
+        policy["dynamic_dispatch"]["source_sha256"] = hashlib.sha256(
+            source.read_bytes()
+        ).hexdigest()
         self.save_policy(policy)
         self.assert_category("dynamic_dispatch_changed")
 
@@ -203,12 +220,16 @@ class BoundariesTest(unittest.TestCase):
         policy["subsystems"]["core"]["modules"].append("recsys.collision")
         self.save_policy(policy)
         self.assert_category("config_invalid")
-        self.assertTrue(any("module/package collision" in error for error in check_repository(self.root)))
+        self.assertTrue(
+            any("module/package collision" in error for error in check_repository(self.root))
+        )
 
     def test_nested_package_relative_import_uses_package_anchor(self) -> None:
         package = self.root / "src/recsys/nested"
         package.mkdir()
-        (package / "__init__.py").write_text("__version__ = '1'\nfrom . import child\n", encoding="utf-8")
+        (package / "__init__.py").write_text(
+            "__version__ = '1'\nfrom . import child\n", encoding="utf-8"
+        )
         (package / "child.py").write_text("from .. import __version__\n", encoding="utf-8")
         policy = self.policy()
         policy["subsystems"]["core"]["modules"].extend(["recsys.nested", "recsys.nested.child"])

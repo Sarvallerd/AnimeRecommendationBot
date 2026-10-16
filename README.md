@@ -31,6 +31,15 @@ uv run --locked check_bundle tests/fixtures/bundle
 cargo test --locked
 ```
 
+Форматирование и базовая проверка Python выполняются закреплённым Ruff 0.17.1 в отдельном окружении. Из корня репозитория:
+
+```bash
+UV_PROJECT_ENVIRONMENT=.tools/lint-venv uv run --locked --only-group lint ruff check .
+UV_PROJECT_ENVIRONMENT=.tools/lint-venv uv run --locked --only-group lint ruff format --check .
+```
+
+Правила: Python 3.12, 100 колонок, четыре пробела, двойные кавычки, LF, базовые E4/E7/E9/F и порядок импортов I. Пока `src/recsys/` исключён из Ruff до версионированной миграции исходников в ARB-054; она удалит исключение и распространит те же проверки на основной пакет.
+
 Для сравнения качества добавьте `uv sync --locked --extra quality` и передавайте `--extra quality` в последующих `uv run`. Бот читает переменные окружения напрямую; для локального запуска подготовьте `TELOXIDE_TOKEN`, `DATABASE_URL` и `ARTIFACTS_DIR` в своём `.env` и явно передайте его: `uv run --locked --env-file .env bot --check-config`, затем `uv run --locked --env-file .env bot`. Проверка конфигурации не обращается к базе или Telegram. Подробности и поведение редактируемой установки — в [руководстве по единому окружению](dev/environment.md). Для полной сборки пакета и запуска без локального Rust/Python окружения используйте Docker ниже.
 
 Исходные лицензии и версии записаны в [реестре источников](src/recsys/source_registry.json) и [руководстве Python-пакета](recsys/README.md): MAL 2020 закреплён коммитом `9a1d7f5`, GloVe — SHA-256 архива и текста. Контрольные суммы обнаруживают повреждение и подмену входных байтов, но сами по себе не подтверждают происхождение источника.

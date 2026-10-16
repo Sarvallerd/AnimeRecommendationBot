@@ -5,10 +5,10 @@ from __future__ import annotations
 import argparse
 import configparser
 import os
-from pathlib import Path
 import stat
 import subprocess
 import sys
+from pathlib import Path
 
 
 class StorageError(Exception):
@@ -19,7 +19,9 @@ def _run(argv: list[str], repo: Path) -> str:
     completed = subprocess.run(argv, cwd=repo, text=True, capture_output=True, check=False)
     if completed.returncode:
         detail = (completed.stderr or completed.stdout).strip().splitlines()
-        raise StorageError(f"{argv[0]} {argv[1]} failed: {detail[-1] if detail else completed.returncode}")
+        raise StorageError(
+            f"{argv[0]} {argv[1]} failed: {detail[-1] if detail else completed.returncode}"
+        )
     return completed.stdout.strip()
 
 
@@ -56,8 +58,12 @@ def _storage_root(repo: Path, requested: Path | None) -> Path:
     _components_without_links(requested)
     root = requested.resolve(strict=False)
     listings = _run(["git", "worktree", "list", "--porcelain"], repo)
-    forbidden = [Path(line[9:]).resolve() for line in listings.splitlines() if line.startswith("worktree ")]
-    common = Path(_run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], repo)).resolve()
+    forbidden = [
+        Path(line[9:]).resolve() for line in listings.splitlines() if line.startswith("worktree ")
+    ]
+    common = Path(
+        _run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], repo)
+    ).resolve()
     forbidden.append(common)
     for path in forbidden:
         if _contains(root, path) or _contains(path, root):
@@ -72,8 +78,14 @@ def _private_dir(path: Path, *, create: bool) -> None:
         raise StorageError(f"storage directory must not be a symlink: {path}")
     if path.exists():
         info = path.stat()
-        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
-            raise StorageError(f"storage directory must be owned by this user and mode 0700: {path}")
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) != 0o700
+        ):
+            raise StorageError(
+                f"storage directory must be owned by this user and mode 0700: {path}"
+            )
     elif create:
         path.mkdir(parents=True, mode=0o700)
     else:
@@ -119,7 +131,9 @@ def _verify_config(config: configparser.ConfigParser | None, root: Path) -> None
         serialized_section = f"'{section}'" if section.startswith("remote ") else section
         actual = config.get(serialized_section, key, fallback=None)
         if actual != value:
-            raise StorageError(f"conflicting .dvc/config.local [{section}] {key}; expected {value!r}")
+            raise StorageError(
+                f"conflicting .dvc/config.local [{section}] {key}; expected {value!r}"
+            )
 
 
 def _verify_effective(repo: Path, root: Path) -> None:
@@ -127,11 +141,18 @@ def _verify_effective(repo: Path, root: Path) -> None:
         setting = f"remote.local.{key}" if section.startswith("remote ") else f"{section}.{key}"
         actual = _run([sys.executable, "-m", "dvc", "config", setting], repo)
         if actual != expected:
-            raise StorageError(f"effective DVC setting {setting} is {actual!r}, expected {expected!r}")
+            raise StorageError(
+                f"effective DVC setting {setting} is {actual!r}, expected {expected!r}"
+            )
 
 
 def _verify_ignores(repo: Path) -> None:
-    files = [".dvc/config.local", ".dvc/cache/example", ".dvc/tmp/example", "data/snapshots/fixture/payload.gz"]
+    files = [
+        ".dvc/config.local",
+        ".dvc/cache/example",
+        ".dvc/tmp/example",
+        "data/snapshots/fixture/payload.gz",
+    ]
     for item in files:
         if not _run(["git", "check-ignore", "--no-index", item], repo):
             raise StorageError(f"Git must ignore {item}")
@@ -142,10 +163,18 @@ def _verify_ignores(repo: Path) -> None:
     for item in [".tools/fixture", ".venv/fixture", "target/fixture"]:
         if _run([sys.executable, "-m", "dvc", "check-ignore", item], repo) == "":
             raise StorageError(f"DVC must ignore {item}")
-    for item in ("data/snapshots/sample.csv", "data/snapshots/sample.gz",
-                 "data/snapshots/sample.npz", "data/snapshots/glove.6B.300d.txt"):
-        result = subprocess.run([sys.executable, "-m", "dvc", "check-ignore", item],
-                                cwd=repo, capture_output=True, text=True)
+    for item in (
+        "data/snapshots/sample.csv",
+        "data/snapshots/sample.gz",
+        "data/snapshots/sample.npz",
+        "data/snapshots/glove.6B.300d.txt",
+    ):
+        result = subprocess.run(
+            [sys.executable, "-m", "dvc", "check-ignore", item],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+        )
         if result.returncode != 1 or result.stdout.strip():
             raise StorageError(f"DVC must allow snapshot payloads: {item}")
 
@@ -176,7 +205,9 @@ def configure(repo: Path, requested: Path | None = None, *, check_only: bool = F
             dvc = [sys.executable, "-m", "dvc"]
             _run(dvc + ["config", "--local", "cache.dir", str(root / "cache")], repo)
             _run(dvc + ["config", "--local", "cache.type", "copy"], repo)
-            _run(dvc + ["remote", "add", "--local", "--default", "local", str(root / "remote")], repo)
+            _run(
+                dvc + ["remote", "add", "--local", "--default", "local", str(root / "remote")], repo
+            )
             _run(dvc + ["remote", "modify", "--local", "local", "jobs", "2"], repo)
             _run(dvc + ["remote", "modify", "--local", "local", "verify", "true"], repo)
         finally:

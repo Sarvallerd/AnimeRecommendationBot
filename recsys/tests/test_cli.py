@@ -47,15 +47,24 @@ class CliTests(unittest.TestCase):
                 result = self.run_cli("release", "info", console=console)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn("neelagiri-2025-nafiul-2026-v1 catalog=28955", result.stdout)
-                explicit = self.run_cli("release", "info", "--release",
-                                        "neelagiri-2025-nafiul-2026-v1", console=console)
+                explicit = self.run_cli(
+                    "release", "info", "--release", "neelagiri-2025-nafiul-2026-v1", console=console
+                )
                 self.assertEqual(explicit.stdout, result.stdout)
-                unknown = self.run_cli("release", "prepare", "--release", "latest",
-                                       "--data-dir", "missing", console=console)
+                unknown = self.run_cli(
+                    "release",
+                    "prepare",
+                    "--release",
+                    "latest",
+                    "--data-dir",
+                    "missing",
+                    console=console,
+                )
                 self.assertEqual(unknown.returncode, 2)
                 self.assertIn("invalid choice", unknown.stderr)
-                missing = self.run_cli("release", "prepare", "--data-dir", "missing",
-                                       console=console)
+                missing = self.run_cli(
+                    "release", "prepare", "--data-dir", "missing", console=console
+                )
                 self.assertEqual(missing.returncode, 1)
                 self.assertIn("release_prerequisite_missing", missing.stderr)
                 self.assertNotIn("Traceback", missing.stderr)
@@ -70,7 +79,15 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(result.stderr, "")
 
     def test_obtain_offline_uses_installed_registry_outside_cwd(self) -> None:
-        result = self.run_cli("obtain", "--snapshot", "mal-2020-glove-v1", "--offline", "--data-dir", "missing", console=True)
+        result = self.run_cli(
+            "obtain",
+            "--snapshot",
+            "mal-2020-glove-v1",
+            "--offline",
+            "--data-dir",
+            "missing",
+            console=True,
+        )
         self.assertEqual(result.returncode, 1)
         self.assertEqual(result.stdout, "")
         self.assertIn("missing source", result.stderr)
@@ -80,45 +97,71 @@ class CliTests(unittest.TestCase):
     def test_obtain_snapshot_defaults_and_explicit_directory(self) -> None:
         for console in (False, True):
             with self.subTest(console=console):
-                legacy = self.run_cli("obtain", "--snapshot", "mal-2020-glove-v1", "--offline", console=console)
+                legacy = self.run_cli(
+                    "obtain", "--snapshot", "mal-2020-glove-v1", "--offline", console=console
+                )
                 self.assertEqual(legacy.returncode, 1)
                 self.assertIn("data/raw/anime.csv", legacy.stderr)
                 missing_selector = self.run_cli("obtain", "--offline", console=console)
                 self.assertEqual(missing_selector.returncode, 2)
                 self.assertIn("--snapshot", missing_selector.stderr)
-                fresh = self.run_cli("obtain", "--snapshot", "neelagiri-2025-v1",
-                                     "--offline", console=console)
+                fresh = self.run_cli(
+                    "obtain", "--snapshot", "neelagiri-2025-v1", "--offline", console=console
+                )
                 self.assertEqual(fresh.returncode, 1)
                 self.assertIn("data/raw/neelagiri-2025-v1/details.csv", fresh.stderr)
-                explicit = self.run_cli("obtain", "--snapshot", "neelagiri-2025-v1",
-                                        "--data-dir", "chosen", "--offline", console=console)
+                explicit = self.run_cli(
+                    "obtain",
+                    "--snapshot",
+                    "neelagiri-2025-v1",
+                    "--data-dir",
+                    "chosen",
+                    "--offline",
+                    console=console,
+                )
                 self.assertEqual(explicit.returncode, 1)
                 self.assertIn("chosen/details.csv", explicit.stderr)
                 self.assertNotIn("chosen/neelagiri-2025-v1", explicit.stderr)
-                aliases = self.run_cli("obtain", "--snapshot", "nafiul-2026-v1",
-                                       "--offline", console=console)
+                aliases = self.run_cli(
+                    "obtain", "--snapshot", "nafiul-2026-v1", "--offline", console=console
+                )
                 self.assertEqual(aliases.returncode, 1)
                 self.assertIn("data/raw/nafiul-2026-v1/anime_info.csv", aliases.stderr)
 
     def test_invalid_snapshot_fails_before_data_directory_creation(self) -> None:
         for console in (False, True):
             with self.subTest(console=console), tempfile.TemporaryDirectory() as directory:
-                command = ([str(Path(sys.executable).with_name("recsys"))] if console
-                           else [sys.executable, "-m", "recsys"])
-                result = subprocess.run([*command, "obtain", "--snapshot", "latest"],
-                                        cwd=directory, capture_output=True, text=True, check=False)
+                command = (
+                    [str(Path(sys.executable).with_name("recsys"))]
+                    if console
+                    else [sys.executable, "-m", "recsys"]
+                )
+                result = subprocess.run(
+                    [*command, "obtain", "--snapshot", "latest"],
+                    cwd=directory,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
                 self.assertEqual(result.returncode, 2)
                 self.assertEqual(result.stdout, "")
                 self.assertIn("invalid choice", result.stderr)
                 self.assertFalse((Path(directory) / "data").exists())
 
     def test_isolated_installed_package_contains_new_registry(self) -> None:
-        code = ("import json; from recsys.sources import load_registry; "
-                "r,h=load_registry('neelagiri-2025-v1'); "
-                "print(json.dumps([len(r['sources']),r['provenance']['dataset']['snapshot_id'],len(h)]))")
+        code = (
+            "import json; from recsys.sources import load_registry; "
+            "r,h=load_registry('neelagiri-2025-v1'); "
+            "print(json.dumps([len(r['sources']),r['provenance']['dataset']['snapshot_id'],len(h)]))"
+        )
         with tempfile.TemporaryDirectory() as directory:
-            result = subprocess.run([sys.executable, "-I", "-c", code], cwd=directory,
-                                    capture_output=True, text=True, check=False)
+            result = subprocess.run(
+                [sys.executable, "-I", "-c", code],
+                cwd=directory,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout), [2, "neelagiri-2025-v1", 64])
         self.assertEqual(result.stderr, "")
@@ -128,8 +171,9 @@ class CliTests(unittest.TestCase):
         self.assertEqual(help_result.returncode, 0, help_result.stderr)
         self.assertIn("--catalog", help_result.stdout)
         self.assertIn("--output-dir", help_result.stdout)
-        result = self.run_cli("quality", "baseline", "--catalog", "missing.json",
-                              "--output-dir", "out", console=True)
+        result = self.run_cli(
+            "quality", "baseline", "--catalog", "missing.json", "--output-dir", "out", console=True
+        )
         self.assertEqual(result.returncode, 1)
         self.assertEqual(result.stdout, "")
         self.assertIn("recsys quality baseline:", result.stderr)
@@ -137,25 +181,50 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             catalog = Path(directory) / "catalog.json"
             catalog.write_text("{}\n")
-            loaded = self.run_cli("quality", "baseline", "--catalog", str(catalog),
-                                  "--output-dir", str(Path(directory) / "out"), console=True)
+            loaded = self.run_cli(
+                "quality",
+                "baseline",
+                "--catalog",
+                str(catalog),
+                "--output-dir",
+                str(Path(directory) / "out"),
+                console=True,
+            )
         self.assertEqual(loaded.returncode, 1)
         self.assertIn("catalog SHA256 mismatch", loaded.stderr)
         self.assertNotIn("Traceback", loaded.stderr)
 
     def test_comparison_and_summary_help_outside_cwd(self) -> None:
-        for command, option in (("compare", "--repetitions"),
-                                ("summarize", "--assessment")):
+        for command, option in (("compare", "--repetitions"), ("summarize", "--assessment")):
             result = self.run_cli("quality", command, "--help", console=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn(option, result.stdout)
         with tempfile.TemporaryDirectory() as directory:
-            result = self.run_cli("quality", "compare", "--bundle-dir", "missing",
-                                  "--normalization-report", "missing", "--build-report", "missing",
-                                  "--anime-csv", "missing", "--synopsis-csv", "missing",
-                                  "--glove", "missing", "--lockfile", "missing",
-                                  "--code-revision", "a" * 40, "--output-dir", directory,
-                                  "--repetitions", "0", console=True)
+            result = self.run_cli(
+                "quality",
+                "compare",
+                "--bundle-dir",
+                "missing",
+                "--normalization-report",
+                "missing",
+                "--build-report",
+                "missing",
+                "--anime-csv",
+                "missing",
+                "--synopsis-csv",
+                "missing",
+                "--glove",
+                "missing",
+                "--lockfile",
+                "missing",
+                "--code-revision",
+                "a" * 40,
+                "--output-dir",
+                directory,
+                "--repetitions",
+                "0",
+                console=True,
+            )
         self.assertEqual(result.returncode, 1)
         self.assertIn("repetitions must be 1..10", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
@@ -164,9 +233,18 @@ class CliTests(unittest.TestCase):
         help_result = self.run_cli("build", "--help", console=True)
         self.assertEqual(help_result.returncode, 0, help_result.stderr)
         self.assertIn("--normalization-report", help_result.stdout)
-        result = self.run_cli("build", "--catalog", "missing", "--normalization-report",
-                              "missing-report", "--glove", "missing-glove", "--output-dir", "out",
-                              console=True)
+        result = self.run_cli(
+            "build",
+            "--catalog",
+            "missing",
+            "--normalization-report",
+            "missing-report",
+            "--glove",
+            "missing-glove",
+            "--output-dir",
+            "out",
+            console=True,
+        )
         self.assertEqual(result.returncode, 1)
         self.assertEqual(result.stdout, "")
         self.assertIn("recsys build:", result.stderr)
@@ -175,16 +253,45 @@ class CliTests(unittest.TestCase):
     def test_build_oversized_integer_score_reports_clean_error(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            catalog = {"schema_version": 1, "anime": {"1": {
-                "title": "Example", "aliases": [], "genres": [], "score": 10 ** 1000,
-                "year": None, "type": None, "episodes": None, "synopsis": None}}}
+            catalog = {
+                "schema_version": 1,
+                "anime": {
+                    "1": {
+                        "title": "Example",
+                        "aliases": [],
+                        "genres": [],
+                        "score": 10**1000,
+                        "year": None,
+                        "type": None,
+                        "episodes": None,
+                        "synopsis": None,
+                    }
+                },
+            }
             path = root / "catalog.json"
-            path.write_text(json.dumps(catalog, ensure_ascii=False, sort_keys=True,
-                                       separators=(",", ":"), allow_nan=False) + "\n", encoding="utf-8")
-            result = self.run_cli("build", "--catalog", str(path),
-                                  "--normalization-report", str(root / "missing-report.json"),
-                                  "--glove", str(root / "missing-glove.txt"),
-                                  "--output-dir", str(root / "out"), console=True)
+            path.write_text(
+                json.dumps(
+                    catalog,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            result = self.run_cli(
+                "build",
+                "--catalog",
+                str(path),
+                "--normalization-report",
+                str(root / "missing-report.json"),
+                "--glove",
+                str(root / "missing-glove.txt"),
+                "--output-dir",
+                str(root / "out"),
+                console=True,
+            )
             self.assertEqual(result.returncode, 1)
             self.assertEqual(result.stdout, "")
             self.assertIn("recsys build: invalid score: 1", result.stderr)
@@ -205,9 +312,20 @@ class CliTests(unittest.TestCase):
         invalid = self.run_cli("validate", "missing", console=True)
         self.assertEqual(invalid.returncode, 1)
         self.assertNotIn("Traceback", invalid.stderr)
-        invalid = self.run_cli("export", "--catalog", "missing", "--neighbors", "missing",
-                               "--build-report", "missing", "--normalization-report", "missing",
-                               "--output-dir", "out", console=True)
+        invalid = self.run_cli(
+            "export",
+            "--catalog",
+            "missing",
+            "--neighbors",
+            "missing",
+            "--build-report",
+            "missing",
+            "--normalization-report",
+            "missing",
+            "--output-dir",
+            "out",
+            console=True,
+        )
         self.assertEqual(invalid.returncode, 1)
         self.assertNotIn("Traceback", invalid.stderr)
         self.assertIn("missing", invalid.stderr)
@@ -227,14 +345,32 @@ class CliTests(unittest.TestCase):
             self.assertIn("usage: recsys dataset", result.stdout)
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "out"
-            invalid = self.run_cli("dataset", "normalize", "--snapshot", "latest",
-                                   "--data-dir", "missing", "--output-dir", str(output),
-                                   "--scratch-dir", directory)
+            invalid = self.run_cli(
+                "dataset",
+                "normalize",
+                "--snapshot",
+                "latest",
+                "--data-dir",
+                "missing",
+                "--output-dir",
+                str(output),
+                "--scratch-dir",
+                directory,
+            )
             self.assertEqual(invalid.returncode, 2)
             self.assertFalse(output.exists())
-            failed = self.run_cli("dataset", "normalize", "--snapshot", "neelagiri-2025-v1",
-                                  "--data-dir", "private-canary", "--output-dir", str(output),
-                                  "--scratch-dir", directory)
+            failed = self.run_cli(
+                "dataset",
+                "normalize",
+                "--snapshot",
+                "neelagiri-2025-v1",
+                "--data-dir",
+                "private-canary",
+                "--output-dir",
+                str(output),
+                "--scratch-dir",
+                directory,
+            )
             self.assertEqual(failed.returncode, 1)
             self.assertEqual(failed.stdout, "")
             self.assertIn("input_hash_mismatch", failed.stderr)
@@ -249,27 +385,55 @@ class CliTests(unittest.TestCase):
             self.assertIn("--base-dir", result.stdout)
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "aliases"
-            invalid = self.run_cli("aliases", "normalize", "--snapshot", "latest",
-                                   "--data-dir", "missing", "--base-dir", "missing",
-                                   "--base-identity", "sha256:" + "0" * 64,
-                                   "--output-dir", str(output))
+            invalid = self.run_cli(
+                "aliases",
+                "normalize",
+                "--snapshot",
+                "latest",
+                "--data-dir",
+                "missing",
+                "--base-dir",
+                "missing",
+                "--base-identity",
+                "sha256:" + "0" * 64,
+                "--output-dir",
+                str(output),
+            )
             self.assertEqual(invalid.returncode, 2)
             self.assertFalse(output.exists())
-            failed = self.run_cli("aliases", "normalize", "--snapshot", "nafiul-2026-v1",
-                                  "--data-dir", "private-canary", "--base-dir", "missing",
-                                  "--base-identity", "sha256:" + "0" * 64,
-                                  "--output-dir", str(output), console=True)
+            failed = self.run_cli(
+                "aliases",
+                "normalize",
+                "--snapshot",
+                "nafiul-2026-v1",
+                "--data-dir",
+                "private-canary",
+                "--base-dir",
+                "missing",
+                "--base-identity",
+                "sha256:" + "0" * 64,
+                "--output-dir",
+                str(output),
+                console=True,
+            )
             self.assertEqual(failed.returncode, 1)
             self.assertIn("base_integrity_error", failed.stderr)
             self.assertNotIn("private-canary", failed.stderr)
             self.assertNotIn("Traceback", failed.stderr)
-        code = ("from recsys.sources import load_registry; "
-                "from recsys.aliases import _load_spec; "
-                "r,h=load_registry('nafiul-2026-v1'); s,_,e,_,_=_load_spec(None); "
-                "print(len(r['sources']),s.snapshot_id,e['counts']['emitted_items'])")
+        code = (
+            "from recsys.sources import load_registry; "
+            "from recsys.aliases import _load_spec; "
+            "r,h=load_registry('nafiul-2026-v1'); s,_,e,_,_=_load_spec(None); "
+            "print(len(r['sources']),s.snapshot_id,e['counts']['emitted_items'])"
+        )
         with tempfile.TemporaryDirectory() as directory:
-            isolated = subprocess.run([sys.executable, "-I", "-c", code], cwd=directory,
-                                      capture_output=True, text=True, check=False)
+            isolated = subprocess.run(
+                [sys.executable, "-I", "-c", code],
+                cwd=directory,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
         self.assertEqual(isolated.returncode, 0, isolated.stderr)
         self.assertEqual(isolated.stdout, "1 nafiul-2026-v1 12754\n")
 
