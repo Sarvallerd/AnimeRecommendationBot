@@ -1,4 +1,5 @@
 """Fail-closed checks for the local, non-Telegram acceptance runner."""
+
 import importlib.util
 import sys
 import unittest
@@ -15,19 +16,27 @@ class Level1RunnerTests(unittest.TestCase):
     def test_required_tests_must_all_pass_once(self):
         required = {"level1_one", "level1_two"}
         level1.require_cases("test level1_one ... ok\ntest level1_two ... ok\n", required)
-        for text in ("", "test level1_one ... ok\n", "test level1_one ... ignored\ntest level1_two ... ok\n",
-                     "test level1_one ... ok\ntest level1_one ... ok\ntest level1_two ... ok\n",
-                     "test level1_one ... FAILED\ntest level1_two ... ok\n"):
+        for text in (
+            "",
+            "test level1_one ... ok\n",
+            "test level1_one ... ignored\ntest level1_two ... ok\n",
+            "test level1_one ... ok\ntest level1_one ... ok\ntest level1_two ... ok\n",
+            "test level1_one ... FAILED\ntest level1_two ... ok\n",
+        ):
             with self.subTest(text=text), self.assertRaises(RuntimeError):
                 level1.require_cases(text, required)
 
     def test_compose_markers_must_be_complete_and_final(self):
-        good = "\n".join(sorted(level1.COMPOSE_MARKERS - {"LEVEL1_COMPOSE_CLEANUP_PASS"}) +
-                         ["LEVEL1_COMPOSE_CLEANUP_PASS"])
+        good = "\n".join(
+            sorted(level1.COMPOSE_MARKERS - {"LEVEL1_COMPOSE_CLEANUP_PASS"})
+            + ["LEVEL1_COMPOSE_CLEANUP_PASS"]
+        )
         level1.require_markers(good)
-        for bad in (good.replace("LEVEL1_COMPOSE_BUILD_PASS\n", ""),
-                    good + "\nLEVEL1_COMPOSE_CLEANUP_PASS",
-                    good + "\nunchecked tail"):
+        for bad in (
+            good.replace("LEVEL1_COMPOSE_BUILD_PASS\n", ""),
+            good + "\nLEVEL1_COMPOSE_CLEANUP_PASS",
+            good + "\nunchecked tail",
+        ):
             with self.subTest(bad=bad), self.assertRaises(RuntimeError):
                 level1.require_markers(bad)
 
@@ -36,7 +45,9 @@ class Level1RunnerTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             runner.command("negative-exit", [sys.executable, "-c", "raise SystemExit(7)"], 5)
         with self.assertRaises(Exception):
-            runner.command("negative-timeout", [sys.executable, "-c", "import time; time.sleep(30)"], 0.1)
+            runner.command(
+                "negative-timeout", [sys.executable, "-c", "import time; time.sleep(30)"], 0.1
+            )
 
     def test_cleanup_failure_prevents_pass(self):
         runner = level1.Runner("dialogue")

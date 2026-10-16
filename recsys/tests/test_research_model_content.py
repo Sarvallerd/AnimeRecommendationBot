@@ -1,18 +1,18 @@
 """Content model semantics, locked inputs, and private validation workflow."""
 
 import hashlib
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
+from research_model_support import ModelFixture
 
 from recsys.research_artifacts import read_json, write_json
 from recsys.research_evaluate import evaluate_predictions
 from recsys.research_model_content import ContentScorer, fit
 from recsys.research_models import fit_model, load_model, read_scoring_inputs
-from research_model_support import ModelFixture
 
 
 def _vectors(rows):
@@ -24,13 +24,13 @@ def _vectors(rows):
 
 def _scorer(rows, variant):
     vectors = _vectors(rows)
-    return ContentScorer(tuple(range(1, len(rows) + 1)), vectors,
-                         np.any(vectors != 0, axis=1), variant)
+    return ContentScorer(
+        tuple(range(1, len(rows) + 1)), vectors, np.any(vectors != 0, axis=1), variant
+    )
 
 
 def _glove(path, keep=None):
-    words = {"a": (1, 0), "story": (1, 0), "title": (0, 1),
-             "drama": (1, 0), "action": (0, 1)}
+    words = {"a": (1, 0), "story": (1, 0), "title": (0, 1), "drama": (1, 0), "action": (0, 1)}
     if keep is not None:
         words = {word: pair for word, pair in words.items() if word in keep}
     with path.open("wb") as stream:
@@ -43,16 +43,18 @@ def _glove(path, keep=None):
 
 class ContentMathTests(unittest.TestCase):
     def test_mean_max_raw_signed_cosines_and_oov(self):
-        rows = [(1, 0), (0, 1), (.6, .8), (1, 0), (-.8, .6), (-1, 0), (0, 0)]
+        rows = [(1, 0), (0, 1), (0.6, 0.8), (1, 0), (-0.8, 0.6), (-1, 0), (0, 0)]
         mean = _scorer(rows, "content-mean").score((2, 1))
         maximum = _scorer(rows, "content-max").score((1, 2))
-        np.testing.assert_allclose(mean.values[2:6], [.7, .5, -.1, -.5], atol=1e-14)
-        np.testing.assert_allclose(maximum.values[2:6], [.8, 1, .6, 0], atol=1e-14)
+        np.testing.assert_allclose(mean.values[2:6], [0.7, 0.5, -0.1, -0.5], atol=1e-14)
+        np.testing.assert_allclose(maximum.values[2:6], [0.8, 1, 0.6, 0], atol=1e-14)
         self.assertEqual(mean.available[2:7].tolist(), [True, True, False, False, False])
         self.assertEqual(maximum.available[2:7].tolist(), [True, True, True, False, False])
         self.assertEqual(mean.supported_seeds, 2)
         with_oov = _scorer(rows, "content-mean").score((7, 1))
-        np.testing.assert_array_equal(with_oov.values, _scorer(rows, "content-mean").score((1,)).values)
+        np.testing.assert_array_equal(
+            with_oov.values, _scorer(rows, "content-mean").score((1,)).values
+        )
         self.assertEqual(with_oov.supported_seeds, 1)
         all_oov = _scorer(rows, "content-mean").score((7,))
         self.assertEqual(all_oov.supported_seeds, 0)
@@ -63,7 +65,9 @@ class ContentMathTests(unittest.TestCase):
 
     def test_union_removes_visible_before_ranks_and_sums_overlap(self):
         scorer = _scorer([(1, 0)] * 5, "content-union")
-        scorer._source = lambda source: np.asarray((3, 2) if source == 0 else (4, 2), dtype=np.int32)
+        scorer._source = lambda source: np.asarray(
+            (3, 2) if source == 0 else (4, 2), dtype=np.int32
+        )
         answer = scorer.score((2, 1))
         self.assertAlmostEqual(answer.values[2], 1 / 62)
         self.assertAlmostEqual(answer.values[3], 1 / 122)
@@ -84,12 +88,17 @@ class ContentMathTests(unittest.TestCase):
         with patch("recsys.research_model_content.CACHE_BYTES", 440):
             np.testing.assert_array_equal(original.values, scorer.score(seeds).values)
             self.assertLessEqual(scorer.cache.bytes, 440)
-            np.testing.assert_array_equal(original.values, scorer.score(tuple(reversed(seeds))).values)
+            np.testing.assert_array_equal(
+                original.values, scorer.score(tuple(reversed(seeds))).values
+            )
 
     def test_seed_contract(self):
         scorer = _scorer([(1, 0)], "content-max")
         for seeds in ([1], (True,), (1, 1), (2,), tuple(range(11))):
-            with self.subTest(seeds=seeds), self.assertRaisesRegex(ValueError, "research_model_invalid"):
+            with (
+                self.subTest(seeds=seeds),
+                self.assertRaisesRegex(ValueError, "research_model_invalid"),
+            ):
                 scorer.score(seeds)
 
 
@@ -104,23 +113,44 @@ class ContentFitTests(unittest.TestCase):
             with patch("recsys.research_models.release_info", return_value=fixture.lock):
                 first = Path(directory) / "mean-a"
                 second = Path(directory) / "mean-b"
-                fit_model(prepared, first, expected_prepared_identity=prepared_identity,
-                          variant_id="content-mean", code_revision="a" * 40, assets=assets)
-                fit_model(prepared, second, expected_prepared_identity=prepared_identity,
-                          variant_id="content-mean", code_revision="a" * 40, assets=assets)
+                fit_model(
+                    prepared,
+                    first,
+                    expected_prepared_identity=prepared_identity,
+                    variant_id="content-mean",
+                    code_revision="a" * 40,
+                    assets=assets,
+                )
+                fit_model(
+                    prepared,
+                    second,
+                    expected_prepared_identity=prepared_identity,
+                    variant_id="content-mean",
+                    code_revision="a" * 40,
+                    assets=assets,
+                )
                 inputs = read_scoring_inputs(prepared, expected_prepared_identity=prepared_identity)
                 manifest, scorer = load_model(first, inputs=inputs)
             for variant in ("content-max", "content-union"):
                 sibling = Path(directory) / variant
                 with patch("recsys.research_models.release_info", return_value=fixture.lock):
-                    fit_model(prepared, sibling, expected_prepared_identity=prepared_identity,
-                              variant_id=variant, code_revision="a" * 40, assets=assets)
+                    fit_model(
+                        prepared,
+                        sibling,
+                        expected_prepared_identity=prepared_identity,
+                        variant_id=variant,
+                        code_revision="a" * 40,
+                        assets=assets,
+                    )
                     variant_manifest, variant_scorer = load_model(sibling, inputs=inputs)
                 self.assertEqual(variant_manifest["variant_id"], variant)
                 self.assertEqual(variant_scorer.score((1,)).supported_seeds, 1)
-                sibling_prediction = fixture.predict(prepared, prepared_identity, sibling,
-                                                     name=variant + "-prediction")
-                sibling_pred_manifest, _ = read_json(sibling_prediction / "prediction-manifest.json")
+                sibling_prediction = fixture.predict(
+                    prepared, prepared_identity, sibling, name=variant + "-prediction"
+                )
+                sibling_pred_manifest, _ = read_json(
+                    sibling_prediction / "prediction-manifest.json"
+                )
                 self.assertEqual(sibling_pred_manifest["model_id"], variant)
             for name in ("vectors.npy", "ready.npy", "model-manifest.json"):
                 self.assertEqual((first / name).read_bytes(), (second / name).read_bytes())
@@ -129,8 +159,13 @@ class ContentFitTests(unittest.TestCase):
             self.assertEqual(scorer.score((1,)).supported_seeds, 1)
             prediction = fixture.predict(prepared, prepared_identity, first)
             output = Path(directory) / "validation"
-            evaluate_predictions(prepared, prediction, output, split="validation",
-                                 expected_prepared_identity=prepared_identity)
+            evaluate_predictions(
+                prepared,
+                prediction,
+                output,
+                split="validation",
+                expected_prepared_identity=prepared_identity,
+            )
             report, _ = read_json(output / "evaluation-manifest.json")
             self.assertEqual(report["model_id"], "content-mean")
 
@@ -142,19 +177,31 @@ class ContentFitTests(unittest.TestCase):
             prepared, prepared_identity = fixture.make_prepared()
             model = Path(directory) / "model"
             original_open = Path.open
-            protected = {"train-interactions.tsv.gz", "validation-labels.jsonl.gz",
-                         "test-labels.jsonl.gz", "splits.tsv.gz", "queries.jsonl.gz"}
+            protected = {
+                "train-interactions.tsv.gz",
+                "validation-labels.jsonl.gz",
+                "test-labels.jsonl.gz",
+                "splits.tsv.gz",
+                "queries.jsonl.gz",
+            }
 
             def guard(path, *args, **kwargs):
                 if path.name in protected:
                     raise AssertionError("private or query data opened during content fit")
                 return original_open(path, *args, **kwargs)
 
-            with patch("recsys.research_models.release_info", return_value=fixture.lock), \
-                 patch.object(Path, "open", guard):
-                fit_model(prepared, model, expected_prepared_identity=prepared_identity,
-                          variant_id="content-mean", code_revision="a" * 40,
-                          assets={"glove": glove})
+            with (
+                patch("recsys.research_models.release_info", return_value=fixture.lock),
+                patch.object(Path, "open", guard),
+            ):
+                fit_model(
+                    prepared,
+                    model,
+                    expected_prepared_identity=prepared_identity,
+                    variant_id="content-mean",
+                    code_revision="a" * 40,
+                    assets={"glove": glove},
+                )
             with patch("recsys.research_models.release_info", return_value=fixture.lock):
                 inputs = read_scoring_inputs(prepared, expected_prepared_identity=prepared_identity)
                 manifest, scorer = load_model(model, inputs=inputs)
@@ -174,16 +221,23 @@ class ContentFitTests(unittest.TestCase):
                 inputs = read_scoring_inputs(prepared, expected_prepared_identity=prepared_identity)
                 stage = Path(directory) / "stage"
                 stage.mkdir()
-                for invalid in ({"aggregation": "mean", "dimension": True, "positive_only": True},
-                                {"aggregation": "mean", "dimension": 300, "positive_only": 1}):
+                for invalid in (
+                    {"aggregation": "mean", "dimension": True, "positive_only": True},
+                    {"aggregation": "mean", "dimension": 300, "positive_only": 1},
+                ):
                     with self.assertRaisesRegex(ValueError, "research_model_invalid"):
                         fit(inputs, invalid, {"glove": glove}, stage)
                 glove.write_bytes(glove.read_bytes() + b"corrupt\n")
                 target = Path(directory) / "bad-model"
                 with self.assertRaisesRegex(ValueError, "research_model_invalid"):
-                    fit_model(prepared, target, expected_prepared_identity=prepared_identity,
-                              variant_id="content-max", code_revision="a" * 40,
-                              assets={"glove": glove})
+                    fit_model(
+                        prepared,
+                        target,
+                        expected_prepared_identity=prepared_identity,
+                        variant_id="content-max",
+                        code_revision="a" * 40,
+                        assets={"glove": glove},
+                    )
                 self.assertFalse(target.exists())
 
     def test_payload_semantics_checked_even_after_manifest_descriptor_repair(self):
@@ -194,9 +248,14 @@ class ContentFitTests(unittest.TestCase):
             prepared, prepared_identity = fixture.make_prepared()
             model = Path(directory) / "model"
             with patch("recsys.research_models.release_info", return_value=fixture.lock):
-                fit_model(prepared, model, expected_prepared_identity=prepared_identity,
-                          variant_id="content-union", code_revision="a" * 40,
-                          assets={"glove": glove})
+                fit_model(
+                    prepared,
+                    model,
+                    expected_prepared_identity=prepared_identity,
+                    variant_id="content-union",
+                    code_revision="a" * 40,
+                    assets={"glove": glove},
+                )
                 inputs = read_scoring_inputs(prepared, expected_prepared_identity=prepared_identity)
                 manifest, _ = load_model(model, inputs=inputs)
                 vectors = np.load(model / "vectors.npy", allow_pickle=False)

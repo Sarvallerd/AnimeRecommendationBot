@@ -16,6 +16,7 @@ gpu = ["cupy-cuda12x[ctk]==14.2.0; sys_platform == 'linux' and platform_machine 
 
 [dependency-groups]
 data = ["dvc==3.67.1"]
+lint = ["ruff==0.17.1"]
 
 [tool.maturin]
 bindings = "bin"
@@ -47,3 +48,27 @@ cache-keys = [
 
 [tool.uv.extra-build-variables]
 anime-recommendation-recsys = { MATURIN_NO_INSTALL_RUST = "1" }
+
+[tool.ruff]
+required-version = "==0.17.1"
+target-version = "py312"
+line-length = 100
+indent-width = 4
+src = ["src"]
+force-exclude = true
+include = ["*.py", "packaging/scripts/recsys"]
+# ARB-054 removes this exclusion together with the versioned package/provenance migration.
+extend-exclude = ["src/recsys"]
+preview = false
+unsafe-fixes = false
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["recsys"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"

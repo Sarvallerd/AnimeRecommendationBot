@@ -3,20 +3,26 @@
 from __future__ import annotations
 
 import hashlib
-import importlib.metadata
 import json
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
-
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 LOCKS = ("uv.lock", "Cargo.lock")
-OBSOLETE = ("recsys/pyproject.toml", "recsys/uv.lock", "bot/pyproject.toml",
-            "bot/Cargo.toml", "bot/Cargo.lock", "recsys/src", "src/app", "src/config")
+OBSOLETE = (
+    "recsys/pyproject.toml",
+    "recsys/uv.lock",
+    "bot/pyproject.toml",
+    "bot/Cargo.toml",
+    "bot/Cargo.lock",
+    "recsys/src",
+    "src/app",
+    "src/config",
+)
 MARKER = "arb-021-rebuilt"
 PYTHON_MARKER = "arb053-rebuilt"
 
@@ -26,24 +32,38 @@ def digest(path: Path) -> str:
 
 
 def copy_source(destination: Path) -> None:
-    files = ("pyproject.toml", "uv.lock", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml",
-             "packaging/scripts/recsys", "recsys/README.md", "contracts/check_bundle.py")
+    files = (
+        "pyproject.toml",
+        "uv.lock",
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "packaging/scripts/recsys",
+        "recsys/README.md",
+        "contracts/check_bundle.py",
+    )
     trees = ("src/recsys", "bot/src", "bot/migrations", "bot/tests", "tests/fixtures/bundle")
     for name in files:
         target = destination / name
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ROOT / name, target)
     for name in trees:
-        shutil.copytree(ROOT / name, destination / name,
-                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"))
+        shutil.copytree(
+            ROOT / name,
+            destination / name,
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
+        )
 
 
 def run(command: list[str], cwd: Path, env: dict[str, str], *, timeout: int = 600) -> str:
-    result = subprocess.run(command, cwd=cwd, env=env, text=True, capture_output=True,
-                            timeout=timeout)
+    result = subprocess.run(
+        command, cwd=cwd, env=env, text=True, capture_output=True, timeout=timeout
+    )
     if result.returncode:
-        raise AssertionError(f"{' '.join(command)} exited {result.returncode}\n"
-                             f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}")
+        raise AssertionError(
+            f"{' '.join(command)} exited {result.returncode}\n"
+            f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        )
     return result.stdout.strip()
 
 
@@ -52,16 +72,23 @@ def uv(root: Path, env: dict[str, str], *args: str, timeout: int = 600) -> str:
 
 
 def assert_manifest(root: Path, env: dict[str, str]) -> None:
-    assert all((root / name).is_file() for name in ("pyproject.toml", "uv.lock", "Cargo.toml", "Cargo.lock"))
+    assert all(
+        (root / name).is_file()
+        for name in ("pyproject.toml", "uv.lock", "Cargo.toml", "Cargo.lock")
+    )
     assert all(not (root / name).exists() for name in OBSOLETE), OBSOLETE
     assert (root / "src/recsys/__init__.py").is_file()
-    metadata = json.loads(run(["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"], root, env))
+    metadata = json.loads(
+        run(["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"], root, env)
+    )
     packages = metadata["packages"]
     assert len(packages) == 1 and packages[0]["name"] == "bot", packages
     package = packages[0]
     assert Path(package["manifest_path"]).resolve() == root / "Cargo.toml"
-    targets = {(target["name"], tuple(target["kind"])): Path(target["src_path"]).resolve()
-               for target in package["targets"]}
+    targets = {
+        (target["name"], tuple(target["kind"])): Path(target["src_path"]).resolve()
+        for target in package["targets"]
+    }
     assert targets[("bot", ("lib",))] == root / "bot/src/lib.rs", targets
     assert targets[("bot", ("bin",))] == root / "bot/src/main.rs", targets
     assert targets[("check_bundle", ("bin",))] == root / "bot/src/bin/check_bundle.rs", targets
@@ -106,6 +133,7 @@ assert source_payload and source_payload == installed_payload, (
     [name for name in source_payload.keys() & installed_payload.keys()
      if source_payload[name] != installed_payload[name]])
 assert metadata.version('anime-recommendation-recsys') == '0.1.0'
+assert 'ruff' not in {dist.metadata['Name'].lower() for dist in metadata.distributions()}
 files = [str(path) for path in metadata.distribution('anime-recommendation-recsys').files]
 for name in ('recsys', 'bot', 'check_bundle'):
     assert any(path.endswith('/bin/' + name) for path in files), (name, files)
@@ -122,8 +150,9 @@ assert Path(installed_script.read_bytes().splitlines()[0][2:].decode()).resolve(
     uv(root, env, *args, "python", "-I", "-c", script)
 
 
-def check_fixture(root: Path, env: dict[str, str], *, extra: bool = False,
-                  no_editable: bool = False) -> str:
+def check_fixture(
+    root: Path, env: dict[str, str], *, extra: bool = False, no_editable: bool = False
+) -> str:
     fixture = "tests/fixtures/bundle"
     expected = "sha256:" + digest(root / fixture / "manifest.json") + " records=8"
     uv_args = ["--locked"]
@@ -147,27 +176,34 @@ def assert_direct_script(root: Path, base: Path, env: dict[str, str], expected: 
     outside_env.pop("VIRTUAL_ENV", None)
     outside_env["PATH"] = str(base / "empty-path")
     assert run([str(script), "--version"], base, outside_env, timeout=20) == "recsys 0.1.0"
-    assert run([str(script), "validate", str(root / "tests/fixtures/bundle")],
-               base, outside_env, timeout=20) == expected
+    assert (
+        run(
+            [str(script), "validate", str(root / "tests/fixtures/bundle")],
+            base,
+            outside_env,
+            timeout=20,
+        )
+        == expected
+    )
 
 
 def assert_python_cache_rebuild(root: Path, env: dict[str, str]) -> None:
     source = root / "src/recsys/__init__.py"
     original = source.read_bytes()
     marker = f"\nARB_LAYOUT_CACHE_MARKER = {PYTHON_MARKER!r}\n".encode()
-    command = ("run", "--locked", "--no-editable", "--extra", "quality",
-               "python", "-I", "-c")
-    script = ("import recsys; from pathlib import Path; "
-              "assert Path(recsys.__file__).resolve().is_relative_to(Path.cwd().resolve() / '.venv'); "
-              "assert getattr(recsys, 'ARB_LAYOUT_CACHE_MARKER', None) == " + repr(PYTHON_MARKER))
+    command = ("run", "--locked", "--no-editable", "--extra", "quality", "python", "-I", "-c")
+    script = (
+        "import recsys; from pathlib import Path; "
+        "assert Path(recsys.__file__).resolve().is_relative_to(Path.cwd().resolve() / '.venv'); "
+        "assert getattr(recsys, 'ARB_LAYOUT_CACHE_MARKER', None) == " + repr(PYTHON_MARKER)
+    )
     try:
         source.write_bytes(original + marker)
         uv(root, env, *command, script)
         assert_install(root, env, editable=False, extra=True)
     finally:
         source.write_bytes(original)
-    uv(root, env, *command,
-       "import recsys; assert not hasattr(recsys, 'ARB_LAYOUT_CACHE_MARKER')")
+    uv(root, env, *command, "import recsys; assert not hasattr(recsys, 'ARB_LAYOUT_CACHE_MARKER')")
     assert_install(root, env, editable=False, extra=True)
 
 
@@ -180,9 +216,18 @@ def main() -> None:
         root.mkdir()
         copy_source(root)
         env = os.environ.copy()
-        for name in ("VIRTUAL_ENV", "PYTHONPATH", "PYTHONHOME", "UV_PROJECT_ENVIRONMENT",
-                     "UV_ENV_FILE", "TELOXIDE_TOKEN", "DATABASE_URL", "ARTIFACTS_DIR",
-                     "RUST_LOG", "ARB_TEST_DATABASE_URL"):
+        for name in (
+            "VIRTUAL_ENV",
+            "PYTHONPATH",
+            "PYTHONHOME",
+            "UV_PROJECT_ENVIRONMENT",
+            "UV_ENV_FILE",
+            "TELOXIDE_TOKEN",
+            "DATABASE_URL",
+            "ARTIFACTS_DIR",
+            "RUST_LOG",
+            "ARB_TEST_DATABASE_URL",
+        ):
             env.pop(name, None)
         # A local run can reuse an existing pinned download cache when PyPI is unavailable.
         # CI keeps the disposable cache unless explicitly configured otherwise.
@@ -198,9 +243,13 @@ def main() -> None:
         config_env = env | {
             "TELOXIDE_TOKEN": "1:arb_021_smoke",
             "DATABASE_URL": "postgresql://arb_021:arb_021@127.0.0.1:1/arb_021?sslmode=disable",
-            "ARTIFACTS_DIR": "tests/fixtures/bundle", "RUST_LOG": "off",
+            "ARTIFACTS_DIR": "tests/fixtures/bundle",
+            "RUST_LOG": "off",
         }
-        assert uv(root, config_env, "run", "--locked", "bot", "--check-config", timeout=20) == "Configuration is valid."
+        assert (
+            uv(root, config_env, "run", "--locked", "bot", "--check-config", timeout=20)
+            == "Configuration is valid."
+        )
         uv(root, env, "sync", "--locked")
         assert_install(root, env, editable=True)
         assert check_fixture(root, env) == expected
@@ -209,7 +258,14 @@ def main() -> None:
         original = source.read_text()
         needle = 'println!("{} records={}", bundle.identity(), bundle.catalog().len())'
         assert original.count(needle) == 1
-        source.write_text(original.replace(needle, 'println!("{} records={} ' + MARKER + '", bundle.identity(), bundle.catalog().len())'))
+        source.write_text(
+            original.replace(
+                needle,
+                'println!("{} records={} '
+                + MARKER
+                + '", bundle.identity(), bundle.catalog().len())',
+            )
+        )
         fixture = "tests/fixtures/bundle"
         assert uv(root, env, "run", "--locked", "check_bundle", fixture) == expected + " " + MARKER
         uv(root, env, "sync", "--locked")
@@ -218,9 +274,11 @@ def main() -> None:
         assert uv(root, env, "run", "--locked", "check_bundle", fixture) == expected
 
         uv(root, env, "sync", "--locked", "--extra", "quality")
-        quality_script = ("import numpy,pandas,sklearn; "
-                          "assert (numpy.__version__,pandas.__version__,sklearn.__version__) "
-                          "== ('2.5.3','3.0.6','1.9.1')")
+        quality_script = (
+            "import numpy,pandas,sklearn; "
+            "assert (numpy.__version__,pandas.__version__,sklearn.__version__) "
+            "== ('2.5.3','3.0.6','1.9.1')"
+        )
         uv(root, env, "run", "--locked", "--extra", "quality", "python", "-I", "-c", quality_script)
         assert uv(root, env, "run", "--locked", "--extra", "quality", "recsys", "quality", "--help")
         assert_install(root, env, editable=True, extra=True)
@@ -233,7 +291,9 @@ def main() -> None:
         assert_python_cache_rebuild(root, env)
         assert {name: digest(root / name) for name in LOCKS} == before
     assert {name: digest(ROOT / name) for name in LOCKS} == before
-    print("Root environment: commands, resources, fixture, config, rebuild/restore, quality, wheel, locks OK")
+    print(
+        "Root environment: commands, resources, fixture, config, rebuild/restore, quality, wheel, locks OK"
+    )
 
 
 if __name__ == "__main__":

@@ -16,8 +16,12 @@ FIXTURE = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "bundle"
 
 
 def encode(value):
-    return (json.dumps(value, ensure_ascii=False, sort_keys=True,
-                       separators=(",", ":"), allow_nan=False) + "\n").encode("utf-8")
+    return (
+        json.dumps(
+            value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
+        )
+        + "\n"
+    ).encode("utf-8")
 
 
 class BundleContractTests(unittest.TestCase):
@@ -38,7 +42,9 @@ class BundleContractTests(unittest.TestCase):
 
     def rehash(self, name):
         manifest = self.read("manifest.json")
-        manifest["files"][name]["sha256"] = hashlib.sha256((self.bundle / name).read_bytes()).hexdigest()
+        manifest["files"][name]["sha256"] = hashlib.sha256(
+            (self.bundle / name).read_bytes()
+        ).hexdigest()
         (self.bundle / "manifest.json").write_bytes(encode(manifest))
 
     def change(self, name, mutate):
@@ -55,23 +61,44 @@ class BundleContractTests(unittest.TestCase):
         identity, count = check_bundle(self.bundle)
         manifest = self.read("manifest.json")
         self.assertEqual(count, 8)
-        self.assertEqual(identity, "sha256:" + hashlib.sha256((self.bundle / "manifest.json").read_bytes()).hexdigest())
-        self.assertEqual(manifest["sources"][0]["sha256"], hashlib.sha256((self.bundle / "source.json").read_bytes()).hexdigest())
-        self.assertEqual(set(self.read("catalog.json")["anime"]), {"1", "2", "3", "10", "11", "12", "20", "99"})
-        self.assertEqual(self.read("catalog.json")["anime"]["1"]["title"], self.read("catalog.json")["anime"]["2"]["title"])
+        self.assertEqual(
+            identity,
+            "sha256:" + hashlib.sha256((self.bundle / "manifest.json").read_bytes()).hexdigest(),
+        )
+        self.assertEqual(
+            manifest["sources"][0]["sha256"],
+            hashlib.sha256((self.bundle / "source.json").read_bytes()).hexdigest(),
+        )
+        self.assertEqual(
+            set(self.read("catalog.json")["anime"]), {"1", "2", "3", "10", "11", "12", "20", "99"}
+        )
+        self.assertEqual(
+            self.read("catalog.json")["anime"]["1"]["title"],
+            self.read("catalog.json")["anime"]["2"]["title"],
+        )
         self.assertIn("天空の列車", self.read("catalog.json")["anime"]["3"]["aliases"])
         expected = {
-            "1": [10, 11, 12, 2, 3], "2": [3, 1, 10, 11, 12],
-            "3": [2, 1, 10, 11, 12], "10": [1, 11, 12, 2, 3],
-            "11": [1, 10, 12, 2, 3], "12": [1, 10, 11, 2, 3],
-            "20": [2, 3], "99": [],
+            "1": [10, 11, 12, 2, 3],
+            "2": [3, 1, 10, 11, 12],
+            "3": [2, 1, 10, 11, 12],
+            "10": [1, 11, 12, 2, 3],
+            "11": [1, 10, 12, 2, 3],
+            "12": [1, 10, 11, 2, 3],
+            "20": [2, 3],
+            "99": [],
         }
         neighbors = self.read("neighbors.json")["neighbors"]
-        self.assertEqual({key: [item["mal_id"] for item in items] for key, items in neighbors.items()}, expected)
+        self.assertEqual(
+            {key: [item["mal_id"] for item in items] for key, items in neighbors.items()}, expected
+        )
         self.assertEqual(self.read("catalog.json")["anime"]["99"]["score"], None)
         self.assertEqual(self.read("catalog.json")["anime"]["99"]["aliases"], [])
-        output = subprocess.run([sys.executable, str(Path(__file__).with_name("check_bundle.py")), str(self.bundle)],
-                                capture_output=True, text=True, check=False)
+        output = subprocess.run(
+            [sys.executable, str(Path(__file__).with_name("check_bundle.py")), str(self.bundle)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
         self.assertEqual(output.returncode, 0, output.stderr)
         self.assertEqual(output.stdout.strip(), f"{identity} records=8")
 
@@ -81,8 +108,8 @@ class BundleContractTests(unittest.TestCase):
             (b'{"schema_version":1,"schema_version":1,"anime":{}}\n', "duplicate JSON key"),
             (b'{"anime":{},"schema_version":NaN}\n', "nonfinite JSON constant"),
             (b'{"anime":{},"schema_version":1e999}\n', "invalid JSON"),
-            (b'\xef\xbb\xbf{}\n', "invalid JSON"),
-            (b'\xff', "invalid JSON"),
+            (b"\xef\xbb\xbf{}\n", "invalid JSON"),
+            (b"\xff", "invalid JSON"),
         ]
         for raw, message in cases:
             with self.subTest(raw=raw):
@@ -94,7 +121,10 @@ class BundleContractTests(unittest.TestCase):
         mutations = [
             (lambda x: x.update(extra=1), "fields differ"),
             (lambda x: x.update(schema_version=True), "schema_version"),
-            (lambda x: x["anime"].update({"01": x["anime"].pop("1")}), "canonical positive decimal"),
+            (
+                lambda x: x["anime"].update({"01": x["anime"].pop("1")}),
+                "canonical positive decimal",
+            ),
             (lambda x: x["anime"].update({"2147483648": x["anime"].pop("1")}), "exceeds"),
             (lambda x: x["anime"]["1"].update(title="  "), "title"),
             (lambda x: x["anime"]["1"].update(aliases=["same", "same"]), "duplicate string"),
@@ -106,7 +136,9 @@ class BundleContractTests(unittest.TestCase):
         ]
         for mutate, message in mutations:
             with self.subTest(message=message, mutate=mutate):
-                value = copy.deepcopy(json.loads((FIXTURE / "catalog.json").read_text(encoding="utf-8")))
+                value = copy.deepcopy(
+                    json.loads((FIXTURE / "catalog.json").read_text(encoding="utf-8"))
+                )
                 mutate(value)
                 self.write("catalog.json", value)
                 self.rejected(message)
@@ -114,6 +146,7 @@ class BundleContractTests(unittest.TestCase):
     def test_neighbor_rules(self):
         def first(value):
             return value["neighbors"]["1"]
+
         mutations = [
             (lambda x: x["neighbors"].pop("99"), "exactly match"),
             (lambda x: x["neighbors"].update({"01": []}), "canonical positive decimal"),
@@ -131,7 +164,9 @@ class BundleContractTests(unittest.TestCase):
         ]
         for mutate, message in mutations:
             with self.subTest(message=message, mutate=mutate):
-                value = copy.deepcopy(json.loads((FIXTURE / "neighbors.json").read_text(encoding="utf-8")))
+                value = copy.deepcopy(
+                    json.loads((FIXTURE / "neighbors.json").read_text(encoding="utf-8"))
+                )
                 mutate(value)
                 self.write("neighbors.json", value)
                 self.rejected(message)
@@ -139,14 +174,22 @@ class BundleContractTests(unittest.TestCase):
     def test_manifest_and_hashes(self):
         self.change("manifest.json", lambda x: x["sources"].append(copy.deepcopy(x["sources"][0])))
         self.rejected("sources must be unique")
-        self.write("manifest.json", json.loads((FIXTURE / "manifest.json").read_text(encoding="utf-8")))
+        self.write(
+            "manifest.json", json.loads((FIXTURE / "manifest.json").read_text(encoding="utf-8"))
+        )
         self.change("manifest.json", lambda x: x["files"]["catalog.json"].update(sha256="0" * 64))
         self.rejected("SHA-256 mismatch")
-        self.write("manifest.json", json.loads((FIXTURE / "manifest.json").read_text(encoding="utf-8")))
+        self.write(
+            "manifest.json", json.loads((FIXTURE / "manifest.json").read_text(encoding="utf-8"))
+        )
         self.change("manifest.json", lambda x: x["sources"][0].update(sha256="A" * 64))
         self.rejected("lowercase SHA-256")
-        self.write("manifest.json", json.loads((FIXTURE / "manifest.json").read_text(encoding="utf-8")))
-        self.change("manifest.json", lambda x: x["files"].update({"source.json": {"sha256": "0" * 64}}))
+        self.write(
+            "manifest.json", json.loads((FIXTURE / "manifest.json").read_text(encoding="utf-8"))
+        )
+        self.change(
+            "manifest.json", lambda x: x["files"].update({"source.json": {"sha256": "0" * 64}})
+        )
         self.rejected("fields differ")
 
     def test_valid_content_and_provenance_changes_change_identity(self):
@@ -154,7 +197,9 @@ class BundleContractTests(unittest.TestCase):
         self.change("catalog.json", lambda x: x["anime"]["1"].update(title="Новое название"))
         changed_content, _ = check_bundle(self.bundle)
         self.assertNotEqual(original, changed_content)
-        self.change("manifest.json", lambda x: x["sources"][0]["metadata"].update(note="revised input"))
+        self.change(
+            "manifest.json", lambda x: x["sources"][0]["metadata"].update(note="revised input")
+        )
         changed_provenance, _ = check_bundle(self.bundle)
         self.assertNotEqual(changed_content, changed_provenance)
         self.change("manifest.json", lambda x: x["algorithm"].update(version="2"))

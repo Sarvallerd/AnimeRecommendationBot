@@ -93,6 +93,12 @@ jobs:
       - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
         with:
           version: '0.11.12'
+      - name: Check Python lint and formatting
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/arb-lint-venv
+        run: |
+          uv run --locked --only-group lint ruff check .
+          uv run --locked --only-group lint ruff format --check .
       - name: Install Rust toolchain and native build prerequisites
         run: |
           rustup toolchain install 1.95.0 --profile minimal

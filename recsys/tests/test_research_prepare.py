@@ -2,10 +2,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from research_support import ResearchFixture
+
 from recsys.research_artifacts import identity, read_json, stream_jsonl, stream_tsv
 from recsys.research_prepare import validate_preparation
 from recsys.research_protocol import ResearchError, split_user
-from research_support import ResearchFixture
 
 
 class PrepareTests(unittest.TestCase):
@@ -20,30 +21,57 @@ class PrepareTests(unittest.TestCase):
         for path in first.rglob("*"):
             if path.is_file():
                 self.assertEqual(path.read_bytes(), (second / path.relative_to(first)).read_bytes())
-        manifest = validate_preparation(first, expected_identity=identity(first / "prepare-manifest.json"))
+        manifest = validate_preparation(
+            first, expected_identity=identity(first / "prepare-manifest.json")
+        )
         files = manifest["files"]
         catalog, _ = read_json(first / "model-catalog.json")
         self.assertEqual(set(catalog["anime"]), set(map(str, self.fixture.items)))
         self.assertTrue(all(item["score"] is None for item in catalog["anime"].values()))
-        train = list(stream_tsv(first / "fit/train-interactions.tsv.gz", files["fit/train-interactions.tsv.gz"]))
-        self.assertTrue(all(split_user(row.split(b"\t")[0].decode()) == "train" for row in train[1:]))
+        train = list(
+            stream_tsv(
+                first / "fit/train-interactions.tsv.gz", files["fit/train-interactions.tsv.gz"]
+            )
+        )
+        self.assertTrue(
+            all(split_user(row.split(b"\t")[0].decode()) == "train" for row in train[1:])
+        )
         self.assertTrue(all(b"\tcompleted\n" in row for row in train[1:]))
-        validation = list(stream_jsonl(first / "evaluator/validation-labels.jsonl.gz",
-                                       files["evaluator/validation-labels.jsonl.gz"]))
-        test = list(stream_jsonl(first / "evaluator/test-labels.jsonl.gz",
-                                 files["evaluator/test-labels.jsonl.gz"]))
-        self.assertTrue({row["user_key"] for row in validation}.isdisjoint(
-                        {row["user_key"] for row in test}))
-        self.assertTrue(all(set(row["target_ids"]).isdisjoint(row["reserved_seed_ids"])
-                            for row in validation + test))
-        self.assertTrue(all(row["target_ids"] == validation[0]["target_ids"]
-                            for row in validation if row["user_key"] == validation[0]["user_key"]))
-        queries = list(stream_jsonl(first / "development/queries.jsonl.gz",
-                                    files["development/queries.jsonl.gz"]))
+        validation = list(
+            stream_jsonl(
+                first / "evaluator/validation-labels.jsonl.gz",
+                files["evaluator/validation-labels.jsonl.gz"],
+            )
+        )
+        test = list(
+            stream_jsonl(
+                first / "evaluator/test-labels.jsonl.gz", files["evaluator/test-labels.jsonl.gz"]
+            )
+        )
+        self.assertTrue(
+            {row["user_key"] for row in validation}.isdisjoint({row["user_key"] for row in test})
+        )
+        self.assertTrue(
+            all(
+                set(row["target_ids"]).isdisjoint(row["reserved_seed_ids"])
+                for row in validation + test
+            )
+        )
+        self.assertTrue(
+            all(
+                row["target_ids"] == validation[0]["target_ids"]
+                for row in validation
+                if row["user_key"] == validation[0]["user_key"]
+            )
+        )
+        queries = list(
+            stream_jsonl(
+                first / "development/queries.jsonl.gz", files["development/queries.jsonl.gz"]
+            )
+        )
         self.assertEqual(len(queries), len(validation))
         self.assertEqual(len(queries), 8 * 41)
         self.assertEqual(manifest["counts"]["sampled_users"], 15)
-
 
     def test_short_cohort_query_bounds(self):
         short_user = next(user for user in self.fixture.users if split_user(user) == "validation")
@@ -52,9 +80,15 @@ class PrepareTests(unittest.TestCase):
         another.mkdir()
         fixture = ResearchFixture(another, short_user=short_user)
         prepared = fixture.prepare()
-        manifest = validate_preparation(prepared, expected_identity=identity(prepared / "prepare-manifest.json"))
-        labels = list(stream_jsonl(prepared / "evaluator/validation-labels.jsonl.gz",
-                                   manifest["files"]["evaluator/validation-labels.jsonl.gz"]))
+        manifest = validate_preparation(
+            prepared, expected_identity=identity(prepared / "prepare-manifest.json")
+        )
+        labels = list(
+            stream_jsonl(
+                prepared / "evaluator/validation-labels.jsonl.gz",
+                manifest["files"]["evaluator/validation-labels.jsonl.gz"],
+            )
+        )
         short = [row for row in labels if row["user_key"] == short_user]
         self.assertEqual(len(short), 9)  # N=0 and four orders at N=1,2.
         self.assertEqual(len(short[0]["target_ids"]), 1)
@@ -68,11 +102,16 @@ class PrepareTests(unittest.TestCase):
         raw = list(stream_tsv(source))
         source.unlink()
         from recsys.research_artifacts import StreamWriter
+
         writer = StreamWriter(source)
         changed = False
         for row in raw:
             if row.startswith(f"{heldout}\t1\t".encode()):
-                row = f"{heldout}\t1\t8\tcompleted\n".encode() if b"\t8\t" not in row else f"{heldout}\t1\t9\tcompleted\n".encode()
+                row = (
+                    f"{heldout}\t1\t8\tcompleted\n".encode()
+                    if b"\t8\t" not in row
+                    else f"{heldout}\t1\t9\tcompleted\n".encode()
+                )
                 changed = True
             writer.write(row)
         writer.close()

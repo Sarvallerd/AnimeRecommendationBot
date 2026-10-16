@@ -26,46 +26,96 @@ class ExportTests(unittest.TestCase):
         self.registry, self.registry_sha = self._fixture(self.root)
         self.catalog = self.root / "catalog.json"
         self.neighbors = self.root / "built" / "neighbors.json"
-        self.report = build(self.catalog, self.root / "normalization-report.json",
-                            self.root / "glove.txt", self.root / "built", block_size=1,
-                            registry=self.registry, registry_sha256=self.registry_sha)
+        self.report = build(
+            self.catalog,
+            self.root / "normalization-report.json",
+            self.root / "glove.txt",
+            self.root / "built",
+            block_size=1,
+            registry=self.registry,
+            registry_sha256=self.registry_sha,
+        )
         self.normalization = self.root / "normalization-report.json"
         self.inputs = (self.catalog, self.neighbors, self.report, self.normalization)
 
     @staticmethod
     def _entry(title, aliases=None, genres=None, synopsis=None):
-        return {"title": title, "aliases": aliases or [], "genres": genres or [],
-                "score": None, "year": None, "type": None, "episodes": None,
-                "synopsis": synopsis}
+        return {
+            "title": title,
+            "aliases": aliases or [],
+            "genres": genres or [],
+            "score": None,
+            "year": None,
+            "type": None,
+            "episodes": None,
+            "synopsis": synopsis,
+        }
 
     def _fixture(self, root, anime=None, glove_lines=None):
         anime = anime or {"2": self._entry("alpha"), "10": self._entry("alpha", ["beta"])}
-        glove_lines = glove_lines or ["alpha " + " ".join(["1"] + ["0"] * 299),
-                                     "beta " + " ".join(["0", "1"] + ["0"] * 298)]
+        glove_lines = glove_lines or [
+            "alpha " + " ".join(["1"] + ["0"] * 299),
+            "beta " + " ".join(["0", "1"] + ["0"] * 298),
+        ]
         glove_raw = ("\n".join(glove_lines) + "\n").encode()
         (root / "glove.txt").write_bytes(glove_raw)
         catalog_raw = _canonical({"schema_version": 1, "anime": anime})
         (root / "catalog.json").write_bytes(catalog_raw)
-        mal = [{"id": name, "filename": name + ".csv", "size": 1,
-                "sha256": sha(name.encode()), "url": "https://example.org/" + name}
-               for name in ("mal_anime", "mal_synopsis")]
-        registry = {"schema_version": 1, "provenance": {"mal": {"commit": "test", "repository": "https://example.org"},
-                    "glove": {"project": "https://example.org", "pretrained_vectors_license": "test"}},
-                    "sources": mal + [{"id": "glove_zip", "filename": "glove.zip", "size": 1,
-                                      "sha256": sha(b"zip"), "url": "https://example.org/glove.zip"},
-                                     {"id": "glove_300d", "filename": "glove.txt", "size": len(glove_raw),
-                                      "sha256": sha(glove_raw), "archive_id": "glove_zip", "member": "glove.txt"}]}
+        mal = [
+            {
+                "id": name,
+                "filename": name + ".csv",
+                "size": 1,
+                "sha256": sha(name.encode()),
+                "url": "https://example.org/" + name,
+            }
+            for name in ("mal_anime", "mal_synopsis")
+        ]
+        registry = {
+            "schema_version": 1,
+            "provenance": {
+                "mal": {"commit": "test", "repository": "https://example.org"},
+                "glove": {"project": "https://example.org", "pretrained_vectors_license": "test"},
+            },
+            "sources": mal
+            + [
+                {
+                    "id": "glove_zip",
+                    "filename": "glove.zip",
+                    "size": 1,
+                    "sha256": sha(b"zip"),
+                    "url": "https://example.org/glove.zip",
+                },
+                {
+                    "id": "glove_300d",
+                    "filename": "glove.txt",
+                    "size": len(glove_raw),
+                    "sha256": sha(glove_raw),
+                    "archive_id": "glove_zip",
+                    "member": "glove.txt",
+                },
+            ],
+        }
         registry_sha = sha(_canonical(registry))
-        report = {"schema_version": 1, "normalizer_version": "1", "registry_sha256": registry_sha,
-                  "provenance": registry["provenance"], "sources": mal,
-                  "files": {"catalog.json": {"sha256": sha(catalog_raw)}},
-                  "counts": {"retained": len(anime)}}
+        report = {
+            "schema_version": 1,
+            "normalizer_version": "1",
+            "registry_sha256": registry_sha,
+            "provenance": registry["provenance"],
+            "sources": mal,
+            "files": {"catalog.json": {"sha256": sha(catalog_raw)}},
+            "counts": {"retained": len(anime)},
+        }
         (root / "normalization-report.json").write_bytes(_canonical(report))
         return registry, registry_sha
 
     def export(self, store="store"):
-        return export_bundle(*self.inputs, self.root / store, registry=self.registry,
-                             registry_sha256=self.registry_sha)
+        return export_bundle(
+            *self.inputs,
+            self.root / store,
+            registry=self.registry,
+            registry_sha256=self.registry_sha,
+        )
 
     def mutate(self, path, change):
         value = json.loads(path.read_bytes())
@@ -74,11 +124,17 @@ class ExportTests(unittest.TestCase):
 
     def test_pinned_profile_matches_actual_builder(self):
         self.assertEqual(json.loads(self.report.read_bytes())["algorithm"], ALGORITHM)
-        self.assertEqual(json.loads(self.report.read_bytes())["producer"]["package_version"], __version__)
+        self.assertEqual(
+            json.loads(self.report.read_bytes())["producer"]["package_version"], __version__
+        )
 
     def test_legacy_export_rejects_release_report_shape(self):
-        self.mutate(self.report, lambda value: value.update(
-            schema_version=2, kind="arb-release-build", builder_version="arb031-v1"))
+        self.mutate(
+            self.report,
+            lambda value: value.update(
+                schema_version=2, kind="arb-release-build", builder_version="arb031-v1"
+            ),
+        )
         with self.assertRaises(ContractError):
             self.export()
 
@@ -86,8 +142,9 @@ class ExportTests(unittest.TestCase):
         first = self.export("a")
         second = self.export("b")
         self.assertEqual(first.name, second.name)
-        self.assertEqual({p.name for p in first.iterdir()},
-                         {"catalog.json", "neighbors.json", "manifest.json"})
+        self.assertEqual(
+            {p.name for p in first.iterdir()}, {"catalog.json", "neighbors.json", "manifest.json"}
+        )
         for name in ("catalog.json", "neighbors.json", "manifest.json"):
             self.assertEqual((first / name).read_bytes(), (second / name).read_bytes())
         self.assertEqual((first / "catalog.json").read_bytes(), self.catalog.read_bytes())
@@ -104,11 +161,15 @@ class ExportTests(unittest.TestCase):
 
     def test_provenance_change_changes_identity_with_same_artifacts(self):
         first = self.export("a")
-        self.mutate(self.report, lambda value: value["execution"].update(requested_block_rows=2,
-                                                                            effective_block_rows=2))
+        self.mutate(
+            self.report,
+            lambda value: value["execution"].update(requested_block_rows=2, effective_block_rows=2),
+        )
         second = self.export("a")
         self.assertNotEqual(first, second)
-        self.assertEqual((first / "neighbors.json").read_bytes(), (second / "neighbors.json").read_bytes())
+        self.assertEqual(
+            (first / "neighbors.json").read_bytes(), (second / "neighbors.json").read_bytes()
+        )
 
     def test_report_corruption_rejected_before_store(self):
         mutations = [
@@ -135,8 +196,11 @@ class ExportTests(unittest.TestCase):
         self.report.write_bytes(original)
 
     def test_corrupt_catalog_neighbor_and_normalization_rejected(self):
-        for path, edit in ((self.catalog, b"bad"), (self.neighbors, b"bad"),
-                           (self.normalization, b"bad")):
+        for path, edit in (
+            (self.catalog, b"bad"),
+            (self.neighbors, b"bad"),
+            (self.normalization, b"bad"),
+        ):
             with self.subTest(path=path):
                 original = path.read_bytes()
                 path.write_bytes(edit)

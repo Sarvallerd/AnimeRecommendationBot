@@ -13,13 +13,26 @@ from recsys.dataset_metadata import MetadataResult
 
 
 def _metadata(n=16):
-    entries = {str(i): {"title": str(i), "aliases": [], "genres": [], "score": None,
-                        "year": None, "type": None, "episodes": None, "synopsis": None}
-               for i in range(1, n + 1)}
-    facts = {str(i): {"first_release_date": None, "airing_status": "unknown",
-                      "seasonal_year": None} for i in range(1, n + 1)}
-    return MetadataResult({"schema_version": 1, "anime": entries},
-                          {"schema_version": 1, "anime": facts}, {})
+    entries = {
+        str(i): {
+            "title": str(i),
+            "aliases": [],
+            "genres": [],
+            "score": None,
+            "year": None,
+            "type": None,
+            "episodes": None,
+            "synopsis": None,
+        }
+        for i in range(1, n + 1)
+    }
+    facts = {
+        str(i): {"first_release_date": None, "airing_status": "unknown", "seasonal_year": None}
+        for i in range(1, n + 1)
+    }
+    return MetadataResult(
+        {"schema_version": 1, "anime": entries}, {"schema_version": 1, "anime": facts}, {}
+    )
 
 
 class InteractionTests(unittest.TestCase):
@@ -33,12 +46,15 @@ class InteractionTests(unittest.TestCase):
                 for user, mal, status, score in rows:
                     writer.writerow((user, mal, status, score, "False", "1"))
             output = root / "interactions.tsv.gz"
-            result = build_interactions(path, metadata or _metadata(), output,
-                                        root / "work", {"memory_limit_mib": 256,
-                                        "threads": threads, "spill_limit_mib": 512})
+            result = build_interactions(
+                path,
+                metadata or _metadata(),
+                output,
+                root / "work",
+                {"memory_limit_mib": 256, "threads": threads, "spill_limit_mib": 512},
+            )
             self.assertEqual((root / "work").stat().st_mode & 0o777, 0o700)
-            self.assertEqual((root / "work" / "ratings.duckdb").stat().st_mode & 0o777,
-                             0o600)
+            self.assertEqual((root / "work" / "ratings.duckdb").stat().st_mode & 0o777, 0o600)
             return result, output.read_bytes(), gzip.decompress(output.read_bytes())
 
     def test_all_pair_states_and_mapping_denominator(self):
@@ -77,13 +93,15 @@ class InteractionTests(unittest.TestCase):
         repeated, second, _ = self.run_rows(list(reversed(rows)), threads=2)
         self.assertEqual(first, second)
         self.assertEqual(result.qa["counts"]["positive_users_ge_15"], 1)
-        self.assertEqual(result.qa["distributions"]["positive_items_per_user_bins"],
-                         {"10": 1, "15": 1})
+        self.assertEqual(
+            result.qa["distributions"]["positive_items_per_user_bins"], {"10": 1, "15": 1}
+        )
         self.assertIn(user_key("Пользователь").encode("ascii"), plain)
         self.assertNotIn("Пользователь".encode(), plain)
         self.assertNotEqual(user_key("A"), user_key("a"))
-        self.assertEqual(user_key("A"), "u1_" + hashlib.sha256(
-            b"arb-user-v1\0neelagiri-2025-v1\0A").hexdigest())
+        self.assertEqual(
+            user_key("A"), "u1_" + hashlib.sha256(b"arb-user-v1\0neelagiri-2025-v1\0A").hexdigest()
+        )
 
     def test_all_whitespace_usernames_are_blank_without_normalizing_nonblank_names(self):
         self.assertEqual(len(WS), 29)
@@ -109,11 +127,22 @@ class InteractionTests(unittest.TestCase):
     def test_exact_score_grammar_does_not_underflow_or_coerce_invalid_values(self):
         unset = (None, "\u00a0\u2003", "+000.000")
         explicit = ("+0010.000", "\u00a01\u3000")
-        invalid = ("1e-999", "-0", "-0.0", "1e1", "0.0000000001",
-                   "1.0000000001", "11", "NaN", "Inf", ".0", "1.", "2.5")
+        invalid = (
+            "1e-999",
+            "-0",
+            "-0.0",
+            "1e1",
+            "0.0000000001",
+            "1.0000000001",
+            "11",
+            "NaN",
+            "Inf",
+            ".0",
+            "1.",
+            "2.5",
+        )
         values = unset + explicit + invalid
-        rows = [(f"score-{i}", "1", "completed", value)
-                for i, value in enumerate(values)]
+        rows = [(f"score-{i}", "1", "completed", value) for i, value in enumerate(values)]
         rows.append(("score-5", "1", "completed", "8"))
         result, _, plain = self.run_rows(rows)
         counts = result.qa["counts"]
@@ -123,9 +152,10 @@ class InteractionTests(unittest.TestCase):
         self.assertEqual(counts["invalid_state_pairs"], 1)
         self.assertEqual(counts["raw_explicit_pairs"], len(explicit) + 1)
         self.assertEqual(counts["accepted_pairs"], len(explicit))
-        self.assertEqual(result.qa["distributions"]["raw_score_histogram"],
-                         {"unset": len(unset), "invalid": len(invalid),
-                          "10": 1, "1": 1, "8": 1})
+        self.assertEqual(
+            result.qa["distributions"]["raw_score_histogram"],
+            {"unset": len(unset), "invalid": len(invalid), "10": 1, "1": 1, "8": 1},
+        )
         self.assertIn(user_key("score-3").encode("ascii") + b"\t1\t10\tcompleted\n", plain)
         self.assertIn(user_key("score-4").encode("ascii") + b"\t1\t1\tcompleted\n", plain)
         self.assertNotIn(user_key("score-5").encode("ascii"), plain)
@@ -134,15 +164,21 @@ class InteractionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "ratings.csv"
-            source.write_text(",".join(CSV_COLUMNS) + "\n"
-                              "private-canary-username,1,completed,8,False,1,extra\n")
+            source.write_text(
+                ",".join(CSV_COLUMNS) + "\nprivate-canary-username,1,completed,8,False,1,extra\n"
+            )
             with self.assertRaisesRegex(ValueError, "ratings_csv_invalid") as context:
-                build_interactions(source, _metadata(), root / "out.gz", root / "work",
-                                   {"memory_limit_mib": 256, "threads": 1,
-                                    "spill_limit_mib": 512})
+                build_interactions(
+                    source,
+                    _metadata(),
+                    root / "out.gz",
+                    root / "work",
+                    {"memory_limit_mib": 256, "threads": 1, "spill_limit_mib": 512},
+                )
             self.assertNotIn("private-canary-username", str(context.exception))
-            self.assertNotIn("private-canary-username", "".join(
-                traceback.format_exception(context.exception)))
+            self.assertNotIn(
+                "private-canary-username", "".join(traceback.format_exception(context.exception))
+            )
 
     def test_exact_csv_header_rejects_renamed_reordered_and_duplicate_columns(self):
         columns = list(CSV_COLUMNS)
@@ -155,13 +191,21 @@ class InteractionTests(unittest.TestCase):
             with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 source = root / "ratings.csv"
-                source.write_bytes((",".join(fields) + "\r\n" +
-                                    "private-canary-username,1,completed,8,False,1\r\n"
-                                    ).encode("utf-8"))
+                source.write_bytes(
+                    (
+                        ",".join(fields)
+                        + "\r\n"
+                        + "private-canary-username,1,completed,8,False,1\r\n"
+                    ).encode("utf-8")
+                )
                 with self.assertRaisesRegex(ValueError, "^ratings_csv_invalid$") as context:
-                    build_interactions(source, _metadata(), root / "out.gz", root / "work",
-                                       {"memory_limit_mib": 256, "threads": 1,
-                                        "spill_limit_mib": 512})
+                    build_interactions(
+                        source,
+                        _metadata(),
+                        root / "out.gz",
+                        root / "work",
+                        {"memory_limit_mib": 256, "threads": 1, "spill_limit_mib": 512},
+                    )
                 diagnostic = "".join(traceback.format_exception(context.exception))
                 self.assertNotIn("private-canary", diagnostic)
                 self.assertFalse((root / "out.gz").exists())

@@ -21,8 +21,11 @@ from recsys.sources import SourceError, load_registry
 
 def descriptor(source_id, filename, content, **origin):
     return {
-        "id": source_id, "filename": filename, "size": len(content),
-        "sha256": hashlib.sha256(content).hexdigest(), **origin,
+        "id": source_id,
+        "filename": filename,
+        "size": len(content),
+        "sha256": hashlib.sha256(content).hexdigest(),
+        **origin,
     }
 
 
@@ -92,8 +95,9 @@ class ObtainTests(unittest.TestCase):
             "sources": [
                 descriptor("mal", "anime.csv", csv, url=server.url("anime.csv")),
                 descriptor("zip", "glove.6B.zip", zip_bytes, url=server.url("glove.6B.zip")),
-                descriptor("text", "glove.6B.300d.txt", txt,
-                           archive_id="zip", member="glove.6B.300d.txt"),
+                descriptor(
+                    "text", "glove.6B.300d.txt", txt, archive_id="zip", member="glove.6B.300d.txt"
+                ),
             ],
         }
 
@@ -111,7 +115,9 @@ class ObtainTests(unittest.TestCase):
         self.assertEqual(list(self.data.glob(".*.tmp")), [])
 
     def test_download_extract_manifest_and_repeat_cache(self):
-        with LocalServer({"/anime.csv": (200, self.csv), "/glove.6B.zip": (200, self.zip_bytes)}) as server:
+        with LocalServer(
+            {"/anime.csv": (200, self.csv), "/glove.6B.zip": (200, self.zip_bytes)}
+        ) as server:
             registry = self.registry(server)
             manifest = obtain(self.data, registry=registry)
             first = manifest.read_bytes()
@@ -127,7 +133,9 @@ class ObtainTests(unittest.TestCase):
             self.assert_no_temps()
 
     def test_offline_uses_archive_and_missing_fails_without_network(self):
-        with LocalServer({"/anime.csv": (200, self.csv), "/glove.6B.zip": (200, self.zip_bytes)}) as server:
+        with LocalServer(
+            {"/anime.csv": (200, self.csv), "/glove.6B.zip": (200, self.zip_bytes)}
+        ) as server:
             registry = self.registry(server)
             obtain(self.data, registry=registry)
             (self.data / "glove.6B.300d.txt").unlink()
@@ -140,7 +148,9 @@ class ObtainTests(unittest.TestCase):
             self.assertEqual(len(server.requests), 2)
 
     def test_existing_corruption_fails_and_invalidates_manifest(self):
-        with LocalServer({"/anime.csv": (200, self.csv), "/glove.6B.zip": (200, self.zip_bytes)}) as server:
+        with LocalServer(
+            {"/anime.csv": (200, self.csv), "/glove.6B.zip": (200, self.zip_bytes)}
+        ) as server:
             registry = self.registry(server)
             obtain(self.data, registry=registry)
             (self.data / "anime.csv").write_bytes(b"X" + self.csv[1:])
@@ -173,7 +183,9 @@ class ObtainTests(unittest.TestCase):
         )
         for zip_bytes, expected in cases:
             with self.subTest(expected=expected):
-                with LocalServer({"/anime.csv": (200, self.csv), "/glove.6B.zip": (200, zip_bytes)}) as server:
+                with LocalServer(
+                    {"/anime.csv": (200, self.csv), "/glove.6B.zip": (200, zip_bytes)}
+                ) as server:
                     registry = self.registry(server, zip_bytes=zip_bytes)
                     with self.assertRaisesRegex(SourceError, expected):
                         obtain(self.data, registry=registry)
@@ -188,7 +200,9 @@ class ObtainTests(unittest.TestCase):
         member.create_system = 3
         member.external_attr = (stat.S_IFDIR | 0o755) << 16
         zip_bytes = make_zip([(member, self.txt)])
-        with LocalServer({"/anime.csv": (200, self.csv), "/glove.6B.zip": (200, zip_bytes)}) as server:
+        with LocalServer(
+            {"/anime.csv": (200, self.csv), "/glove.6B.zip": (200, zip_bytes)}
+        ) as server:
             registry = self.registry(server, zip_bytes=zip_bytes)
             with self.assertRaisesRegex(SourceError, "unsafe or incorrect member"):
                 obtain(self.data, registry=registry)
@@ -207,8 +221,9 @@ class ObtainTests(unittest.TestCase):
         self.assertEqual(outside.read_bytes(), self.csv)
 
     def test_two_csv_cache_offline_and_fixture_digest_preserved(self):
-        with LocalServer({"/details.csv": (200, self.csv),
-                          "/ratings.csv": (200, self.txt)}) as server:
+        with LocalServer(
+            {"/details.csv": (200, self.csv), "/ratings.csv": (200, self.txt)}
+        ) as server:
             registry = self.two_csv_registry(server)
             digest = "a" * 64
             manifest = obtain(self.data, registry=registry, registry_sha256=digest)
@@ -216,26 +231,31 @@ class ObtainTests(unittest.TestCase):
             payload = json.loads(first)
             self.assertEqual(payload["registry_sha256"], digest)
             self.assertEqual(payload["provenance"], registry["provenance"])
-            self.assertEqual([entry["filename"] for entry in payload["verified"]],
-                             ["details.csv", "ratings.csv"])
+            self.assertEqual(
+                [entry["filename"] for entry in payload["verified"]], ["details.csv", "ratings.csv"]
+            )
             obtain(self.data, registry=registry, registry_sha256=digest, offline=True)
             self.assertEqual(manifest.read_bytes(), first)
             self.assertEqual(server.requests, ["/details.csv", "/ratings.csv"])
             self.assert_no_temps()
 
     def test_foreign_or_malformed_manifest_is_preserved_before_network(self):
-        with LocalServer({"/details.csv": (200, self.csv),
-                          "/ratings.csv": (200, self.txt)}) as server:
+        with LocalServer(
+            {"/details.csv": (200, self.csv), "/ratings.csv": (200, self.txt)}
+        ) as server:
             registry = self.two_csv_registry(server)
             self.data.mkdir()
             manifest = self.data / "source-manifest.json"
             unrelated = self.data / "unrelated.txt"
             unrelated.write_bytes(b"keep")
             good = {
-                "schema_version": 1, "registry_sha256": "b" * 64,
+                "schema_version": 1,
+                "registry_sha256": "b" * 64,
                 "provenance": registry["provenance"],
-                "verified": [{key: source[key] for key in ("filename", "size", "sha256")}
-                             for source in registry["sources"]],
+                "verified": [
+                    {key: source[key] for key in ("filename", "size", "sha256")}
+                    for source in registry["sources"]
+                ],
             }
             variants = (
                 b"{broken",
@@ -249,8 +269,12 @@ class ObtainTests(unittest.TestCase):
                     manifest.write_bytes(content)
                     for offline in (False, True):
                         with self.assertRaises(SourceError):
-                            obtain(self.data, registry=registry, registry_sha256="b" * 64,
-                                   offline=offline)
+                            obtain(
+                                self.data,
+                                registry=registry,
+                                registry_sha256="b" * 64,
+                                offline=offline,
+                            )
                         self.assertEqual(manifest.read_bytes(), content)
                         self.assertEqual(server.requests, [])
                         self.assertEqual(unrelated.read_bytes(), b"keep")
@@ -289,8 +313,10 @@ class ObtainTests(unittest.TestCase):
             "schema_version": 1,
             "registry_sha256": legacy_hash,
             "provenance": legacy["provenance"],
-            "verified": [{key: source[key] for key in ("filename", "size", "sha256")}
-                         for source in legacy["sources"]],
+            "verified": [
+                {key: source[key] for key in ("filename", "size", "sha256")}
+                for source in legacy["sources"]
+            ],
         }
         original = (json.dumps(foreign, indent=2, sort_keys=True) + "\n").encode()
         manifest.write_bytes(original)
@@ -298,28 +324,34 @@ class ObtainTests(unittest.TestCase):
             with self.assertRaisesRegex(SourceError, "separate --data-dir"):
                 obtain(self.data, snapshot="neelagiri-2025-v1", offline=offline)
             self.assertEqual(manifest.read_bytes(), original)
-        self.assertEqual(sorted(path.name for path in self.data.iterdir()),
-                         ["source-manifest.json"])
+        self.assertEqual(
+            sorted(path.name for path in self.data.iterdir()), ["source-manifest.json"]
+        )
 
     def test_download_failure_never_echoes_remote_credentials(self):
         with LocalServer({}) as server:
             registry = self.two_csv_registry(server)
             registry["sources"][0]["url"] = "https://user:synthetic-secret@example.invalid/path"
-            with patch("recsys.obtain.urllib.request.urlopen",
-                       side_effect=urllib.error.URLError("token=synthetic-secret")):
+            with patch(
+                "recsys.obtain.urllib.request.urlopen",
+                side_effect=urllib.error.URLError("token=synthetic-secret"),
+            ):
                 with self.assertRaises(SourceError) as caught:
                     obtain(self.data, registry=registry)
         self.assertNotIn("synthetic-secret", str(caught.exception))
         self.assertFalse((self.data / "source-manifest.json").exists())
 
     def test_two_csv_failure_and_interrupted_stream_leave_no_success(self):
-        for status, body, expected in ((200, b"X" + self.txt[1:], "invalid source"),
-                                       (200, self.txt[:-1], "invalid source"),
-                                       (200, self.txt + b"x", "oversized source"),
-                                       (503, b"error", "download failed")):
+        for status, body, expected in (
+            (200, b"X" + self.txt[1:], "invalid source"),
+            (200, self.txt[:-1], "invalid source"),
+            (200, self.txt + b"x", "oversized source"),
+            (503, b"error", "download failed"),
+        ):
             with self.subTest(status=status, body=body):
-                with LocalServer({"/details.csv": (200, self.csv),
-                                  "/ratings.csv": (status, body)}) as server:
+                with LocalServer(
+                    {"/details.csv": (200, self.csv), "/ratings.csv": (status, body)}
+                ) as server:
                     with self.assertRaisesRegex(SourceError, expected):
                         obtain(self.data, registry=self.two_csv_registry(server))
                     self.assertFalse((self.data / "ratings.csv").exists())
