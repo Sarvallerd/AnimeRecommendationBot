@@ -8,6 +8,8 @@ recsys release prepare --data-dir DATA
 recsys release prepare --release mal-2020-glove-v1 --data-dir DATA
 ```
 
+The [source layout migration](../docs/migrations/arb053-python-src-v1.md) moved package files to `src/recsys/` byte for byte, preserving package-relative producer names and the existing release lock. A new build still records its actual source revision.
+
 The current selector requires `DATA/datasets/sha256-BASE`, `DATA/aliases/sha256-ALIASES`, `DATA/raw/nafiul-2026-v1`, and `DATA/raw/glove-6b-300d-v1/glove.6B.300d.txt`. It validates the release and either reuses a checked immutable bundle or builds against the exact accepted Python 3.12.14, NumPy 2.5.3, package and five producer files. A different producer requires a new reference or the original fixed producer. The historical selector uses its own `DATA/raw/mal-2020-glove-v1` cache and legacy pipeline. Both print a verified path and `ARB_BUNDLE_DIR` suggestion; neither changes bot settings or PostgreSQL. A selected live bundle stays selected until a separate rollout.
 
 ARB-031 composes the accepted Neelagiri dataset with the accepted Nafiul title-alias artifact. A release binds both immutable upstream identities and contains only `catalog.json` and `release-manifest.json`. The overlay prepends stored alias texts in their existing order, removes exact duplicates, then retains the base aliases. Every other catalog field and every MAL_ID stays unchanged. This work does not import ratings or profiles into the bot database.

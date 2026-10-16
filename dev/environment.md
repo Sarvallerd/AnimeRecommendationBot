@@ -9,7 +9,7 @@ uv run --locked recsys validate tests/fixtures/bundle
 uv run --locked check_bundle tests/fixtures/bundle
 ```
 
-The `recsys` command is installed as a Python wheel script. The `bot` and `check_bundle` commands are compiled Rust binaries in the same `.venv/bin`. The package is editable by default, so Python source edits are visible immediately. uv checks watched Rust and package inputs before `uv run` or `uv sync` and rebuilds when they change. Running `.venv/bin/bot` or another installed command directly skips that check.
+The `recsys` command is installed as a Python wheel script. Its active sources are in [`src/recsys/`](../src/README.md); tests, guides and reports remain in `recsys/`. The `bot` and `check_bundle` commands are compiled Rust binaries in the same `.venv/bin`. The package is editable by default, so Python source edits are visible immediately. uv checks watched Rust and package inputs before `uv run` or `uv sync` and rebuilds when they change. Running `.venv/bin/bot` or another installed command directly skips that check.
 
 For the optional quality dependencies, include the extra on both sync and later runs:
 
@@ -19,7 +19,7 @@ uv run --locked --extra quality recsys quality --help
 uv run --locked --extra quality python -m unittest discover -s recsys/tests -p 'test_*.py' -v
 ```
 
-To install an ordinary wheel instead of editable sources, use `uv sync --locked --no-editable --extra quality`. Both modes install all three commands and packaged Python resources.
+To install an ordinary wheel instead of editable sources, use `uv sync --locked --no-editable --extra quality`. Both modes install all three commands and packaged Python resources. The [layout migration](../docs/migrations/arb053-python-src-v1.md) records the source move and historical recovery. The environment checker compares every installed `.py`, `.json` and `.md` package file to the source tree in both modes and tests wheel rebuild and restore after a temporary Python edit.
 
 The bot reads its configuration from environment variables. It never loads `.env` on its own. Keep local secrets in an existing `.env` and opt in explicitly when using uv:
 
@@ -47,4 +47,4 @@ uv sync --locked --reinstall-package anime-recommendation-recsys
 uv sync --locked --extra quality --reinstall-package anime-recommendation-recsys
 ```
 
-Run `python3 dev/tests/check_environment.py` to verify a fresh copy without reading local secrets or data. It builds in a temporary directory and uses only the small synthetic bundle fixture.
+Run `python3 dev/tests/check_environment.py` to verify a fresh copy without reading local secrets or data. It builds in a temporary directory and uses only the small synthetic bundle fixture. By default it uses a disposable uv cache. For an offline local run, set `ARB_DEV_UV_CACHE_DIR` to the absolute path of an existing cache with the pinned dependency and build artifacts, and set `UV_OFFLINE=1` explicitly. uv may read and write that cache; the source copy, virtual environment and Cargo target stay disposable, and every check still runs. Such a run does not verify a cold network download or alter the existing scientific environment and lock.

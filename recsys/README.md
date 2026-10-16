@@ -2,6 +2,8 @@
 
 This Python package prepares recommendation inputs offline for the Rust bot. It can acquire the pinned MAL 2020 CSV files and GloVe 6B 300-dimensional vectors. Normalization of the MAL CSV files, pinned GloVe cosine neighbor building, and a diagnostic genre baseline are included. Immutable bundle export and the fixed 20-query quality comparison are complete. The [ARB-018 report](reports/arb018-v1/README.md) documents methods, ratings, timings, and limits.
 
+Active package sources are in [`src/recsys/`](../src/README.md); this directory holds guides, tests and historical reports. To reproduce the historical ARB-018 comparison, use the separate Git checkout and pinned environment in the [layout migration guide](../docs/migrations/arb053-python-src-v1.md).
+
 Requires Python 3.12, Rust 1.95.0, a C compiler, pkg-config, and OpenSSL development headers. From the repository root, install the locked environment with:
 
 ```sh

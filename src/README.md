@@ -1,3 +1,5 @@
-# Archived original Python bot
+# Основной Python-пакет
 
-The files under `src/` are the project's original Python Telegram runtime and recommendation experiments. They are retained as provenance for the repaired legacy comparator in [`recsys/reports/arb018-v1/`](../recsys/reports/arb018-v1/README.md). They are not the v1 runtime and should not be used to start the bot. The active bot is in [`bot/`](../bot/docs/build.md), with recommendations prepared by [`recsys/`](../recsys/README.md). Keep original bytes intact for reproducible source hashes.
+`src/recsys/` содержит активный пакет для офлайн-подготовки выпуска и исследований. Его импортное имя — `recsys`; [руководства, тесты и исторические отчёты](../recsys/README.md) остаются в `recsys/`. [Границы модулей](../docs/python-boundaries.md) проверяются статически, а [выпуск](../recsys/RELEASE.md) и [исследования](../recsys/RESEARCH.md) имеют отдельные контракты.
+
+Работающий Telegram-бот написан на Rust и находится в [`bot/`](../bot/docs/build.md). Старый Python-бот удалён из текущего дерева; [миграция `arb053-python-src-v1`](../docs/migrations/arb053-python-src-v1.md) указывает ревизию Git для исторического воспроизведения.

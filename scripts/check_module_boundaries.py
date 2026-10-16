@@ -303,7 +303,7 @@ def check_repository(root: Path, stats: dict[str, int] | None = None) -> list[st
         if not root.is_absolute():
             raise PolicyError("root must be absolute")
         policy, owners = _policy(root / "scripts/module_boundaries.json")
-        inventory = _inventory(root / "recsys/src/recsys")
+        inventory = _inventory(root / "src/recsys")
     except (OSError, ValueError, PolicyError) as exc:
         return [f"config_invalid: {exc}"]
     if stats is not None:

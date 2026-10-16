@@ -138,7 +138,7 @@ def load_profile(release_id: str, *, _profile_bytes: bytes | None = None,
     need(expected['release_lock_resource'] == LOCK_RESOURCE and
          type(expected['release_lock_sha256']) is str and
          HEX.fullmatch(expected['release_lock_sha256']) is not None, 'INVALID_PROFILE')
-    lock_raw = _lock_bytes if _lock_bytes is not None else regular_bytes(ROOT / 'recsys/src/recsys' / LOCK_RESOURCE)
+    lock_raw = _lock_bytes if _lock_bytes is not None else regular_bytes(ROOT / 'src/recsys' / LOCK_RESOURCE)
     if _lock_bytes is None:
         need(digest(lock_raw) == TRUSTED_LOCK_SHA, 'LOCK_SHA_MISMATCH')
     need(digest(lock_raw) == expected['release_lock_sha256'], 'LOCK_SHA_MISMATCH')
@@ -170,7 +170,7 @@ def load_profile(release_id: str, *, _profile_bytes: bytes | None = None,
 
 
 def _bundle_module():
-    path = ROOT / 'recsys/src/recsys/bundle.py'
+    path = ROOT / 'src/recsys/bundle.py'
     spec = importlib.util.spec_from_file_location('arb_acceptance_bundle_contract', path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

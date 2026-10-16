@@ -16,9 +16,9 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[2]
 LOCKS = ("uv.lock", "Cargo.lock")
 OBSOLETE = ("recsys/pyproject.toml", "recsys/uv.lock", "bot/pyproject.toml",
-            "bot/Cargo.toml", "bot/Cargo.lock")
-RESOURCES = ("source_registry.json", "quality_queries_v1.json", "assessment_prompt_v1.md")
+            "bot/Cargo.toml", "bot/Cargo.lock", "recsys/src", "src/app", "src/config")
 MARKER = "arb-021-rebuilt"
+PYTHON_MARKER = "arb053-rebuilt"
 
 
 def digest(path: Path) -> str:
@@ -28,13 +28,14 @@ def digest(path: Path) -> str:
 def copy_source(destination: Path) -> None:
     files = ("pyproject.toml", "uv.lock", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml",
              "packaging/scripts/recsys", "recsys/README.md", "contracts/check_bundle.py")
-    trees = ("recsys/src", "bot/src", "bot/migrations", "bot/tests", "tests/fixtures/bundle")
+    trees = ("src/recsys", "bot/src", "bot/migrations", "bot/tests", "tests/fixtures/bundle")
     for name in files:
         target = destination / name
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ROOT / name, target)
     for name in trees:
-        shutil.copytree(ROOT / name, destination / name)
+        shutil.copytree(ROOT / name, destination / name,
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"))
 
 
 def run(command: list[str], cwd: Path, env: dict[str, str], *, timeout: int = 600) -> str:
@@ -53,6 +54,7 @@ def uv(root: Path, env: dict[str, str], *args: str, timeout: int = 600) -> str:
 def assert_manifest(root: Path, env: dict[str, str]) -> None:
     assert all((root / name).is_file() for name in ("pyproject.toml", "uv.lock", "Cargo.toml", "Cargo.lock"))
     assert all(not (root / name).exists() for name in OBSOLETE), OBSOLETE
+    assert (root / "src/recsys/__init__.py").is_file()
     metadata = json.loads(run(["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"], root, env))
     packages = metadata["packages"]
     assert len(packages) == 1 and packages[0]["name"] == "bot", packages
@@ -87,11 +89,22 @@ for name in ('recsys', 'bot', 'check_bundle'):
     assert command is not None and Path(command).resolve().parent == scripts, command
 installed = Path(recsys.__file__).resolve()
 if EDITABLE:
-    assert installed.is_relative_to(root / 'recsys' / 'src'), installed
+    assert installed == root / 'src/recsys/__init__.py', installed
 else:
-    assert installed.is_relative_to(venv), installed
-for name in ('source_registry.json', 'quality_queries_v1.json', 'assessment_prompt_v1.md'):
-    assert resources.files('recsys').joinpath(name).read_bytes() == (root / 'recsys/src/recsys' / name).read_bytes(), name
+    assert installed.is_relative_to(venv) and not installed.is_relative_to(root / 'src'), installed
+source = root / 'src/recsys'
+package = resources.files('recsys')
+suffixes = {'.py', '.json', '.md'}
+def payloads(base):
+    return {path.relative_to(base).as_posix(): path.read_bytes()
+            for path in base.rglob('*') if path.is_file() and path.suffix in suffixes}
+source_payload = payloads(source)
+installed_payload = payloads(package)
+assert source_payload and source_payload == installed_payload, (
+    set(source_payload) - set(installed_payload),
+    set(installed_payload) - set(source_payload),
+    [name for name in source_payload.keys() & installed_payload.keys()
+     if source_payload[name] != installed_payload[name]])
 assert metadata.version('anime-recommendation-recsys') == '0.1.0'
 files = [str(path) for path in metadata.distribution('anime-recommendation-recsys').files]
 for name in ('recsys', 'bot', 'check_bundle'):
@@ -138,6 +151,26 @@ def assert_direct_script(root: Path, base: Path, env: dict[str, str], expected: 
                base, outside_env, timeout=20) == expected
 
 
+def assert_python_cache_rebuild(root: Path, env: dict[str, str]) -> None:
+    source = root / "src/recsys/__init__.py"
+    original = source.read_bytes()
+    marker = f"\nARB_LAYOUT_CACHE_MARKER = {PYTHON_MARKER!r}\n".encode()
+    command = ("run", "--locked", "--no-editable", "--extra", "quality",
+               "python", "-I", "-c")
+    script = ("import recsys; from pathlib import Path; "
+              "assert Path(recsys.__file__).resolve().is_relative_to(Path.cwd().resolve() / '.venv'); "
+              "assert getattr(recsys, 'ARB_LAYOUT_CACHE_MARKER', None) == " + repr(PYTHON_MARKER))
+    try:
+        source.write_bytes(original + marker)
+        uv(root, env, *command, script)
+        assert_install(root, env, editable=False, extra=True)
+    finally:
+        source.write_bytes(original)
+    uv(root, env, *command,
+       "import recsys; assert not hasattr(recsys, 'ARB_LAYOUT_CACHE_MARKER')")
+    assert_install(root, env, editable=False, extra=True)
+
+
 def main() -> None:
     assert sys.version_info[:2] == (3, 12), "Python 3.12 is required"
     before = {name: digest(ROOT / name) for name in LOCKS}
@@ -151,7 +184,9 @@ def main() -> None:
                      "UV_ENV_FILE", "TELOXIDE_TOKEN", "DATABASE_URL", "ARTIFACTS_DIR",
                      "RUST_LOG", "ARB_TEST_DATABASE_URL"):
             env.pop(name, None)
-        env["UV_CACHE_DIR"] = str(base / "uv-cache")
+        # A local run can reuse an existing pinned download cache when PyPI is unavailable.
+        # CI keeps the disposable cache unless explicitly configured otherwise.
+        env["UV_CACHE_DIR"] = os.environ.get("ARB_DEV_UV_CACHE_DIR") or str(base / "uv-cache")
         env["CARGO_TARGET_DIR"] = str(base / "cargo-target")
         assert_manifest(root, env)
         uv(root, env, "sync", "--locked")
@@ -195,6 +230,7 @@ def main() -> None:
         assert_install(root, env, editable=False, extra=True)
         assert_direct_script(root, base, env, expected)
         assert check_fixture(root, env, extra=True, no_editable=True) == expected
+        assert_python_cache_rebuild(root, env)
         assert {name: digest(root / name) for name in LOCKS} == before
     assert {name: digest(ROOT / name) for name in LOCKS} == before
     print("Root environment: commands, resources, fixture, config, rebuild/restore, quality, wheel, locks OK")

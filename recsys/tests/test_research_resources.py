@@ -699,7 +699,7 @@ class ResourceSupervisorTests(unittest.TestCase):
             # A second active owner is rejected without changing the original.
             with self.assertRaisesRegex(ResearchError, "research_resources_invalid"):
                 supervisor.result(resources.JobHandle(b"foreign", 1))
-        source = str(Path(__file__).parents[1] / "src")
+        source = str(Path(__file__).resolve().parents[2] / "src")
         code = ("import os,sys; sys.path.insert(0," + repr(source) + "); "
                 "from recsys.research_resources import ResourceSupervisor; "
                 "from recsys.research_protocol import ResearchError; "
@@ -713,7 +713,7 @@ class ResourceSupervisorTests(unittest.TestCase):
                                         capture_output=True, check=False).returncode, 0)
 
     def test_no_import_side_effects(self):
-        source = str(Path(__file__).parents[1] / "src")
+        source = str(Path(__file__).resolve().parents[2] / "src")
         code = ("import sys,signal,ctypes,os; sys.path.insert(0," + repr(source) + "); "
                 "libc=ctypes.CDLL(None); before=ctypes.c_int(); libc.prctl(37,ctypes.byref(before),0,0,0); "
                 "handler=signal.getsignal(signal.SIGCHLD); import recsys.research_resources; "

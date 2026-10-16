@@ -20,7 +20,7 @@ data = ["dvc==3.67.1"]
 [tool.maturin]
 bindings = "bin"
 manifest-path = "Cargo.toml"
-python-source = "recsys/src"
+python-source = "src"
 module-name = "recsys"
 data = "packaging"
 targets = [{ name = "bot", kind = "bin" }, { name = "check_bundle", kind = "bin" }]
@@ -37,8 +37,8 @@ cache-keys = [
   { file = "packaging/scripts/recsys" },
   { file = "rust-toolchain.toml" }, { file = "rust-toolchain" }, { file = "build.rs" },
   { file = ".cargo/config*" }, { file = "bot/src/**/*.rs" }, { file = "bot/migrations/**/*.sql" },
-  { file = "recsys/src/recsys/**/*.py" }, { file = "recsys/src/recsys/**/*.json" },
-  { file = "recsys/src/recsys/**/*.md" }, { file = "recsys/README.md" },
+  { file = "src/recsys/**/*.py" }, { file = "src/recsys/**/*.json" },
+  { file = "src/recsys/**/*.md" }, { file = "recsys/README.md" },
   { env = "RUSTUP_TOOLCHAIN" }, { env = "RUSTFLAGS" }, { env = "CARGO_ENCODED_RUSTFLAGS" },
   { env = "CARGO_BUILD_TARGET" }, { env = "MATURIN_PEP517_ARGS" }, { env = "OPENSSL_DIR" },
   { env = "OPENSSL_LIB_DIR" }, { env = "OPENSSL_INCLUDE_DIR" }, { env = "OPENSSL_STATIC" },

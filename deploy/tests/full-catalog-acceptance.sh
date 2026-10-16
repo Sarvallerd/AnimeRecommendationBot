@@ -138,7 +138,7 @@ spec = importlib.util.spec_from_file_location('checker', root/'contracts/check_b
 checker = importlib.util.module_from_spec(spec); spec.loader.exec_module(checker)
 h = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
 source = json.loads((data/'raw/source-manifest.json').read_bytes())
-registry = root/'recsys/src/recsys/source_registry.json'
+registry = root/'src/recsys/source_registry.json'
 if not (source['registry_sha256'] == h(registry)):
     raise SystemExit('ARTIFACT_PROVENANCE')
 if not (all((data/'raw'/item['filename']).stat().st_size == item['size'] and
@@ -303,7 +303,7 @@ report={'schema_version':1,'project':str(project),'source_manifest_sha256':h(dat
                        (pathlib.Path('deploy/tests/full-catalog-acceptance.sh'),
                         pathlib.Path('deploy/tests/acceptance-evidence.py'),
                         pathlib.Path('contracts/check_bundle.py'))},
-        'registry_sha256':h(repo/'recsys/src/recsys/source_registry.json'),
+        'registry_sha256':h(repo/'src/recsys/source_registry.json'),
         'compose_sha256':h(repo/'compose.yaml'),'settings_sha256':h(settings),
         'normalization_report_sha256':h(folder/'normalization-report.json'),
         'database_volume':volume,'prepare_snapshots_sha256':[h(p) for p in shots],
