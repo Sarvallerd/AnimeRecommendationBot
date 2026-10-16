@@ -393,6 +393,8 @@ def validate_campaign(
             _fail("research_campaign_chain_invalid")
     projection = _public_projection(root, plan, successes, prepared_dir)
     report_value, report_raw = _read_private(root / "campaign-report.json")
+    if type(report_value) is not dict:
+        _fail("research_campaign_report_invalid")
     report = cast("dict[str, object]", report_value)
     manifest, _ = _read_private(root / "campaign-report-manifest.json")
     expected_fields = {

@@ -874,6 +874,48 @@ class CampaignTests(unittest.TestCase):
             self.assertTrue(all(event["status"] == "failed" for event in finishes))
             self.assertTrue(all(event["charged_seconds"] == 0.3 for event in finishes))
 
+    def test_canonical_list_campaign_report_has_fixed_error_with_matching_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = ModelFixture(temporary)
+            glove = Path(temporary) / "glove.txt"
+            fixture.lock["inputs"]["embeddings"] = _glove(glove)
+            prepared, identity = fixture.make_prepared()
+            output = Path(temporary) / "campaign"
+            with (
+                patch_release_info(fixture.lock),
+                patch("recsys.research.resources.ResourceSupervisor", _Supervisor),
+            ):
+                manifest_path = run_campaign(
+                    prepared,
+                    output,
+                    expected_prepared_identity=identity,
+                    code_revision="a" * 40,
+                    glove=glove,
+                    backend="cpu",
+                    cpu_workers=2,
+                )
+                plan_identity = _manifest(manifest_path)["plan_identity"]
+                self.assertEqual(
+                    _report(prepared, output, identity, plan_identity)["status"], "complete"
+                )
+
+                malformed = _canonical([])
+                (output / "campaign-report.json").write_bytes(malformed)
+                report_manifest = output / "campaign-report-manifest.json"
+                bound = _object(report_manifest)
+                bound["report"] = {
+                    "bytes": len(malformed),
+                    "sha256": hashlib.sha256(malformed).hexdigest(),
+                }
+                report_manifest.write_bytes(_canonical(bound))
+                with self.assertRaisesRegex(ResearchError, "research_campaign_report_invalid"):
+                    validate_campaign(
+                        prepared,
+                        output,
+                        expected_prepared_identity=identity,
+                        expected_campaign_identity=plan_identity,
+                    )
+
     def test_seven_real_variants_replay_public_suppression_and_resume_binding(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             fixture = ModelFixture(temporary)
