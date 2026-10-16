@@ -5,6 +5,12 @@ from collections.abc import Sequence
 
 from recsys.cli.parser import build_parser
 
+REFERENCE_RECOVERY = (
+    "Recover accepted v1 with Python 3.12.14 from pinned Git checkout "
+    "1441573fbbbffc4693c7e1100aaae4458d9e88d4; follow root README.md "
+    "and https://app.notion.com/p/3fb3908d6b1f8136a1dfff3c4a12108e."
+)
+
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the CLI and return its status code."""
@@ -220,6 +226,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 else "release_integrity_error"
             )
             print(f"recsys release: {code}", file=sys.stderr)
+            if code == "release_reference_producer_required":
+                print(REFERENCE_RECOVERY, file=sys.stderr)
             return 1
     elif parsed.command == "research":
         from pathlib import Path

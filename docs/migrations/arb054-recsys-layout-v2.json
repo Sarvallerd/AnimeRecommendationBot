@@ -1,7 +1,80 @@
 {
-  "baseline_commit": "b385bfae9ad128f257784aec61e541296b648e31",
+  "artifact_versions": {
+    "alias_manifest": {
+      "legacy_normalizer_version": "1",
+      "new_normalizer_version": "2",
+      "schema_version": 1
+    },
+    "catalog_release_manifest": {
+      "legacy_normalizer_version": "1",
+      "new_normalizer_version": "2",
+      "schema_version": 1
+    },
+    "composite_build_report": {
+      "legacy_schema_version": 2,
+      "new_builder_version": "arb031-v2",
+      "new_schema_version": 3
+    },
+    "dataset_manifest": {
+      "legacy_normalizer_version": "1",
+      "new_normalizer_version": "2",
+      "schema_version": 1
+    },
+    "historical_comparison": {
+      "legacy_handling": "original-checkout-only",
+      "new_schema_version": 2
+    },
+    "mal_build_report": {
+      "legacy_handling": "original-checkout-only",
+      "new_schema_version": 2
+    },
+    "named_release_lock": {
+      "accepted_schema_version": 1,
+      "new_schema_authority": "tiny-fixture-only",
+      "new_schema_version": 2
+    },
+    "predictions_and_evaluation": {
+      "policy": "existing-payload-schema-bound-to-preparation-model-plan-identities"
+    },
+    "research_campaign_plan": {
+      "legacy_handling": "reject-before-workers",
+      "legacy_schema_version": 1,
+      "new_schema_version": 2
+    },
+    "research_model": {
+      "legacy_handling": "reject-before-payloads",
+      "legacy_schema_version": 1,
+      "new_schema_version": 2
+    },
+    "research_preparation": {
+      "legacy_handling": "reject-before-streams",
+      "legacy_schema_version": 1,
+      "new_schema_version": 2
+    },
+    "runtime_bundle": {
+      "algorithm_version": "arb009-v1",
+      "legacy_schema_version": 1,
+      "new_schema_version": 1
+    }
+  },
+  "baseline_commit": "1441573fbbbffc4693c7e1100aaae4458d9e88d4",
+  "canonical_notion_url": "https://app.notion.com/p/3fb3908d6b1f8136a1dfff3c4a12108e",
+  "current_release_authority": {
+    "catalog_release_identity": "sha256:8da879636b476ffc9d72bf3a08447b778ef047232fc02cd69b1ed0ca02168b5c",
+    "lock_schema_version": 1,
+    "named_lock_path": "src/recsys/resources/releases/release_neelagiri_2025_nafiul_2026_v1.json",
+    "named_lock_sha256": "46f3ffd60239675b802026025016ee6719cb0525325e088fbfa248012db3de9b",
+    "new_layout_full_catalog_accepted": false,
+    "reference_bundle_identity": "sha256:77d171f9ee8c30f606957afb7037276a66a543582491344661638d486d94f728",
+    "reference_producer_package_version": "0.1.0",
+    "reference_producer_source_commit": "15d17a3e344a91b57536dad672f1698c3854c166",
+    "release_id": "neelagiri-2025-nafiul-2026-v1",
+    "runtime_bundle_schema_version": 1,
+    "selector": "current"
+  },
   "full_catalog_accepted_under_new_layout": false,
-  "kind": "arb054-recsys-layout-migration",
+  "historical_comparator_recovery_commit": "04588dcba21898210918f44999fbccf0068b468f",
+  "kind": "arb-python-package-migration",
   "layout": "arb054-recsys-layout-v2",
   "legacy_policy": {
     "cached_v1_reuse": true,
@@ -22,16 +95,7 @@
     "release.py": "de185c16eafb884680de7e602691c28d6fc69f69ebcd995eae377710c3d61351",
     "release_build.py": "ca87a079e5f45a25e131613d514d627e07e2025f1c12d002edf7149212447385"
   },
-  "manifest_versions": {
-    "alias_normalizer": "2",
-    "catalog_release_normalizer": "2",
-    "composite_release_build_report": 3,
-    "dataset_normalizer": "2",
-    "release_build_report": 2,
-    "research_campaign_plan": 2,
-    "research_model": 2,
-    "research_preparation": 2
-  },
+  "migration_id": "arb054-recsys-layout-v2",
   "module_moves": {
     "src/recsys/aliases.py": "src/recsys/data/aliases.py",
     "src/recsys/assessment.py": "src/recsys/historical/assessment.py",
@@ -89,6 +153,7 @@
   "old_producer_python_full_release": "3.12.14",
   "old_producer_python_tiny_fixture": "3.12.3",
   "old_producer_source_commit": "1441573fbbbffc4693c7e1100aaae4458d9e88d4",
+  "original_producer_recovery_commit": "1441573fbbbffc4693c7e1100aaae4458d9e88d4",
   "package_version_from": "0.1.0",
   "package_version_to": "0.2.0",
   "resource_moves": [
@@ -159,6 +224,11 @@
       "to": "src/recsys/resources/registries/source_registry_neelagiri_2025_v1.json"
     }
   ],
+  "resource_resolution": {
+    "content_policy": "all eleven moved resource byte strings are unchanged",
+    "logical_ids": "contracts/resources.py defines finite names for callers",
+    "physical_paths": "resource_moves records actual package-relative nested locations"
+  },
   "schema_version": 1,
   "source_inventory": [
     "__init__.py",
@@ -235,5 +305,8 @@
     "resources/registries/source_registry_neelagiri_2025_v1.json",
     "resources/releases/release_neelagiri_2025_nafiul_2026_v1.json"
   ],
-  "task_id": "ARB-054"
+  "source_layout_baseline_commit": "1441573fbbbffc4693c7e1100aaae4458d9e88d4",
+  "task_baseline_commit": "b385bfae9ad128f257784aec61e541296b648e31",
+  "task_id": "ARB-054",
+  "task_notion_url": "https://app.notion.com/p/3fb3908d6b1f81acade0cc2247d1980a"
 }

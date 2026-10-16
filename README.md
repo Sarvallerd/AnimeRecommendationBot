@@ -76,7 +76,24 @@ ARB_BOT_ENV=/absolute/path/to/.arb/local/secrets/bot.env
 ARB_POSTGRES_ENV=/absolute/path/to/.arb/local/secrets/postgres.env
 ```
 
-До первого экспорта `ARB_BUNDLE_DIR` может указывать на будущий путь; бот запускается только после выбора созданного пакета. Создайте `data/raw` от имени `ARB_UID` и выполните:
+До первого экспорта `ARB_BUNDLE_DIR` может указывать на будущий путь; бот запускается только после выбора созданного пакета.
+
+**Перед первой подготовкой нового `current` восстановите принятый пакет v1 из исходного производителя.** Версия 0.2 проверяет и повторно использует его артефакты, но не создаёт выпуск с прежними хешами версии 0.1. Сначала разместите проверенные Neelagiri base и Nafiul aliases, исходный кэш Nafiul и текст GloVe в одном приватном каталоге. В командах замените `/private/DATA` на абсолютный `ARB_DATA_DIR` из `compose.env` (`$LOCAL/data` в примере выше) согласно [контракту данных и выпуска в Notion](https://app.notion.com/p/3fb3908d6b1f8136a1dfff3c4a12108e). Из корня чистой рабочей копии создайте отдельный checkout исходного коммита и проверьте его SHA:
+
+```bash
+git worktree add --detach /private/arb-reference-v1 1441573fbbbffc4693c7e1100aaae4458d9e88d4
+cd /private/arb-reference-v1
+test "$(git rev-parse HEAD)" = 1441573fbbbffc4693c7e1100aaae4458d9e88d4
+test -z "$(git status --porcelain)"
+uv sync --python 3.12.14 --locked --no-editable --extra quality
+test "$(uv run --python 3.12.14 --locked --no-editable --extra quality recsys --version)" = "recsys 0.1.0"
+uv run --python 3.12.14 --locked --no-editable --extra quality recsys release prepare --release current --data-dir /private/DATA
+cd "$ROOT"
+```
+
+Если Python 3.12.14 ещё не установлен для `uv`, сначала выполните `uv python install 3.12.14`. Используйте именно проверенные входные байты и исходный lock; не переписывайте manifest и producer-хеши. После подготовки вернитесь в checkout версии 0.2, укажите тот же каталог данных и проверьте сохранённые `catalog release` и `bundle` перед выбором пакета для бота. При отсутствии старого производителя текущая команда выдаёт `release_reference_producer_required` до записи. Это восстановление не является новой приёмкой полного каталога; полную приёмку v1 запускают из закреплённого checkout, а проверка старых свидетельств в текущем дереве остаётся доступной.
+
+Создайте `data/raw` от имени `ARB_UID` и выполните:
 
 ```bash
 compose() { docker compose --env-file "$SETTINGS" -p "$PROJECT" -f "$COMPOSE_FILE" "$@"; }
@@ -84,8 +101,6 @@ compose --profile tools build builder bot
 compose --profile tools run --rm --no-deps builder obtain --snapshot nafiul-2026-v1 --data-dir /data/raw/nafiul-2026-v1
 compose --profile tools run --rm --no-deps --entrypoint /usr/local/bin/prepare-artifacts builder
 ```
-
-**Перед первой подготовкой нового `current` восстановите принятый пакет v1 в отдельной закреплённой рабочей копии.** Источники 0.2 умеют проверять и повторно использовать его исходные артефакты, но не могут честно пересоздать выпуск с хешами производителя 0.1. Выполните подготовку на том же приватном каталоге данных из Git checkout `1441573fbbbffc4693c7e1100aaae4458d9e88d4` с Python 3.12.14 и исходным lock; подробный порядок входов — в [руководстве выпуска](recsys/RELEASE.md). Не переписывайте lock, manifest или producer-хеши. В новом checkout сначала проверьте сохранённый `catalog release` и `bundle`, затем выполняйте приведённые ниже команды Compose. Если старого пакета нет, команда подготовки 0.2 завершится `release_reference_producer_required` до записи. Отдельная полная приёмка v1 также запускается из закреплённого checkout; в текущем дереве её режим проверки сохранённых свидетельств остаётся доступен.
 
 Последняя команда запускает `recsys release prepare --release current --data-dir /data`. До запуска разместите проверенные immutable base и aliases в `/data/datasets/sha256-...` и `/data/aliases/sha256-...`, кэш Nafiul в `/data/raw/nafiul-2026-v1`, текст GloVe в `/data/raw/glove-6b-300d-v1`. Команда работает offline, проверяет lock и печатает путь проверенного пакета и подсказку `ARB_BUNDLE_DIR`. Выбор работающего пакета в `compose.env` остаётся отдельным шагом.
 

@@ -66,7 +66,13 @@ class CliTests(unittest.TestCase):
                     "release", "prepare", "--data-dir", "missing", console=console
                 )
                 self.assertEqual(missing.returncode, 1)
-                self.assertIn("release_reference_producer_required", missing.stderr)
+                self.assertEqual(
+                    missing.stderr,
+                    "recsys release: release_reference_producer_required\n"
+                    "Recover accepted v1 with Python 3.12.14 from pinned Git checkout "
+                    "1441573fbbbffc4693c7e1100aaae4458d9e88d4; follow root README.md "
+                    "and https://app.notion.com/p/3fb3908d6b1f8136a1dfff3c4a12108e.\n",
+                )
                 self.assertNotIn("Traceback", missing.stderr)
 
     def test_version_matches_installed_distribution(self) -> None:

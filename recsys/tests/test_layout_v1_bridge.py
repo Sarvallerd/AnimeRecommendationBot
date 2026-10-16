@@ -20,6 +20,29 @@ FROZEN = Path(__file__).with_name("fixtures") / "layout_v1"
 
 
 class LegacyLayoutBridgeTests(unittest.TestCase):
+    def test_frozen_fixture_inventory_is_complete(self) -> None:
+        inventory = json.loads((FROZEN / "inventory.json").read_bytes())
+        self.assertEqual(inventory["schema_version"], 1)
+        self.assertEqual(inventory["kind"], "arb054-v1-tiny-payload-inventory")
+        self.assertEqual(set(inventory), {"schema_version", "kind", "files"})
+        declared = inventory["files"]
+        actual = {
+            path.relative_to(FROZEN).as_posix(): path
+            for path in FROZEN.rglob("*")
+            if path.is_file()
+            and path.relative_to(FROZEN).as_posix()
+            not in {"inventory.json", "generator-receipt.json"}
+        }
+        self.assertEqual(len(declared), 27)
+        self.assertEqual(sum(path.is_file() for path in FROZEN.rglob("*")), 29)
+        self.assertEqual(set(actual), set(declared))
+        for name, path in actual.items():
+            with self.subTest(name=name):
+                raw = path.read_bytes()
+                self.assertEqual(set(declared[name]), {"bytes", "sha256"})
+                self.assertEqual(len(raw), declared[name]["bytes"])
+                self.assertEqual(hashlib.sha256(raw).hexdigest(), declared[name]["sha256"])
+
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)

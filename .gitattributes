@@ -1,0 +1,3 @@
+recsys/tests/fixtures/layout_v1/data/raw/nafiul-2026-v1/anime_info.csv -text whitespace=cr-at-eol
+recsys/tests/fixtures/layout_v1/source-cache/neelagiri-2025-v1/details.csv -text whitespace=cr-at-eol
+recsys/tests/fixtures/layout_v1/source-cache/neelagiri-2025-v1/ratings.csv -text whitespace=cr-at-eol
