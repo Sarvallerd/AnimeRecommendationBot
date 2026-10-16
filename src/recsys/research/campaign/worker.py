@@ -53,6 +53,50 @@ class WorkerRequest(TypedDict):
     output_dir: str
 
 
+def _validated_worker_request(value: object) -> WorkerRequest:
+    wanted = {
+        "schema_version",
+        "kind",
+        "root",
+        "plan_identity",
+        "generation",
+        "variant",
+        "phase",
+        "attempt",
+        "prepared_dir",
+        "glove",
+        "model_dir",
+        "prediction_dir",
+        "content_model",
+        "svd_model",
+        "output_dir",
+    }
+    if type(value) is not dict or set(value) != wanted:
+        _fail()
+    raw = cast("dict[str, object]", value)
+    if type(raw["schema_version"]) is not int or type(raw["attempt"]) is not int:
+        _fail()
+    string_fields = (
+        "kind",
+        "root",
+        "plan_identity",
+        "generation",
+        "variant",
+        "phase",
+        "prepared_dir",
+        "glove",
+        "output_dir",
+    )
+    if any(type(raw[field]) is not str for field in string_fields):
+        _fail()
+    optional_path_fields = ("model_dir", "prediction_dir", "content_model", "svd_model")
+    if any(
+        raw[field] is not None and type(raw[field]) is not str for field in optional_path_fields
+    ):
+        _fail()
+    return cast("WorkerRequest", raw)
+
+
 def _required_path(value: str | None) -> Path:
     if value is None:
         _fail("research_campaign_request_invalid")
@@ -96,32 +140,12 @@ def _worker_request(
 def _worker_main(request_path: Path) -> int:
     """A closed phase dispatcher; acquire the shared generation lock first."""
     request_value, _ = _read_private(request_path, limit=16 * 1024)
-    wanted = {
-        "schema_version",
-        "kind",
-        "root",
-        "plan_identity",
-        "generation",
-        "variant",
-        "phase",
-        "attempt",
-        "prepared_dir",
-        "glove",
-        "model_dir",
-        "prediction_dir",
-        "content_model",
-        "svd_model",
-        "output_dir",
-    }
-    if type(request_value) is not dict or set(request_value) != wanted:
-        _fail()
-    request = cast("WorkerRequest", request_value)
+    request = _validated_worker_request(request_value)
     if (
         request["schema_version"] != 1
         or request["kind"] != "arb-ml02-campaign-worker"
         or request["variant"] not in VARIANTS
         or request["phase"] not in (*PHASES, AUX_PHASE)
-        or type(request["attempt"]) is not int
         or request["attempt"] < 1
     ):
         _fail()
@@ -147,16 +171,17 @@ def _worker_main(request_path: Path) -> int:
         plan_value, raw = _read_private(root / "campaign-plan.json")
         if type(plan_value) is not dict:
             _fail("research_campaign_generation_stale")
-        plan = cast("CampaignPlan", plan_value)
         if (
             generation != {"generation": request["generation"]}
             or _digest(raw) != request["plan_identity"]
-            or plan["variants"][VARIANTS.index(request["variant"])]["variant_id"]
-            != request["variant"]
-            or (request["variant"], request["phase"]) not in _expected_nodes(plan)
         ):
             _fail("research_campaign_generation_stale")
-        configured = _validate_plan_structure(plan)
+        configured = _validate_plan_structure(plan_value)
+        plan = cast("CampaignPlan", plan_value)
+        if plan["variants"][VARIANTS.index(request["variant"])]["variant_id"] != request[
+            "variant"
+        ] or (request["variant"], request["phase"]) not in _expected_nodes(plan):
+            _fail("research_campaign_generation_stale")
         if plan.get("producer") != _source_receipt(configured):
             _fail("research_campaign_plan_mismatch")
         accepted, _, _, running, _ = _successes(_Journal(root / "journal.jsonl").events)

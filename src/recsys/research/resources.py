@@ -105,7 +105,7 @@ def _prctl(option: int, value: int | ctypes.c_void_p) -> None:
 
 def _subreaper_state() -> int:
     state = ctypes.c_int()
-    _prctl(_GET_SUBREAPER, cast("ctypes.c_void_p", ctypes.byref(state)))
+    _prctl(_GET_SUBREAPER, ctypes.cast(ctypes.byref(state), ctypes.c_void_p))
     return state.value
 
 

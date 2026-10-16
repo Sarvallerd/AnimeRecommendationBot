@@ -15,6 +15,7 @@ from recsys.research.artifacts import (
     StreamDescriptor,
     StreamWriter,
     _stream_lines,
+    check_descriptor,
     check_identity,
     cleanup,
     descriptor,
@@ -108,6 +109,55 @@ FILES = (
     "evaluator/validation-labels.jsonl.gz",
     "evaluator/test-labels.jsonl.gz",
 )
+
+
+def _checked_preparation_manifest(value: object) -> PreparationManifest:
+    """Establish the wire shape after the caller has checked producer provenance."""
+    exact(
+        value,
+        {
+            "schema_version",
+            "kind",
+            "protocol_identity",
+            "release_lock_sha256",
+            "release_id",
+            "dataset_identity",
+            "catalog_release_identity",
+            "catalog_sha256",
+            "producer",
+            "files",
+            "counts",
+        },
+    )
+    raw = cast("dict[str, object]", value)
+    if (
+        type(raw["schema_version"]) is not int
+        or any(
+            type(raw[key]) is not str
+            for key in (
+                "kind",
+                "protocol_identity",
+                "release_lock_sha256",
+                "release_id",
+                "dataset_identity",
+                "catalog_release_identity",
+                "catalog_sha256",
+            )
+        )
+        or type(raw["producer"]) is not dict
+        or type(raw["files"]) is not dict
+        or type(raw["counts"]) is not dict
+    ):
+        fail()
+    files = cast("dict[str, object]", raw["files"])
+    counts = cast("dict[str, object]", raw["counts"])
+    if set(files) != set(FILES) or any(
+        type(key) is not str or type(item) is not int for key, item in counts.items()
+    ):
+        fail()
+    for name, entry in files.items():
+        check_descriptor(entry, stream=name.endswith(".gz"))
+    return cast("PreparationManifest", raw)
 
 
 def _release(
@@ -358,9 +408,20 @@ def prepare_research(
         or set(facts_doc) != {"schema_version", "anime"}
         or type(facts_doc["schema_version"]) is not int
         or facts_doc["schema_version"] != 1
+        or type(facts_doc["anime"]) is not dict
         or set(facts_doc["anime"]) != set(catalog["anime"])
     ):
         fail()
+    for fact in facts_doc["anime"].values():
+        exact(fact, {"first_release_date", "airing_status", "seasonal_year"})
+        if (
+            fact["first_release_date"] is not None
+            and type(fact["first_release_date"]) is not str
+            or type(fact["airing_status"]) is not str
+            or fact["seasonal_year"] is not None
+            and type(fact["seasonal_year"]) is not int
+        ):
+            fail()
     facts = cast("MetadataFacts", facts_doc)["anime"]
     model_catalog = {
         **catalog,
@@ -535,8 +596,15 @@ def _check_label(label: object, protocol: ProtocolSpec, ids: set[str]) -> Prepar
             "positive_ratings",
         },
     )
-    label = cast("PreparationLabel", label)
-    if label["split"] != split_user(label["user_key"], protocol) or label["split"] == "train":
+    raw = cast("dict[str, object]", label)
+    if any(
+        type(raw[key]) is not str for key in ("cohort", "user_key", "split", "query_id", "order")
+    ) or any(type(raw[key]) is not int for key in ("history_count", "n", "recent_2024_seed_count")):
+        fail()
+    if (
+        raw["split"] != split_user(cast("str", raw["user_key"]), protocol)
+        or raw["split"] == "train"
+    ):
         fail()
     for key in (
         "positive_ids",
@@ -546,7 +614,13 @@ def _check_label(label: object, protocol: ProtocolSpec, ids: set[str]) -> Prepar
         "seed_mal_ids",
         "reserved_seed_ids",
     ):
-        _id_list(label[key], ids, ordered=key in ("positive_ids", "history_ids", "completed_ids"))
+        _id_list(raw[key], ids, ordered=key in ("positive_ids", "history_ids", "completed_ids"))
+    if type(raw["positive_ratings"]) is not list or any(
+        type(pair) is not list or len(pair) != 2 or any(type(value) is not int for value in pair)
+        for pair in cast("list[object]", raw["positive_ratings"])
+    ):
+        fail()
+    label = cast("PreparationLabel", raw)
     positives = label["positive_ids"]
     rated = label["positive_ratings"]
     if (
@@ -678,8 +752,8 @@ def _verify_semantics(
     selected = {item[2] for heap in heaps.values() for item in heap}
     stat_value, _ = read_json(prepared_dir / "fit/train-stats.json", files["fit/train-stats.json"])
     exact(stat_value, {"schema_version", "train_users", "train_completed_rows", "items"})
-    stat_doc = cast("PreparationTrainStats", stat_value)
-    if set(stat_doc["items"]) != ids:
+    stat_doc = cast("dict[str, object]", stat_value)
+    if type(stat_doc["items"]) is not dict or set(stat_doc["items"]) != ids:
         fail()
     calculated: dict[str, PreparationTrainItem] = {
         key: {
@@ -840,8 +914,8 @@ def validate_preparation(
         },
     )
     validate_preparation_producer(manifest_value)
-    manifest = cast("PreparationManifest", manifest_value)
-    if manifest["kind"] != "arb-ml-preparation" or set(manifest["files"]) != set(FILES):
+    manifest = _checked_preparation_manifest(manifest_value)
+    if manifest["kind"] != "arb-ml-preparation":
         fail()
     files = manifest["files"]
     for name, desc in files.items():
@@ -854,10 +928,10 @@ def validate_preparation(
                 pass
         else:
             read_json(path, desc)
-    protocol_value, _ = read_json(prepared_dir / "protocol.json", files["protocol.json"])
+    protocol_value, protocol_raw = read_json(prepared_dir / "protocol.json", files["protocol.json"])
     if "sha256:" + sha(canonical_bytes(protocol_value)) != manifest["protocol_identity"]:
         fail()
-    protocol = cast("ProtocolSpec", protocol_value)
+    protocol = load_protocol(_protocol_bytes=protocol_raw)
     catalog_value, _ = read_json(prepared_dir / "model-catalog.json", files["model-catalog.json"])
     ids = check_catalog(catalog_value)
     catalog = cast("Catalog", catalog_value)

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
 from recsys.research.artifacts import (
     StreamDescriptor,
+    check_descriptor,
     cleanup,
     open_stage,
     publish,
@@ -17,7 +19,7 @@ from recsys.research.artifacts import (
     stream_jsonl,
     write_json,
 )
-from recsys.research.evaluation.evaluate import EvaluationManifest, PrivateMetric
+from recsys.research.evaluation.evaluate import METRICS, EvaluationManifest, PrivateMetric
 from recsys.research.protocol import ProtocolSpec, exact, fail, sha
 
 if TYPE_CHECKING:
@@ -27,6 +29,71 @@ if TYPE_CHECKING:
 type EvaluationRows = dict[tuple[str, str], PrivateMetric]
 type EvaluationRecord = tuple[EvaluationManifest, str, EvaluationRows]
 type PrimaryIndex = dict[str, dict[tuple[str, int], tuple[str, float]]]
+
+
+def _private_metric(value: object) -> PrivateMetric:
+    exact(
+        value,
+        {
+            "query_id",
+            "user_key",
+            "split",
+            "cohort",
+            "mask",
+            "order",
+            "n",
+            "history_bin",
+            "seed_band",
+            "ranking",
+            "metrics",
+            "known_history_repeats",
+            "completed_repeats",
+            "recent_2024_seed_count",
+            "genre_diversity",
+        },
+    )
+    row = cast("dict[str, object]", value)
+    if any(
+        type(row[field]) is not str
+        for field in (
+            "query_id",
+            "user_key",
+            "split",
+            "cohort",
+            "mask",
+            "order",
+            "history_bin",
+            "seed_band",
+        )
+    ):
+        fail()
+    if any(
+        type(row[field]) is not int
+        for field in ("n", "known_history_repeats", "completed_repeats", "recent_2024_seed_count")
+    ):
+        fail()
+    ranking = row["ranking"]
+    if type(ranking) is not list or any(type(item) is not int for item in ranking):
+        fail()
+    metric_value = row["metrics"]
+    exact(metric_value, METRICS)
+    metric_map = cast("dict[str, object]", metric_value)
+    for key in METRICS:
+        metric = metric_map[key]
+        if type(metric) is not float or not math.isfinite(metric):
+            fail()
+    diversity_value = row["genre_diversity"]
+    exact(diversity_value, {"mean", "valid_pair_coverage"})
+    diversity = cast("dict[str, object]", diversity_value)
+    mean = diversity["mean"]
+    coverage = diversity["valid_pair_coverage"]
+    if (
+        (mean is not None and (type(mean) is not float or not math.isfinite(mean)))
+        or type(coverage) is not float
+        or not math.isfinite(coverage)
+    ):
+        fail()
+    return cast("PrivateMetric", row)
 
 
 def _evaluation(path: str | Path, expected_prepared_identity: str) -> EvaluationRecord:
@@ -54,25 +121,55 @@ def _evaluation(path: str | Path, expected_prepared_identity: str) -> Evaluation
             "files",
         },
     )
-    manifest = cast("EvaluationManifest", value)
+    raw_manifest = cast("dict[str, object]", value)
     if (
-        type(manifest["schema_version"]) is not int
-        or manifest["schema_version"] != 1
-        or manifest["kind"] != "arb-ml-evaluation"
-        or manifest["split"] != "validation"
-        or manifest["prepared_identity"] != expected_prepared_identity
-        or manifest["selection_identity"] is not None
-        or set(manifest["files"]) != {"report.json", "user-metrics.jsonl.gz"}
+        type(raw_manifest["schema_version"]) is not int
+        or raw_manifest["schema_version"] != 1
+        or raw_manifest["kind"] != "arb-ml-evaluation"
+        or raw_manifest["split"] != "validation"
+        or raw_manifest["prepared_identity"] != expected_prepared_identity
+        or raw_manifest["selection_identity"] is not None
+        or any(
+            type(raw_manifest[field]) is not str
+            for field in (
+                "prediction_identity",
+                "model_id",
+                "config_sha256",
+                "fit_identity",
+                "prediction_code_revision",
+            )
+        )
     ):
         fail()
+    files_value = raw_manifest["files"]
+    exact(files_value, {"report.json", "user-metrics.jsonl.gz"})
+    files = cast("dict[str, object]", files_value)
+    check_descriptor(files["report.json"])
+    check_descriptor(files["user-metrics.jsonl.gz"], stream=True)
+    manifest = cast("EvaluationManifest", raw_manifest)
     report_value, _ = read_json(path / "report.json", manifest["files"]["report.json"])
-    if not isinstance(report_value, dict):
-        fail()
+    exact(
+        report_value,
+        {
+            "schema_version",
+            "kind",
+            "split",
+            "prediction_identity",
+            "prepared_identity",
+            "queries",
+            "groups",
+        },
+    )
     report = cast("dict[str, object]", report_value)
     if (
-        report["split"] != "validation"
+        type(report["schema_version"]) is not int
+        or report["schema_version"] != 1
+        or report["kind"] != "arb-ml-evaluation-report"
+        or report["split"] != "validation"
         or report["prepared_identity"] != expected_prepared_identity
         or report["prediction_identity"] != manifest["prediction_identity"]
+        or type(report["queries"]) is not int
+        or type(report["groups"]) is not list
     ):
         fail()
     rows: EvaluationRows = {}
@@ -81,27 +178,7 @@ def _evaluation(path: str | Path, expected_prepared_identity: str) -> Evaluation
         path / "user-metrics.jsonl.gz",
         cast("StreamDescriptor", manifest["files"]["user-metrics.jsonl.gz"]),
     ):
-        exact(
-            row_value,
-            {
-                "query_id",
-                "user_key",
-                "split",
-                "cohort",
-                "mask",
-                "order",
-                "n",
-                "history_bin",
-                "seed_band",
-                "ranking",
-                "metrics",
-                "known_history_repeats",
-                "completed_repeats",
-                "recent_2024_seed_count",
-                "genre_diversity",
-            },
-        )
-        row = cast("PrivateMetric", row_value)
+        row = _private_metric(row_value)
         key = (row["query_id"], row["mask"])
         if (
             key in rows

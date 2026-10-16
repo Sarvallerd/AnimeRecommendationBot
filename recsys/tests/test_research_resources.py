@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import os
 import resource
 import signal
@@ -848,6 +849,16 @@ class ResourceSupervisorTests(unittest.TestCase):
         finally:
             if outsider.returncode is None:
                 outsider.wait()
+
+    def test_subreaper_query_passes_real_void_pointer(self) -> None:
+        def fake_prctl(option: int, value: int | ctypes.c_void_p) -> None:
+            self.assertEqual(option, resources._GET_SUBREAPER)
+            assert isinstance(value, ctypes.c_void_p)
+            ctypes.cast(value, ctypes.POINTER(ctypes.c_int)).contents.value = 1
+
+        with mock.patch.object(resources, "_prctl", side_effect=fake_prctl) as prctl:
+            self.assertEqual(resources._subreaper_state(), 1)
+        prctl.assert_called_once()
 
     def test_thread_fork_and_handle_boundaries(self) -> None:
         with resources.ResourceSupervisor() as supervisor:

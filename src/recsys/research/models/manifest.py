@@ -254,7 +254,7 @@ def _validate_manifest(
     producer_value = manifest["producer"]
     if type(producer_value) is not dict or type(producer_value.get("code_revision")) is not str:
         fail("research_model_invalid")
-    producer = cast("ModelProducer", producer_value)
+    producer = cast("dict[str, object]", producer_value)
     if manifest.get("schema_version") != 2 or producer.get("source_layout") != SOURCE_LAYOUT:
         fail("research_source_layout_unsupported")
     if expected_code_revision is not None and producer["code_revision"] != expected_code_revision:
@@ -278,37 +278,58 @@ def _validate_manifest(
         model_backend=backend,
         scoring=cast("GpuMetadata | None", scoring),
     )
-    checked = cast("ModelManifest", manifest)
     if (
         type(manifest["schema_version"]) is not int
         or manifest["schema_version"] != 2
         or manifest["kind"] != "arb-ml02-model"
-        or canonical_bytes(checked["parameters"]) != canonical_bytes(spec["variants"][variant])
+        or canonical_bytes(manifest["parameters"]) != canonical_bytes(spec["variants"][variant])
         or manifest["campaign_spec_sha256"] != campaign_hash
         or manifest["prepared_identity"] != inputs.prepared_identity
         or manifest["protocol_identity"] != inputs.protocol_identity
         or manifest["fit_identity"] != inputs.fit_identity
-        or checked["catalog_descriptor"] != inputs.catalog_descriptor
-        or checked["train_interactions"] != inputs.train_interactions_descriptor
-        or checked["train_stats"] != inputs.train_stats_descriptor
-        or type(checked["external_inputs"]) is not dict
+        or manifest["catalog_descriptor"] != inputs.catalog_descriptor
+        or manifest["train_interactions"] != inputs.train_interactions_descriptor
+        or manifest["train_stats"] != inputs.train_stats_descriptor
+        or type(manifest["external_inputs"]) is not dict
         or canonical_bytes(producer) != canonical_bytes(expected_producer)
     ):
         fail("research_model_invalid")
-    if variant in ("popularity", "itemknn", "puresvd") and checked["external_inputs"]:
+    check_descriptor(manifest["catalog_descriptor"])
+    check_descriptor(manifest["train_interactions"], stream=True)
+    check_descriptor(manifest["train_stats"])
+    external_inputs = cast("dict[str, object]", manifest["external_inputs"])
+    if variant in ("popularity", "itemknn", "puresvd") and external_inputs:
         fail("research_model_invalid")
     if variant.startswith("content-"):
         locked = release_info()["inputs"]["embeddings"]
-        if checked["external_inputs"] != {
+        if external_inputs != {
             "glove": {"bytes": locked["text_size"], "sha256": locked["text_sha256"]}
         }:
             fail("research_model_invalid")
     if variant == "hybrid":
-        if set(checked["external_inputs"]) != {"content_model", "puresvd_model"}:
+        if set(external_inputs) != {"content_model", "puresvd_model"}:
             fail("research_model_invalid")
-    for desc in checked["external_inputs"].values():
+    for desc in external_inputs.values():
         check_descriptor(desc)
-    return checked
+    files = manifest["files"]
+    metadata = manifest["metadata"]
+    if type(files) is not dict or type(metadata) is not dict:
+        fail("research_model_invalid")
+    for name, desc in files.items():
+        if type(name) is not str or NAME.fullmatch(name) is None:
+            fail("research_model_invalid")
+        if name.endswith(".json"):
+            check_descriptor(desc)
+        else:
+            exact(desc, {"bytes", "sha256", "dtype", "shape"})
+            if (
+                type(desc["dtype"]) is not str
+                or type(desc["shape"]) is not list
+                or any(type(n) is not int or n < 0 for n in desc["shape"])
+            ):
+                fail("research_model_invalid")
+            check_descriptor({key: desc[key] for key in ("bytes", "sha256")})
+    return cast("ModelManifest", manifest)
 
 
 def _read_model_package(

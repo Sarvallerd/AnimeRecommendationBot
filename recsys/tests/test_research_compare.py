@@ -1,12 +1,19 @@
 import tempfile
 import unittest
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 from research_support import ResearchFixture
 
-from recsys.research.artifacts import identity, read_json
-from recsys.research.evaluation.compare import _policy, compare_evaluations
+from recsys.contracts.bundle import canonical_bytes
+from recsys.research.artifacts import descriptor, identity, read_json, stream_jsonl
+from recsys.research.evaluation.compare import (
+    _evaluation,
+    _policy,
+    _private_metric,
+    compare_evaluations,
+)
 from recsys.research.evaluation.evaluate import evaluate_predictions
 from recsys.research.protocol import ResearchError, load_protocol
 
@@ -27,6 +34,39 @@ class CompareTests(unittest.TestCase):
             split="validation",
             expected_prepared_identity=self.prepared_identity,
         )
+
+    def test_rehashed_malformed_evaluation_records_fail_with_domain_error(self) -> None:
+        manifest_path = self.evaluation / "evaluation-manifest.json"
+        report_path = self.evaluation / "report.json"
+        value, _ = read_json(manifest_path)
+        assert isinstance(value, dict)
+        manifest = cast("dict[str, object]", value)
+        malformed_manifest = {**manifest, "files": 3}
+        manifest_path.write_bytes(canonical_bytes(malformed_manifest))
+        with self.assertRaisesRegex(ResearchError, "research_integrity_error"):
+            _evaluation(self.evaluation, self.prepared_identity)
+
+        malformed_report = canonical_bytes({})
+        report_path.write_bytes(malformed_report)
+        files_value = manifest["files"]
+        assert isinstance(files_value, dict)
+        files = {
+            **cast("dict[str, object]", files_value),
+            "report.json": descriptor(malformed_report),
+        }
+        manifest_path.write_bytes(canonical_bytes({**manifest, "files": files}))
+        with self.assertRaisesRegex(ResearchError, "research_integrity_error"):
+            _evaluation(self.evaluation, self.prepared_identity)
+
+    def test_private_metric_cast_requires_nested_types(self) -> None:
+        valid = next(stream_jsonl(self.evaluation / "user-metrics.jsonl.gz"))
+        assert isinstance(valid, dict)
+        record = cast("dict[str, object]", valid)
+        for field, wrong in (("n", True), ("ranking", [True]), ("metrics", {"ndcg5": "0"})):
+            with self.subTest(field=field):
+                malformed = {**record, field: wrong}
+                with self.assertRaisesRegex(ResearchError, "research_integrity_error"):
+                    _private_metric(malformed)
 
     def test_policy_equal_and_inconclusive(self) -> None:
         protocol = load_protocol()

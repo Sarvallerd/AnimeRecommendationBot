@@ -53,19 +53,46 @@ def read_selection(
             "declared_comparison_arms",
         },
     )
-    selection = cast("Selection", value)
+    record = cast("dict[str, object]", value)
     if (
         "sha256:" + sha(raw) != expected_selection_identity
-        or type(selection["schema_version"]) is not int
-        or selection["schema_version"] != 1
-        or selection["kind"] != "arb-ml-selection"
-        or selection["prepared_identity"] != expected_prepared_identity
-        or type(selection["n"]) is not int
-        or not 1 <= selection["n"] <= 10
-        or selection["allowed_arms"]
-        != [
-            {"cohort": "main", "order": f"random-liked-{i}", "n": selection["n"]} for i in (1, 2, 3)
-        ]
+        or type(record["schema_version"]) is not int
+        or record["schema_version"] != 1
+        or record["kind"] != "arb-ml-selection"
+        or record["prepared_identity"] != expected_prepared_identity
+        or type(record["n"]) is not int
+        or not 1 <= record["n"] <= 10
+        or any(
+            type(record[field]) is not str
+            for field in (
+                "comparison_identity",
+                "evaluation_identity",
+                "model_id",
+                "config_sha256",
+                "fit_identity",
+                "code_revision",
+            )
+        )
     ):
         fail("research_selection_invalid")
+    arms = record["allowed_arms"]
+    expected_arms = [
+        {"cohort": "main", "order": f"random-liked-{i}", "n": record["n"]} for i in (1, 2, 3)
+    ]
+    if type(arms) is not list or len(arms) != 3:
+        fail("research_selection_invalid")
+    for arm in arms:
+        if (
+            type(arm) is not dict
+            or set(arm) != {"cohort", "order", "n"}
+            or type(arm["cohort"]) is not str
+            or type(arm["order"]) is not str
+            or type(arm["n"]) is not int
+        ):
+            fail("research_selection_invalid")
+    if arms != expected_arms or record["declared_comparison_arms"] != [
+        f"random-liked-{i}" for i in (1, 2, 3)
+    ]:
+        fail("research_selection_invalid")
+    selection = cast("Selection", record)
     return selection, expected_selection_identity

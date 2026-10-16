@@ -91,15 +91,92 @@ def _component_phase(plan: CampaignPlan) -> str:
     return AUX_PHASE if plan["auxiliary_fits"] else "fit"
 
 
+def _string_map(value: object) -> bool:
+    return type(value) is dict and all(
+        type(key) is str and type(item) is str for key, item in value.items()
+    )
+
+
+def _descriptor(value: object) -> bool:
+    return (
+        type(value) is dict and type(value.get("bytes")) is int and type(value.get("sha256")) is str
+    )
+
+
+def _plan_fields_valid(plan: dict[str, object]) -> bool:
+    producer = plan.get("producer")
+    variants = plan.get("variants")
+    auxiliary = plan.get("auxiliary_fits")
+    assets = plan.get("assets")
+    budgets = plan.get("budgets")
+    scheduling = plan.get("scheduling")
+    if (
+        type(producer) is not dict
+        or not _string_map(producer.get("code_files_sha256"))
+        or type(producer.get("python_version")) is not str
+        or not _string_map(producer.get("package_versions"))
+        or any(
+            type(plan.get(key)) is not str
+            for key in (
+                "kind",
+                "prepared_identity",
+                "protocol_identity",
+                "fit_identity",
+                "campaign_spec_sha256",
+                "code_revision",
+                "score_retention",
+                "created_utc",
+                "deadline_utc",
+            )
+        )
+        or any(
+            not _descriptor(plan.get(key))
+            for key in ("catalog_descriptor", "train_interactions", "train_stats")
+        )
+        or type(plan.get("execution_config_count")) is not int
+        or type(variants) is not list
+        or type(auxiliary) is not list
+        or type(assets) is not dict
+        or type(budgets) is not dict
+        or type(scheduling) is not dict
+    ):
+        return False
+    if any(
+        type(item) is not dict
+        or type(item.get("variant_id")) is not str
+        or "parameters" not in item
+        or type(item.get("backend")) is not str
+        or (
+            "components" in item
+            and (
+                type(item["components"]) is not list
+                or not all(_string_map(component) for component in item["components"])
+            )
+        )
+        for item in variants
+    ):
+        return False
+    return (
+        all(_string_map(item) for item in auxiliary)
+        and all(type(key) is str and _descriptor(item) for key, item in assets.items())
+        and all(type(key) is str and type(item) in (int, float) for key, item in budgets.items())
+        and all(
+            type(scheduling.get(key)) is int
+            for key in ("cpu_workers", "gpu_workers", "blas_threads")
+        )
+        and type(scheduling.get("gpu_optional_benchmark")) is str
+    )
+
+
 def _validate_plan_structure(plan: object) -> str:
     if (
         type(plan) is not dict
-        or plan.get("schema_version") != 2
+        or type(plan.get("schema_version")) is not int
+        or plan["schema_version"] != 2
         or type(plan.get("producer")) is not dict
         or plan["producer"].get("source_layout") != SOURCE_LAYOUT
     ):
         _fail("research_source_layout_unsupported")
-    plan = cast("CampaignPlan", plan)
     from recsys.research.models.spec import campaign
 
     spec, campaign_sha = campaign()
@@ -113,6 +190,9 @@ def _validate_plan_structure(plan: object) -> str:
         or plan.get("score_retention") != "keep"
     ):
         _fail("research_campaign_plan_mismatch")
+    if not _plan_fields_valid(cast("dict[str, object]", plan)):
+        _fail("research_campaign_plan_mismatch")
+    plan = cast("CampaignPlan", plan)
     configured = "gpu" if any(item.get("backend") == "gpu" for item in plan["variants"]) else "cpu"
     expected_aux = (
         [

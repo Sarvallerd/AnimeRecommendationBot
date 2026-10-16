@@ -52,6 +52,58 @@ type SuccessState = tuple[
 ]
 
 
+def _validated_event(value: object) -> CampaignEvent:
+    if type(value) is not dict:
+        _fail()
+    event = cast("dict[str, object]", value)
+    if (
+        any(type(key) is not str for key in event)
+        or type(event.get("seq")) is not int
+        or type(event.get("event")) is not str
+        or type(event.get("utc")) is not str
+    ):
+        _fail()
+    for key in ("variant", "phase", "status", "generation", "plan_identity"):
+        if key in event and type(event[key]) is not str:
+            _fail()
+    if "attempt" in event and type(event["attempt"]) is not int:
+        _fail()
+    for key in ("charged_seconds", "remaining_seconds"):
+        if key in event and type(event[key]) not in (int, float):
+            _fail()
+    for key in ("output_identity", "code"):
+        if key in event and event[key] is not None and type(event[key]) is not str:
+            _fail()
+    if "resources" in event and event["resources"] is not None:
+        resources = event["resources"]
+        if type(resources) is not dict or any(type(key) is not str for key in resources):
+            _fail()
+    if "resumed" in event and type(event["resumed"]) is not bool:
+        _fail()
+    if event["event"] in ("attempt_started", "attempt_finished", "attempt_interrupted"):
+        required = {"variant", "phase", "attempt"}
+        if event["event"] == "attempt_started" or (
+            event["event"] == "attempt_finished" and event.get("status") == "success"
+        ):
+            required.add("generation")
+        if not required <= event.keys():
+            _fail()
+        if event["event"] != "attempt_started" and "charged_seconds" not in event:
+            _fail()
+        if event["event"] == "attempt_finished" and "status" not in event:
+            _fail()
+        if (
+            event["event"] == "attempt_finished"
+            and event.get("status") == "success"
+            and (
+                type(event.get("output_identity")) is not str
+                or type(event.get("code")) not in (str, type(None))
+            )
+        ):
+            _fail()
+    return cast("CampaignEvent", event)
+
+
 class _Journal:
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -74,14 +126,18 @@ class _Journal:
                     event = json.loads(raw)
                 except (ValueError, UnicodeError):
                     _fail()
-                if raw != _canonical(event) or event.get("seq") != len(self.events) + 1:
+                if raw != _canonical(event):
                     _fail()
-                self.events.append(cast("CampaignEvent", event))
+                checked = _validated_event(event)
+                if checked["seq"] != len(self.events) + 1:
+                    _fail()
+                self.events.append(checked)
 
     def append(self, name: str, **fields: object) -> CampaignEvent:
-        event = cast(
-            "CampaignEvent",
-            {"seq": len(self.events) + 1, "event": name, "utc": _iso(_now()), **fields},
+        if any(key in fields for key in ("seq", "event", "utc")):
+            _fail()
+        event = _validated_event(
+            {"seq": len(self.events) + 1, "event": name, "utc": _iso(_now()), **fields}
         )
         if self.events and _parse_iso(event["utc"]) < _parse_iso(self.events[-1]["utc"]):
             _fail("research_campaign_clock_invalid")

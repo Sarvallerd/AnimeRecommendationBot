@@ -15,7 +15,7 @@ from research_support import FixtureLock
 from recsys.contracts.bundle import JSONValue, canonical_bytes
 from recsys.research.artifacts import FileDescriptor, identity, read_json
 from recsys.research.models.inputs import iter_training_rows
-from recsys.research.models.manifest import ModelManifest, _external
+from recsys.research.models.manifest import ModelManifest, _external, _validate_manifest
 from recsys.research.models.package import (
     fit_model,
     load_model,
@@ -95,6 +95,16 @@ class ModelTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(ResearchError, "research_source_layout_unsupported"):
                 load_model(model, inputs=inputs)
+
+    def test_model_manifest_rejects_unproven_nested_record_types(self) -> None:
+        model = self.fixture.fit_popularity(self.prepared, self.prepared_identity)
+        manifest = _object(model / "model-manifest.json")
+        inputs = self.inputs()
+        for field in ("metadata", "files"):
+            with self.subTest(field=field):
+                malformed = {**manifest, field: 3}
+                with self.assertRaises(ResearchError):
+                    _validate_manifest(malformed, inputs=inputs)
 
     def test_popularity_model_deterministic_and_train_stats_only(self) -> None:
         source_open = Path.open

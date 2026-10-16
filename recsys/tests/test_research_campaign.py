@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import fcntl
 import hashlib
 import io
@@ -28,7 +29,7 @@ from test_research_model_content import _glove
 
 import recsys
 from recsys.research.artifacts import StreamDescriptor, StreamWriter, read_json, stream_jsonl
-from recsys.research.campaign.artifacts import _validate_gpu_measurement
+from recsys.research.campaign.artifacts import _read_receipt, _validate_gpu_measurement
 from recsys.research.campaign.common import _read_private
 from recsys.research.campaign.plan import CampaignPlan, _validate_plan_structure
 from recsys.research.campaign.report import validate_campaign
@@ -268,6 +269,227 @@ class CampaignTests(unittest.TestCase):
         clock = patch("recsys.research.campaign.runner._now", side_effect=_stable_utc_clock())
         clock.start()
         self.addCleanup(clock.stop)
+
+    def test_malformed_private_worker_request_rejects_before_path_or_science(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "worker-root"
+            attempt = root / "variants" / "popularity" / "attempts" / "fit" / "1"
+            attempt.mkdir(parents=True, mode=0o700)
+            request_path = attempt / "request.json"
+            valid: dict[str, object] = dict(
+                _worker_request(
+                    root,
+                    "sha256:" + "a" * 64,
+                    "generation",
+                    "popularity",
+                    "fit",
+                    1,
+                    root / "prepared",
+                    root / "glove.txt",
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            )
+            malformed: tuple[tuple[str, object], ...] = (
+                ("root", []),
+                ("prepared_dir", []),
+                ("glove", {}),
+                ("model_dir", []),
+                ("prediction_dir", {}),
+                ("content_model", False),
+                ("svd_model", 0),
+                ("schema_version", True),
+                ("attempt", True),
+                ("kind", []),
+                ("plan_identity", None),
+                ("generation", []),
+                ("variant", []),
+                ("phase", []),
+                ("output_dir", []),
+            )
+            for field, wrong_value in malformed:
+                with self.subTest(field=field):
+                    record = {**valid, field: wrong_value}
+                    _private_file(request_path, _canonical(record))
+                    with self.assertRaises(ResearchError) as caught:
+                        _worker_main(request_path)
+                    self.assertEqual(str(caught.exception), "research_campaign_invalid")
+                    self.assertFalse((attempt / "result.json").exists())
+                    request_path.unlink()
+            _private_file(request_path, _canonical(valid))
+            self.assertEqual(_worker_main(request_path), 1)
+            receipt = _object(attempt / "result.json")
+            self.assertEqual(receipt["status"], "failed")
+            self.assertEqual(receipt["code"], "research_campaign_invalid")
+
+    def test_malformed_private_journal_event_has_fixed_error(self) -> None:
+        utc = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        valid: dict[str, object] = {
+            "seq": 1,
+            "event": "attempt_started",
+            "utc": utc,
+            "generation": "generation",
+            "variant": "popularity",
+            "phase": "fit",
+            "attempt": 1,
+            "remaining_seconds": FIT_SECONDS,
+        }
+        malformed: list[object] = [
+            [1],
+            {"seq": 1},
+            {**valid, "seq": True},
+            {key: item for key, item in valid.items() if key != "variant"},
+            {**valid, "attempt": True},
+            {**valid, "remaining_seconds": "later"},
+            {**valid, "resources": []},
+            {**valid, "event": "attempt_finished", "charged_seconds": 1.0},
+            {**valid, "event": "attempt_finished", "charged_seconds": 1.0, "status": "success"},
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "journal.jsonl"
+            for record in malformed:
+                with self.subTest(record=record):
+                    _private_file(path, _canonical(record))
+                    with self.assertRaisesRegex(ResearchError, "research_campaign_invalid"):
+                        _Journal(path)
+                    path.unlink()
+            journal = _Journal(path)
+            with self.assertRaisesRegex(ResearchError, "research_campaign_invalid"):
+                journal.append("attempt_started", generation="g", phase="fit", attempt=1)
+            with self.assertRaisesRegex(ResearchError, "research_campaign_invalid"):
+                journal.append("run_started", seq=2, generation="g")
+            self.assertFalse(path.exists())
+            journal.append(
+                "attempt_started", generation="g", variant="popularity", phase="fit", attempt=1
+            )
+            journal.append(
+                "attempt_interrupted",
+                variant="popularity",
+                phase="fit",
+                attempt=1,
+                charged_seconds=1.0,
+            )
+            _, _, _, starts, failed = _successes(_Journal(path).events)
+            self.assertFalse(starts)
+            self.assertFalse(failed)
+
+    def test_malformed_private_worker_receipt_rejects_bool_in_integer_fields(self) -> None:
+        valid: dict[str, object] = {
+            "schema_version": 1,
+            "kind": "arb-ml02-campaign-worker-receipt",
+            "phase": "fit",
+            "variant": "popularity",
+            "attempt": 1,
+            "generation": "generation",
+            "status": "ok",
+            "manifest_sha256": "a" * 64,
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            attempt_dir = Path(temporary)
+            for field, invalid in (
+                ("schema_version", True),
+                ("attempt", True),
+                ("kind", []),
+                ("phase", []),
+                ("variant", []),
+                ("generation", []),
+                ("status", []),
+                ("manifest_sha256", []),
+            ):
+                with self.subTest(field=field):
+                    path = attempt_dir / "result.json"
+                    _private_file(path, _canonical({**valid, field: invalid}))
+                    with self.assertRaisesRegex(ResearchError, "research_campaign_receipt_invalid"):
+                        _read_receipt(attempt_dir, "popularity", "fit", 1, "generation")
+                    path.unlink()
+            _private_file(attempt_dir / "result.json", _canonical(valid))
+            self.assertEqual(
+                _read_receipt(attempt_dir, "popularity", "fit", 1, "generation"), valid
+            )
+
+    def test_malformed_private_plan_fields_have_fixed_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = ModelFixture(temporary)
+            glove = Path(temporary) / "glove.txt"
+            fixture.lock["inputs"]["embeddings"] = _glove(glove)
+            prepared, identity = fixture.make_prepared()
+            with patch_release_info(fixture.lock):
+                valid = _plan(
+                    prepared, identity, "a" * 40, glove, "cpu", 2, datetime.now(timezone.utc)
+                )
+            self.assertEqual(_validate_plan_structure(valid), "cpu")
+            malformed: tuple[tuple[str, object], ...] = (
+                ("variants", [0] * 7),
+                ("variants", [{"variant_id": "popularity", "backend": "cpu"}] * 7),
+                ("prepared_identity", []),
+                ("protocol_identity", None),
+                ("fit_identity", True),
+                ("code_revision", []),
+                ("catalog_descriptor", []),
+                ("train_interactions", {"bytes": True, "sha256": "a" * 64}),
+                ("train_stats", {"bytes": 1, "sha256": []}),
+                ("producer", {"source_layout": valid["producer"]["source_layout"]}),
+                (
+                    "producer",
+                    {**valid["producer"], "code_files_sha256": {"file": True}},
+                ),
+                ("auxiliary_fits", [0]),
+                ("execution_config_count", True),
+                ("assets", {"glove": []}),
+                ("budgets", {"fit_seconds_per_variant": True}),
+                ("scheduling", {"cpu_workers": True}),
+                ("created_utc", []),
+                ("deadline_utc", []),
+            )
+            for field, invalid in malformed:
+                with self.subTest(field=field):
+                    record = copy.deepcopy(valid)
+                    cast("dict[str, object]", record)[field] = invalid
+                    with self.assertRaisesRegex(ResearchError, "research_campaign_plan_mismatch"):
+                        _validate_plan_structure(record)
+
+    def test_worker_rejects_rehashed_malformed_plan_before_variant_lookup(self) -> None:
+        from recsys.contracts.provenance import SOURCE_LAYOUT
+        from recsys.research.models.spec import campaign
+
+        _, campaign_sha = campaign()
+        malformed = {
+            "schema_version": 2,
+            "kind": "arb-ml02-campaign-plan",
+            "producer": {"source_layout": SOURCE_LAYOUT},
+            "campaign_spec_sha256": campaign_sha,
+            "variants": [0] * 7,
+            "score_retention": "keep",
+        }
+        raw = _canonical(malformed)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "campaign"
+            attempt = root / "variants" / "popularity" / "attempts" / "fit" / "1"
+            attempt.mkdir(parents=True, mode=0o700)
+            _private_file(root / "generation.json", _canonical({"generation": "generation"}))
+            _private_file(root / "campaign-plan.json", raw)
+            request = _worker_request(
+                root,
+                _digest(raw),
+                "generation",
+                "popularity",
+                "fit",
+                1,
+                root / "prepared",
+                root / "glove.txt",
+                None,
+                None,
+                None,
+                None,
+            )
+            request_path = attempt / "request.json"
+            _private_file(request_path, _canonical(request))
+            self.assertEqual(_worker_main(request_path), 1)
+            receipt = _object(attempt / "result.json")
+            self.assertEqual(receipt["status"], "failed")
+            self.assertEqual(receipt["code"], "research_campaign_plan_mismatch")
 
     def test_malformed_retained_gpu_measurements_have_fixed_error(self) -> None:
         valid: dict[str, object] = {

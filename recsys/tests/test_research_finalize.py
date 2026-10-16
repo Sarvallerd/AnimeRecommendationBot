@@ -22,9 +22,11 @@ from recsys.research.evaluation.finalize import (
     ComparisonManifest,
     ComparisonReport,
     SelectionDecision,
+    _comparison,
     export_test_queries,
     finalize_selection,
 )
+from recsys.research.evaluation.selection import read_selection
 from recsys.research.protocol import ResearchError
 
 
@@ -76,6 +78,50 @@ class FinalizeTests(unittest.TestCase):
         }
         self.decision_path = Path(self.tmp.name) / "decision.json"
         write_json(self.decision_path, self.decision)
+
+    def test_rehashed_selection_requires_all_returned_field_types(self) -> None:
+        selection_path = Path(self.tmp.name) / "selection.json"
+        valid: dict[str, object] = {
+            **self.decision,
+            "kind": "arb-ml-selection",
+            "allowed_arms": [
+                {"cohort": "main", "order": f"random-liked-{i}", "n": 1} for i in (1, 2, 3)
+            ],
+        }
+        selection_path.write_bytes(canonical_bytes(valid))
+        selection, _ = read_selection(
+            selection_path, identity(selection_path), self.prepared_identity
+        )
+        self.assertEqual(selection["n"], 1)
+        malformed: tuple[tuple[str, object], ...] = (
+            ("comparison_identity", 3),
+            ("evaluation_identity", 4),
+            ("model_id", 5),
+            ("config_sha256", 6),
+            ("fit_identity", 7),
+            ("code_revision", 8),
+            ("declared_comparison_arms", 9),
+            ("allowed_arms", [{"cohort": "main", "order": "random-liked-1", "n": True}]),
+        )
+        for field, wrong in malformed:
+            with self.subTest(field=field):
+                selection_path.write_bytes(canonical_bytes({**valid, field: wrong}))
+                with self.assertRaisesRegex(ResearchError, "research_selection_invalid"):
+                    read_selection(selection_path, identity(selection_path), self.prepared_identity)
+
+    def test_comparison_reader_rejects_wrong_nested_model_types(self) -> None:
+        original_report = _report(self.comparison / "comparison.json")
+        original_manifest = _manifest(self.comparison / "comparison-manifest.json")
+        for field, wrong in (("code_revision", 3), ("n_policy", {"status": 4, "chosen_n": 1})):
+            with self.subTest(field=field):
+                report = cast("dict[str, object]", copy.deepcopy(original_report))
+                models = report["models"]
+                assert isinstance(models, list) and isinstance(models[0], dict)
+                model = cast("dict[str, object]", models[0])
+                model[field] = wrong
+                self._rewrite_comparison(report, copy.deepcopy(original_manifest))
+                with self.assertRaises(ResearchError):
+                    _comparison(self.comparison, self.prepared_identity)
 
     def _rewrite_comparison(
         self,

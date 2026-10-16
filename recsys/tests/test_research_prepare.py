@@ -1,3 +1,4 @@
+import copy
 import tempfile
 import unittest
 from pathlib import Path
@@ -5,7 +6,7 @@ from typing import cast
 
 from research_support import ResearchFixture
 
-from recsys.contracts.bundle import Catalog, check_catalog
+from recsys.contracts.bundle import Catalog, canonical_bytes, check_catalog
 from recsys.research.artifacts import (
     StreamDescriptor,
     identity,
@@ -152,3 +153,20 @@ class PrepareTests(unittest.TestCase):
         link.symlink_to(self.fixture.release, target_is_directory=True)
         with self.assertRaises(ResearchError):
             self.fixture.prepare("unsafe")
+
+    def test_rehashed_manifest_rejects_invalid_field_containers(self) -> None:
+        prepared = self.fixture.prepare()
+        path = prepared / "prepare-manifest.json"
+        value, _ = read_json(path)
+        assert isinstance(value, dict)
+        for name, field, replacement in (
+            ("files", "files", 3),
+            ("counts", "counts", []),
+            ("protocol_identity", "protocol_identity", 3),
+        ):
+            with self.subTest(name=name):
+                changed = copy.deepcopy(value)
+                changed[field] = replacement
+                path.write_bytes(canonical_bytes(changed))
+                with self.assertRaises(ResearchError):
+                    validate_preparation(prepared, expected_identity=identity(path))

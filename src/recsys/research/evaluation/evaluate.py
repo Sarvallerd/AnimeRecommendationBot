@@ -26,8 +26,13 @@ from recsys.research.artifacts import (
     validate_preparation_producer,
     write_json,
 )
-from recsys.research.prepare import PreparationLabel, PreparationManifest
-from recsys.research.protocol import ProtocolSpec, exact, fail, finite, sha
+from recsys.research.prepare import (
+    PreparationLabel,
+    PreparationManifest,
+    _check_label,
+    _checked_preparation_manifest,
+)
+from recsys.research.protocol import ProtocolSpec, exact, fail, finite, load_protocol, sha
 
 
 class EvaluationQuery(TypedDict):
@@ -52,6 +57,33 @@ class EvaluationTrainStats(TypedDict):
     train_users: int
     train_completed_rows: int
     items: dict[str, EvaluationTrainItem]
+
+
+def _checked_train_stats(value: object, ids: set[str]) -> EvaluationTrainStats:
+    exact(value, {"schema_version", "train_users", "train_completed_rows", "items"})
+    raw = cast("dict[str, object]", value)
+    if (
+        type(raw["schema_version"]) is not int
+        or type(raw["train_users"]) is not int
+        or type(raw["train_completed_rows"]) is not int
+        or type(raw["items"]) is not dict
+    ):
+        fail()
+    items = cast("dict[str, object]", raw["items"])
+    if set(items) != ids:
+        fail()
+    for item in items.values():
+        exact(item, {"completed_users", "positive_users", "rating_sum", "rating_count", "band"})
+        record = cast("dict[str, object]", item)
+        if (
+            any(
+                type(record[key]) is not int
+                for key in ("completed_users", "positive_users", "rating_sum", "rating_count")
+            )
+            or type(record["band"]) is not str
+        ):
+            fail()
+    return cast("EvaluationTrainStats", raw)
 
 
 class PredictionManifest(TypedDict):
@@ -135,11 +167,15 @@ def _prepared(
     prepared_dir = safe_path(prepared_dir, directory=True)
     manifest_value, raw = read_json(prepared_dir / "prepare-manifest.json")
     validate_preparation_producer(manifest_value)
-    manifest = cast("PreparationManifest", manifest_value)
-    if "sha256:" + sha(raw) != expected_identity or manifest.get("kind") != "arb-ml-preparation":
+    raw_manifest = cast("dict[str, object]", manifest_value)
+    if (
+        "sha256:" + sha(raw) != expected_identity
+        or raw_manifest.get("kind") != "arb-ml-preparation"
+    ):
         fail()
+    manifest = _checked_preparation_manifest(raw_manifest)
     files = manifest["files"]
-    protocol_value, _ = read_json(prepared_dir / "protocol.json", files["protocol.json"])
+    protocol_value, protocol_raw = read_json(prepared_dir / "protocol.json", files["protocol.json"])
     catalog_value, _ = read_json(prepared_dir / "model-catalog.json", files["model-catalog.json"])
     ids = check_catalog(catalog_value)
     catalog = cast("Catalog", catalog_value)
@@ -147,20 +183,27 @@ def _prepared(
         fail()
     fit_value, fit_raw = read_json(prepared_dir / "fit/manifest.json", files["fit/manifest.json"])
     stats_value, _ = read_json(prepared_dir / "fit/train-stats.json", files["fit/train-stats.json"])
-    if not isinstance(fit_value, dict) or not isinstance(stats_value, dict):
+    if not isinstance(fit_value, dict):
         fail()
     fit = cast("dict[str, object]", fit_value)
-    stats = cast("EvaluationTrainStats", stats_value)
+    stats = _checked_train_stats(stats_value, ids)
     if (
-        fit["train_stats"] != files["fit/train-stats.json"]
-        or fit["train_interactions"] != files["fit/train-interactions.tsv.gz"]
-        or set(stats["items"]) != ids
+        fit
+        != {
+            "schema_version": 1,
+            "kind": "arb-ml-fit",
+            "dataset_identity": manifest["dataset_identity"],
+            "protocol_identity": manifest["protocol_identity"],
+            "train_interactions": files["fit/train-interactions.tsv.gz"],
+            "train_stats": files["fit/train-stats.json"],
+        }
         or "sha256:" + sha(canonical_bytes(protocol_value)) != manifest["protocol_identity"]
     ):
         fail()
+    protocol = load_protocol(_protocol_bytes=protocol_raw)
     return (
         manifest,
-        cast("ProtocolSpec", protocol_value),
+        protocol,
         catalog,
         fit,
         "sha256:" + sha(fit_raw),
@@ -240,6 +283,9 @@ def _paired_rows(
     prep: PreparationManifest,
     split: str,
     allowed: set[tuple[str, str, int]] | None = None,
+    *,
+    protocol: ProtocolSpec,
+    ids: set[str],
 ) -> Iterator[tuple[EvaluationQuery, PreparationLabel]]:
     """Validation reads only development queries and validation labels."""
     files = prep["files"]
@@ -277,7 +323,7 @@ def _paired_rows(
                 "positive_ratings",
             },
         )
-        label = cast("PreparationLabel", label_value)
+        label = _check_label(label_value, protocol, ids)
         query = (
             next(queries, None)
             if queries is not None
@@ -293,7 +339,18 @@ def _paired_rows(
         if query is None:
             fail()
         exact(query, {"query_id", "cohort", "seed_policy", "order", "n", "seed_mal_ids"})
-        query = cast("EvaluationQuery", query)
+        raw_query = cast("dict[str, object]", query)
+        if (
+            any(
+                type(raw_query[key]) is not str
+                for key in ("query_id", "cohort", "seed_policy", "order")
+            )
+            or type(raw_query["n"]) is not int
+            or type(raw_query["seed_mal_ids"]) is not list
+            or any(type(item) is not int for item in raw_query["seed_mal_ids"])
+        ):
+            fail()
+        query = cast("EvaluationQuery", raw_query)
         qid = query["query_id"]
         if qid in seen:
             fail()
@@ -504,7 +561,9 @@ def evaluate_predictions(
     elif selection_path is not None or expected_selection_identity is not None:
         fail()
     ids = sorted(int(item) for item in catalog["anime"])
-    label_query = _paired_rows(prepared_dir, prep, split, allowed)
+    label_query = _paired_rows(
+        prepared_dir, prep, split, allowed, protocol=protocol, ids=set(catalog["anime"])
+    )
     score_rows = stream_jsonl(prediction_dir / "scores.jsonl.gz", prediction["scores"])
     stage = open_stage(output_dir)
     try:
@@ -514,10 +573,7 @@ def evaluate_predictions(
         )
         rows_for_report: list[PrivateMetric] = []
         nrows = 0
-        from recsys.research.prepare import _check_label
-
         for (query, label), row_value in zip(label_query, score_rows, strict=True):
-            _check_label(label, protocol, set(catalog["anime"]))
             if test_queries is not None:
                 test_queries.write_json(query)
             exact(row_value, {"query_id", "scores"})

@@ -54,10 +54,15 @@ def _read_receipt(
     }
     if (
         type(result) is not dict
+        or type(result.get("schema_version")) is not int
+        or type(result.get("attempt")) is not int
+        or any(
+            type(result.get(key)) is not str
+            for key in ("kind", "phase", "variant", "generation", "status", "manifest_sha256")
+        )
         or any(result.get(k) != v for k, v in common.items())
         or result.get("status") != "ok"
         or set(result) != {*common, "status", "manifest_sha256"}
-        or type(result["manifest_sha256"]) is not str
     ):
         _fail("research_campaign_receipt_invalid")
     return cast("WorkerReceipt", result)

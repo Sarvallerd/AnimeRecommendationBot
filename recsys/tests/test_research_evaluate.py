@@ -1,3 +1,4 @@
+import copy
 import tempfile
 import unittest
 from collections.abc import Callable
@@ -8,15 +9,24 @@ from unittest.mock import patch
 from research_support import ResearchFixture
 
 from recsys.contracts.bundle import canonical_bytes
-from recsys.research.artifacts import StreamDescriptor, identity, read_json, stream_jsonl
+from recsys.research.artifacts import (
+    StreamDescriptor,
+    StreamWriter,
+    file_descriptor,
+    identity,
+    read_json,
+    stream_jsonl,
+)
 from recsys.research.evaluation.evaluate import (
     EvaluationManifest,
     PredictionManifest,
     PrivateMetric,
+    _paired_rows,
+    _prepared,
     evaluate_predictions,
     metrics,
 )
-from recsys.research.protocol import ResearchError
+from recsys.research.protocol import ResearchError, load_protocol
 
 
 class ScoreTestRow(TypedDict):
@@ -101,6 +111,56 @@ class EvaluateTests(unittest.TestCase):
             self.evaluate()
         self.assertFalse((Path(self.tmp.name) / "evaluation").exists())
         self.assertFalse(list(Path(self.tmp.name).glob(".evaluation.*")))
+
+    def test_rehashed_preparation_rejects_missing_files_and_nested_stats(self) -> None:
+        manifest_path = self.prepared / "prepare-manifest.json"
+        original, _ = read_json(manifest_path)
+        assert isinstance(original, dict)
+        missing_files = copy.deepcopy(original)
+        missing_files.pop("files")
+        manifest_path.write_bytes(canonical_bytes(missing_files))
+        with self.assertRaises(ResearchError):
+            _prepared(self.prepared, identity(manifest_path))
+
+        stats_path = self.prepared / "fit/train-stats.json"
+        stats, _ = read_json(stats_path)
+        assert isinstance(stats, dict)
+        stats["items"] = 3
+        stats_path.write_bytes(canonical_bytes(stats))
+        malformed_stats = copy.deepcopy(original)
+        files = malformed_stats["files"]
+        assert isinstance(files, dict)
+        files["fit/train-stats.json"] = file_descriptor(stats_path)
+        manifest_path.write_bytes(canonical_bytes(malformed_stats))
+        with self.assertRaises(ResearchError):
+            _prepared(self.prepared, identity(manifest_path))
+
+    def test_malformed_query_id_fails_before_hashing_or_typed_use(self) -> None:
+        prepared, _, catalog, _, _, _ = _prepared(self.prepared, self.identity)
+        path = self.prepared / "development/queries.jsonl.gz"
+        rows = list(
+            stream_jsonl(
+                path, cast("StreamDescriptor", prepared["files"]["development/queries.jsonl.gz"])
+            )
+        )
+        assert rows and isinstance(rows[0], dict)
+        rows[0]["query_id"] = []
+        path.unlink()
+        writer = StreamWriter(path)
+        for row in rows:
+            writer.write_json(row)
+        changed = copy.deepcopy(prepared)
+        changed["files"]["development/queries.jsonl.gz"] = writer.close()
+        with self.assertRaises(ResearchError):
+            next(
+                _paired_rows(
+                    self.prepared,
+                    changed,
+                    "validation",
+                    protocol=load_protocol(),
+                    ids=set(catalog["anime"]),
+                )
+            )
 
     def test_full_catalog_score_row_failures(self) -> None:
         from recsys.research.artifacts import StreamWriter
