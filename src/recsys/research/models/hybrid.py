@@ -4,14 +4,21 @@ from __future__ import annotations
 
 import os
 import shutil
+from pathlib import Path
+from typing import TypedDict, cast
 
-from recsys.contracts.bundle import canonical_bytes
+from recsys.contracts.bundle import JSONValue, canonical_bytes
 from recsys.research.artifacts import descriptor, file_descriptor, read_json, safe_path
 from recsys.research.models.collaborative import load as load_collaborative
 from recsys.research.models.content import load as load_content
-from recsys.research.models.manifest import _read_model_package, _validate_manifest
+from recsys.research.models.manifest import ModelManifest, _read_model_package, _validate_manifest
 from recsys.research.models.spec import EXPECTED_VARIANTS
-from recsys.research.models.types import ScoreVector
+from recsys.research.models.types import (
+    CloseableScorer,
+    ScoreVector,
+    ScoringInputs,
+    SupportedBatchScorer,
+)
 from recsys.research.protocol import exact, fail, sha
 
 _PARTS = (
@@ -27,12 +34,33 @@ _METADATA = {
 }
 
 
-def _parameters(parameters):
+class EmbeddedComponent(TypedDict):
+    variant_id: str
+    manifest_file: str
+    payload_prefix: str
+    identity: str
+
+
+class HybridMetadata(TypedDict):
+    schema_version: int
+    components: dict[str, EmbeddedComponent]
+    component_ranking: str
+    visible_seed_policy: str
+    support_policy: str
+
+
+def _parameters(parameters: dict[str, JSONValue]) -> None:
     if canonical_bytes(parameters) != canonical_bytes(EXPECTED_VARIANTS["hybrid"]):
         fail("research_model_invalid")
 
 
-def _component_manifest(model_dir, inputs, backend, revision, variant):
+def _component_manifest(
+    model_dir: Path,
+    inputs: ScoringInputs,
+    backend: str,
+    revision: str,
+    variant: str,
+) -> tuple[ModelManifest, bytes]:
     manifest, raw = _read_model_package(
         model_dir, inputs=inputs, backend=backend, expected_code_revision=revision
     )
@@ -41,14 +69,22 @@ def _component_manifest(model_dir, inputs, backend, revision, variant):
     return manifest, raw
 
 
-def fit(inputs, parameters, assets, stage, *, code_revision, backend):
+def fit(
+    inputs: ScoringInputs,
+    parameters: dict[str, JSONValue],
+    assets: dict[str, Path],
+    stage: Path,
+    *,
+    code_revision: str,
+    backend: str,
+) -> dict[str, object]:
     """Embed already fitted packages; this operation never opens train rows."""
     if backend != "cpu":
         fail("research_backend_unsupported")
     _parameters(parameters)
     if type(assets) is not dict or set(assets) != {"content_model", "puresvd_model"}:
         fail("research_model_invalid")
-    components = {}
+    components: dict[str, EmbeddedComponent] = {}
     for name, asset, variant, prefix in _PARTS:
         source = safe_path(assets[asset], directory=True)
         manifest, raw = _component_manifest(source, inputs, backend, code_revision, variant)
@@ -95,8 +131,14 @@ def fit(inputs, parameters, assets, stage, *, code_revision, backend):
     }
 
 
-def _embedded(model_dir, outer, inputs, backend):
-    metadata = outer["metadata"]
+def _embedded(
+    model_dir: Path,
+    outer: ModelManifest,
+    inputs: ScoringInputs,
+    backend: str,
+) -> dict[str, ModelManifest]:
+    metadata_value = outer["metadata"]
+    metadata = cast("HybridMetadata", metadata_value)
     exact(metadata, _METADATA)
     if (
         type(metadata["schema_version"]) is not int
@@ -109,8 +151,8 @@ def _embedded(model_dir, outer, inputs, backend):
         or set(outer["external_inputs"]) != {"content_model", "puresvd_model"}
     ):
         fail("research_model_invalid")
-    expected_files = set()
-    result = {}
+    expected_files: set[str] = set()
+    result: dict[str, ModelManifest] = {}
     revision = outer["producer"]["code_revision"]
     execution = outer["producer"]["execution"]
     for name, asset, variant, prefix in _PARTS:
@@ -124,17 +166,18 @@ def _embedded(model_dir, outer, inputs, backend):
         ):
             fail("research_model_invalid")
         expected_files.add(logical_name)
-        manifest, raw = read_json(model_dir / logical_name)
+        manifest_value, raw = read_json(model_dir / logical_name)
         raw_descriptor = descriptor(raw)
         if (
             outer["external_inputs"][asset] != raw_descriptor
             or outer["files"].get(logical_name) != raw_descriptor
             or entry["identity"] != "sha256:" + sha(raw)
-            or manifest.get("variant_id") != variant
+            or not isinstance(manifest_value, dict)
+            or manifest_value.get("variant_id") != variant
         ):
             fail("research_model_invalid")
-        _validate_manifest(
-            manifest, inputs=inputs, backend=backend, expected_code_revision=revision
+        manifest = _validate_manifest(
+            manifest_value, inputs=inputs, backend=backend, expected_code_revision=revision
         )
         if manifest["producer"]["execution"] != execution:
             fail("research_backend_mismatch")
@@ -149,7 +192,12 @@ def _embedded(model_dir, outer, inputs, backend):
     return result
 
 
-def _fusion(seed_sets, ids, content, svd):
+def _fusion(
+    seed_sets: tuple[tuple[int, ...], ...],
+    ids: tuple[int, ...],
+    content: SupportedBatchScorer,
+    svd: SupportedBatchScorer,
+) -> tuple[ScoreVector, ...]:
     import numpy as np
 
     if type(seed_sets) is not tuple or len(seed_sets) > 128:
@@ -160,7 +208,7 @@ def _fusion(seed_sets, ids, content, svd):
         fail("research_model_invalid")
     id_array = np.asarray(ids, dtype=np.int64)
     positions = {item: index for index, item in enumerate(ids)}
-    output = []
+    output: list[ScoreVector] = []
     for seeds, a, b in zip(seed_sets, left, right, strict=True):
         if (
             type(seeds) is not tuple
@@ -194,12 +242,14 @@ def _fusion(seed_sets, ids, content, svd):
 
 
 class HybridScorer:
-    def __init__(self, ids, content, svd):
+    def __init__(
+        self, ids: tuple[int, ...], content: SupportedBatchScorer, svd: SupportedBatchScorer
+    ) -> None:
         self.ids = ids
         self.content = content
         self.svd = svd
 
-    def close(self):
+    def close(self) -> None:
         try:
             close = getattr(self.svd, "close", None)
             if callable(close):
@@ -209,27 +259,44 @@ class HybridScorer:
             if callable(close):
                 close()
 
-    def score_many(self, seed_sets):
+    def score_many(self, seed_sets: tuple[tuple[int, ...], ...]) -> tuple[ScoreVector, ...]:
         return _fusion(seed_sets, self.ids, self.content, self.svd)
 
-    def score(self, seed_mal_ids):
+    def score(self, seed_mal_ids: tuple[int, ...]) -> ScoreVector:
         return self.score_many((seed_mal_ids,))[0]
 
 
-def load(model_dir, manifest, inputs, *, backend="cpu"):
+def load(
+    model_dir: Path, manifest: ModelManifest, inputs: ScoringInputs, *, backend: str = "cpu"
+) -> HybridScorer:
     """Load the two embedded CPU components without their source directories."""
     if backend != "cpu":
         fail("research_backend_unsupported")
     _parameters(manifest["parameters"])
     embedded = _embedded(model_dir, manifest, inputs, backend)
-    loaded = []
+    loaded: list[CloseableScorer] = []
+    content_scorer: SupportedBatchScorer | None = None
+    svd_scorer: SupportedBatchScorer | None = None
     try:
         for name, _, variant, prefix in _PARTS:
-            scorer = (load_content if variant == "content-mean" else load_collaborative)(
-                model_dir, embedded[name], inputs, backend="cpu", payload_prefix=prefix
-            )
-            loaded.append(scorer)
-        return HybridScorer(inputs.mal_ids, loaded[0], loaded[1])
+            if variant == "content-mean":
+                content_loaded = load_content(
+                    model_dir, embedded[name], inputs, backend="cpu", payload_prefix=prefix
+                )
+                content_scorer = content_loaded
+                loaded.append(content_loaded)
+            else:
+                svd_loaded = cast(
+                    "SupportedBatchScorer",
+                    load_collaborative(
+                        model_dir, embedded[name], inputs, backend="cpu", payload_prefix=prefix
+                    ),
+                )
+                svd_scorer = svd_loaded
+                loaded.append(svd_loaded)
+        if content_scorer is None or svd_scorer is None:
+            fail("research_model_invalid")
+        return HybridScorer(inputs.mal_ids, content_scorer, svd_scorer)
     except BaseException:
         for scorer in reversed(loaded):
             close = getattr(scorer, "close", None)

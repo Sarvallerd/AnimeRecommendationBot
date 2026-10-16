@@ -4,6 +4,8 @@ The public boundary accepts numeric matrices only.  CUDA and NumPy are imported
 when a caller acquires a session, never while importing this module.
 """
 
+from __future__ import annotations
+
 import atexit
 import errno
 import fcntl
@@ -12,10 +14,50 @@ import platform
 import stat
 import sys
 import threading
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import TYPE_CHECKING, Never, Protocol, TypedDict, cast
 
 from recsys.research.protocol import ResearchError
+
+if TYPE_CHECKING:
+    import cupy as cp
+    import numpy as np
+    from numpy.typing import NDArray
+
+
+class GpuMetadata(TypedDict):
+    backend: str
+    dtype: str
+    device_index: int
+    device_name: str
+    compute_capability: str
+    cupy_version: str
+    cuda_runtime_version: int
+    cuda_driver_version: int
+    memory_pool_max_bytes: int
+    query_batch_size: int
+    dot_block_rows: int
+
+
+class GpuMemory(TypedDict):
+    pool_used_bytes: int
+    pool_reserved_bytes: int
+    pool_limit_bytes: int
+    pool_peak_used_bytes: int
+    pool_peak_reserved_bytes: int
+
+
+class GpuAdapter(Protocol):
+    def open(self) -> tuple[GpuMetadata, int]: ...
+    def used_bytes(self) -> int: ...
+    def memory_usage(self) -> GpuMemory: ...
+    def upload(self, matrix: NDArray[np.float64]) -> object: ...
+    def dot(self, left: object, right: object) -> object: ...
+    def download(self, matrix: object) -> NDArray[np.float64]: ...
+    def close(self) -> None: ...
+
 
 _POOL_MAX = 6 * 1024**3
 _DEVICE_RESERVE = 2 * 1024**3
@@ -42,14 +84,14 @@ _METADATA_FIELDS = {
     "dot_block_rows",
 }
 _GUARD = threading.RLock()
-_SESSION = None
+_SESSION: _Session | None = None
 
 
-def _error(code):
+def _error(code: str) -> Never:
     raise ResearchError(code)
 
 
-def _lease():
+def _lease() -> int:
     uid = os.getuid()
     directory = Path("/tmp") / f"arb-ml02-gpu-{uid}"
     try:
@@ -97,7 +139,7 @@ def _lease():
 class _CudaAdapter:
     """Private CUDA boundary. Tests replace its factory, not public APIs."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         import cupy as cp
 
         self.cp = cp
@@ -107,13 +149,17 @@ class _CudaAdapter:
         self.peak_used_bytes = 0
         self.peak_reserved_bytes = 0
 
-    def _pool_malloc(self, size):
+    def _pool_malloc(self, size: int) -> cp.cuda.MemoryPointer:
+        if self.pool is None:
+            _error("research_gpu_closed")
         pointer = self.pool.malloc(size)
         self.peak_used_bytes = max(self.peak_used_bytes, int(self.pool.used_bytes()))
         self.peak_reserved_bytes = max(self.peak_reserved_bytes, int(self.pool.total_bytes()))
         return pointer
 
-    def memory_usage(self):
+    def memory_usage(self) -> GpuMemory:
+        if self.pool is None:
+            _error("research_gpu_closed")
         return {
             "pool_used_bytes": int(self.pool.used_bytes()),
             "pool_reserved_bytes": int(self.pool.total_bytes()),
@@ -122,7 +168,7 @@ class _CudaAdapter:
             "pool_peak_reserved_bytes": self.peak_reserved_bytes,
         }
 
-    def open(self):
+    def open(self) -> tuple[GpuMetadata, int]:
         cp = self.cp
         cp.cuda.Device(_DEVICE_INDEX).use()
         properties = cp.cuda.runtime.getDeviceProperties(_DEVICE_INDEX)
@@ -147,7 +193,7 @@ class _CudaAdapter:
         name = properties["name"]
         if isinstance(name, bytes):
             name = name.decode("utf-8")
-        metadata = {
+        metadata: GpuMetadata = {
             "backend": "cupy",
             "dtype": "float64",
             "device_index": _DEVICE_INDEX,
@@ -162,19 +208,21 @@ class _CudaAdapter:
         }
         return metadata, limit
 
-    def used_bytes(self):
+    def used_bytes(self) -> int:
+        if self.pool is None:
+            _error("research_gpu_closed")
         return int(self.pool.used_bytes())
 
-    def upload(self, matrix):
+    def upload(self, matrix: NDArray[np.float64]) -> cp.ndarray:
         return self.cp.asarray(matrix)
 
-    def dot(self, left, right):
-        return left @ right.T
+    def dot(self, left: object, right: object) -> cp.ndarray:
+        return cast("cp.ndarray", left) @ cast("cp.ndarray", right).T
 
-    def download(self, matrix):
-        return self.cp.asnumpy(matrix, blocking=True)
+    def download(self, matrix: object) -> NDArray[np.float64]:
+        return self.cp.asnumpy(cast("cp.ndarray", matrix), blocking=True)
 
-    def close(self):
+    def close(self) -> None:
         try:
             if self.pool is not None:
                 self.cp.cuda.get_current_stream().synchronize()
@@ -187,12 +235,12 @@ class _CudaAdapter:
                     self.pool.free_all_blocks()
 
 
-def _new_adapter():
+def _new_adapter() -> GpuAdapter:
     return _CudaAdapter()
 
 
 class _Session:
-    def __init__(self, fd, adapter, metadata, limit):
+    def __init__(self, fd: int, adapter: GpuAdapter, metadata: GpuMetadata, limit: int) -> None:
         self.fd = fd
         self.adapter = adapter
         self.metadata = metadata
@@ -202,7 +250,7 @@ class _Session:
         self.refs = 1
 
 
-def _acquire():
+def _acquire() -> _Session:
     global _SESSION
     with _GUARD:
         current = _SESSION
@@ -258,7 +306,7 @@ def _acquire():
             )
 
 
-def _release(current):
+def _release(current: _Session) -> None:
     global _SESSION
     with _GUARD:
         if current.pid != os.getpid():
@@ -286,14 +334,16 @@ def _release(current):
             _error("research_gpu_execution_failed")
 
 
-def _check_expected(expected, actual):
+def _check_expected(expected: object, actual: GpuMetadata) -> None:
     if expected is None:
         return
+    actual_fields: dict[str, object] = dict(actual)
     if (
         type(expected) is not dict
         or set(expected) != _METADATA_FIELDS
         or any(
-            type(expected[key]) is not type(actual[key]) or expected[key] != actual[key]
+            type(expected[key]) is not type(actual_fields[key])
+            or expected[key] != actual_fields[key]
             for key in _METADATA_FIELDS
         )
     ):
@@ -301,17 +351,17 @@ def _check_expected(expected, actual):
 
 
 @contextmanager
-def gpu_execution(expected_scoring: dict | None = None):
+def gpu_execution(expected_scoring: object = None) -> Iterator[GpuMetadata]:
     """Lease the process-local GPU session and yield immutable provenance by copy."""
     current = _acquire()
     try:
         _check_expected(expected_scoring, current.metadata)
-        yield dict(current.metadata)
+        yield cast("GpuMetadata", dict(current.metadata))
     finally:
         _release(current)
 
 
-def gpu_memory_usage() -> dict:
+def gpu_memory_usage() -> GpuMemory:
     """Return measured bytes of the active dedicated pool and its session peaks."""
     with _GUARD:
         current = _SESSION
@@ -335,10 +385,12 @@ def gpu_memory_usage() -> dict:
             or usage["pool_reserved_bytes"] > usage["pool_limit_bytes"]
         ):
             _error("research_gpu_execution_failed")
-        return dict(usage)
+        return cast("GpuMemory", dict(usage))
 
 
-def _matrix(value, *, rows_max=None, columns=None):
+def _matrix(
+    value: object, *, rows_max: int | None = None, columns: int | None = None
+) -> NDArray[np.float64]:
     import numpy as np
 
     if (
@@ -354,10 +406,10 @@ def _matrix(value, *, rows_max=None, columns=None):
         or not bool(np.isfinite(value).all())
     ):
         _error("research_gpu_input_invalid")
-    return value
+    return cast("NDArray[np.float64]", value)
 
 
-def _ensure_capacity(current, required):
+def _ensure_capacity(current: _Session, required: int) -> None:
     if required < 0 or current.adapter.used_bytes() + required > current.limit:
         _error("research_gpu_resource_limit")
 
@@ -365,7 +417,7 @@ def _ensure_capacity(current, required):
 class CupyDenseDots:
     """Upload a catalog matrix once and score contiguous float64 query blocks."""
 
-    def __init__(self, features):
+    def __init__(self, features: NDArray[np.float64]) -> None:
         features = _matrix(features)
         self._session = None
         self._features = None
@@ -389,7 +441,7 @@ class CupyDenseDots:
                     else "research_gpu_execution_failed"
                 )
 
-    def dot(self, left):
+    def dot(self, left: NDArray[np.float64]) -> NDArray[np.float64]:
         current = self._session
         if current is None:
             _error("research_gpu_closed")
@@ -398,6 +450,8 @@ class CupyDenseDots:
         if current.thread != threading.get_ident():
             _error("research_gpu_busy")
         left = _matrix(left, rows_max=_BATCH_MAX, columns=self._columns)
+        if self._features is None:
+            _error("research_gpu_closed")
         _ensure_capacity(current, left.nbytes + left.shape[0] * self._rows * 8)
         left_gpu = score_gpu = None
         try:
@@ -422,7 +476,7 @@ class CupyDenseDots:
             score_gpu = None
             left_gpu = None
 
-    def close(self):
+    def close(self) -> None:
         current = self._session
         if current is None:
             return
@@ -434,16 +488,16 @@ class CupyDenseDots:
         self._session = None
         _release(current)
 
-    def __enter__(self):
+    def __enter__(self) -> CupyDenseDots:
         if self._session is None:
             _error("research_gpu_closed")
         return self
 
-    def __exit__(self, _type, _value, _traceback):
+    def __exit__(self, _type: object, _value: object, _traceback: object) -> None:
         self.close()
 
 
-def probe_gpu() -> dict:
+def probe_gpu() -> GpuMetadata:
     """Exercise acquisition and a tiny float64 dot before reporting the device."""
     import numpy as np
 
@@ -455,7 +509,7 @@ def probe_gpu() -> dict:
         return metadata
 
 
-def _cleanup_at_exit():
+def _cleanup_at_exit() -> None:
     global _SESSION
     current = _SESSION
     if current is None or current.pid != os.getpid():

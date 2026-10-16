@@ -209,7 +209,7 @@
     "source": "recsys.research.models.dispatch",
     "function": "_backend",
     "registry": "BACKENDS",
-    "source_sha256": "49769635b8552ace38d4478b5eddcea9b788bb21254156430f89134606ad4fc6",
+    "source_sha256": "f73e8b03918074f90818a9f6082616f011d18e18e7476daa6ff35cd8ae23bb1c",
     "reason": "Audited seven variant, four target lazy backend dispatch; re-audit after any source edit."
   }
 }

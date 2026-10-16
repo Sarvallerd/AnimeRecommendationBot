@@ -1,34 +1,52 @@
 """Pinned GloVe content baselines over the entire frozen MAL catalog."""
 
+from __future__ import annotations
+
 import os
 from collections import OrderedDict
+from collections.abc import Iterable
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 from recsys.content.glove import DIMENSION, BuildError, _tokens, build_vectors, load_embeddings
+from recsys.contracts.bundle import JSONValue
 from recsys.release.lock import release_info
+from recsys.research.models.manifest import ModelManifest
 from recsys.research.models.spec import EXPECTED_VARIANTS
-from recsys.research.models.types import ScoreVector
+from recsys.research.models.types import ScoreVector, ScoringInputs, TrainingInputs
 from recsys.research.protocol import exact, fail
+
+if TYPE_CHECKING:
+    import numpy as np
+    from numpy.typing import NDArray
+
+    from recsys.research.gpu import CupyDenseDots
+
+type SourceCache = NDArray[np.float64] | NDArray[np.int32]
 
 VECTORIZER = "glove-known-occurrence-mean-l2-v1"
 CACHE_BYTES = 512 * 1024 * 1024
 
 
-def _same_typed(value, expected):
+def _same_typed(value: object, expected: object) -> bool:
     if type(value) is not type(expected):
         return False
     if type(value) is dict:
-        return set(value) == set(expected) and all(
-            _same_typed(value[key], expected[key]) for key in expected
+        actual_map = cast("dict[str, object]", value)
+        expected_map = cast("dict[str, object]", expected)
+        return set(actual_map) == set(expected_map) and all(
+            _same_typed(actual_map[key], expected_map[key]) for key in expected_map
         )
     if type(value) is list:
-        return len(value) == len(expected) and all(
-            _same_typed(actual, wanted) for actual, wanted in zip(value, expected)
+        actual_list = cast("list[object]", value)
+        expected_list = cast("list[object]", expected)
+        return len(actual_list) == len(expected_list) and all(
+            _same_typed(actual, wanted) for actual, wanted in zip(actual_list, expected_list)
         )
     return value == expected
 
 
-def _variant(parameters):
+def _variant(parameters: dict[str, JSONValue]) -> str:
     matches = [
         name
         for name in ("content-mean", "content-max", "content-union")
@@ -39,7 +57,7 @@ def _variant(parameters):
     return matches[0]
 
 
-def _save_array(path, array):
+def _save_array(path: Path, array: NDArray[np.float64] | NDArray[np.bool_]) -> None:
     with open(path, "xb", opener=lambda name, flags: os.open(name, flags, 0o600)) as stream:
         import numpy as np
 
@@ -48,7 +66,12 @@ def _save_array(path, array):
         os.fsync(stream.fileno())
 
 
-def fit(inputs, parameters, assets, stage):
+def fit(
+    inputs: TrainingInputs,
+    parameters: dict[str, JSONValue],
+    assets: dict[str, Path],
+    stage: Path,
+) -> dict[str, object]:
     """Fit only catalog text and the locked embeddings; never read train rows."""
     import numpy as np
 
@@ -93,17 +116,17 @@ def fit(inputs, parameters, assets, stage):
 
 
 class _LRU:
-    def __init__(self):
-        self.entries = OrderedDict()
+    def __init__(self) -> None:
+        self.entries: OrderedDict[int, SourceCache] = OrderedDict()
         self.bytes = 0
 
-    def get(self, key):
+    def get(self, key: int) -> SourceCache | None:
         value = self.entries.get(key)
         if value is not None:
             self.entries.move_to_end(key)
         return value
 
-    def put(self, key, value):
+    def put(self, key: int, value: SourceCache) -> SourceCache:
         size = value.nbytes
         if size > CACHE_BYTES:
             return value
@@ -117,7 +140,15 @@ class _LRU:
 
 
 class ContentScorer:
-    def __init__(self, ids, vectors, ready, variant, *, backend="cpu"):
+    def __init__(
+        self,
+        ids: tuple[int, ...],
+        vectors: NDArray[np.float64],
+        ready: NDArray[np.bool_],
+        variant: str,
+        *,
+        backend: str = "cpu",
+    ) -> None:
         import numpy as np
 
         self.ids = np.asarray(ids, dtype=np.int64)
@@ -127,7 +158,7 @@ class ContentScorer:
         self.variant = variant
         self.cache = _LRU()
         self.backend = backend
-        self.dots = None
+        self.dots: CupyDenseDots | None = None
         if backend == "gpu":
             from recsys.research.gpu import CupyDenseDots
 
@@ -135,12 +166,12 @@ class ContentScorer:
         elif backend != "cpu":
             fail("research_backend_unsupported")
 
-    def close(self):
+    def close(self) -> None:
         if self.dots is not None:
             dots, self.dots = self.dots, None
             dots.close()
 
-    def _row(self, index):
+    def _row(self, index: int) -> NDArray[np.float64]:
         import numpy as np
 
         row = np.einsum("ik,jk->ij", self.vectors[index : index + 1], self.vectors, optimize=False)[
@@ -149,7 +180,7 @@ class ContentScorer:
         return self._finish_row(row)
 
     @staticmethod
-    def _finish_row(row):
+    def _finish_row(row: NDArray[np.float64]) -> NDArray[np.float64]:
         import numpy as np
 
         if not np.isfinite(row).all() or np.any(row > 1 + 1e-12):
@@ -157,7 +188,7 @@ class ContentScorer:
         np.minimum(row, 1.0, out=row)
         return row
 
-    def _pack_source(self, index, row):
+    def _pack_source(self, index: int, row: NDArray[np.float64]) -> SourceCache:
         import numpy as np
 
         if self.variant != "content-union":
@@ -170,16 +201,19 @@ class ContentScorer:
         top = np.asarray(candidates[order[:110]], dtype=np.int32)
         return self.cache.put(index, top)
 
-    def _source(self, index):
+    def _source(self, index: int) -> SourceCache:
         cached = self.cache.get(index)
         if cached is not None:
             return cached
         if self.backend == "gpu":
             self._prefetch((index,))
-            return self.cache.get(index)
+            cached = self.cache.get(index)
+            if cached is None:
+                fail("research_gpu_execution_failed")
+            return cached
         return self._pack_source(index, self._row(index))
 
-    def _prefetch(self, indices):
+    def _prefetch(self, indices: Iterable[int]) -> None:
         import numpy as np
 
         if self.dots is None:
@@ -193,7 +227,7 @@ class ContentScorer:
                 # A view would retain the whole GPU result batch outside the LRU budget.
                 self._pack_source(index, self._finish_row(row.copy()))
 
-    def _validated(self, seed_mal_ids):
+    def _validated(self, seed_mal_ids: tuple[int, ...]) -> tuple[int, ...]:
         if (
             type(seed_mal_ids) is not tuple
             or len(seed_mal_ids) > 10
@@ -205,15 +239,15 @@ class ContentScorer:
             self.lookup[item] for item in sorted(seed_mal_ids) if self.ready[self.lookup[item]]
         )
 
-    def supported_seed_ids(self, seed_mal_ids):
+    def supported_seed_ids(self, seed_mal_ids: tuple[int, ...]) -> frozenset[int]:
         return frozenset(int(self.ids[index]) for index in self._validated(seed_mal_ids))
 
-    def score(self, seed_mal_ids):
+    def score(self, seed_mal_ids: tuple[int, ...]) -> ScoreVector:
         if self.backend == "gpu":
             return self.score_many((seed_mal_ids,))[0]
         return self._score_validated(seed_mal_ids, self._validated(seed_mal_ids))
 
-    def score_many(self, seed_sets):
+    def score_many(self, seed_sets: tuple[tuple[int, ...], ...]) -> tuple[ScoreVector, ...]:
         if type(seed_sets) is not tuple or len(seed_sets) > 128:
             fail("research_model_invalid")
         supported = tuple(self._validated(seeds) for seeds in seed_sets)
@@ -224,7 +258,9 @@ class ContentScorer:
             for seeds, group in zip(seed_sets, supported, strict=True)
         )
 
-    def _score_validated(self, seed_mal_ids, supported):
+    def _score_validated(
+        self, seed_mal_ids: tuple[int, ...], supported: tuple[int, ...]
+    ) -> ScoreVector:
         import numpy as np
 
         values = np.zeros(len(self.ids), dtype=np.float64)
@@ -233,18 +269,22 @@ class ContentScorer:
             return ScoreVector(values, available, 0)
         if self.variant == "content-mean":
             for index in supported:
-                values += self._source(index)
+                values += cast("NDArray[np.float64]", self._source(index))
             values /= len(supported)
             available[:] = self.ready & (values > 0)
         elif self.variant == "content-max":
-            values[:] = self._source(supported[0])
+            values[:] = cast("NDArray[np.float64]", self._source(supported[0]))
             for index in supported[1:]:
-                np.maximum(values, self._source(index), out=values)
+                np.maximum(values, cast("NDArray[np.float64]", self._source(index)), out=values)
             available[:] = self.ready & (values > 0)
         else:
             visible = {self.lookup[item] for item in seed_mal_ids}
             for index in supported:
-                ranked = [target for target in self._source(index) if target not in visible][:100]
+                ranked = [
+                    target
+                    for target in cast("NDArray[np.int32]", self._source(index))
+                    if target not in visible
+                ][:100]
                 for rank, target in enumerate(ranked, 1):
                     values[target] += 1.0 / (60 + rank)
             values /= len(supported)
@@ -252,7 +292,14 @@ class ContentScorer:
         return ScoreVector(values, available, len(supported))
 
 
-def load(model_dir, manifest, inputs, *, backend="cpu", payload_prefix=""):
+def load(
+    model_dir: Path,
+    manifest: ModelManifest,
+    inputs: ScoringInputs,
+    *,
+    backend: str = "cpu",
+    payload_prefix: str = "",
+) -> ContentScorer:
     """Recheck the payload semantics after the common manifest and hash checks."""
     import numpy as np
 
@@ -304,4 +351,10 @@ def load(model_dir, manifest, inputs, *, backend="cpu", payload_prefix=""):
         or not np.all(np.abs(np.linalg.norm(vectors[ready], axis=1) - 1) <= 1e-12)
     ):
         fail("research_model_invalid")
-    return ContentScorer(inputs.mal_ids, vectors, ready, variant, backend=backend)
+    return ContentScorer(
+        inputs.mal_ids,
+        cast("NDArray[np.float64]", vectors),
+        cast("NDArray[np.bool_]", ready),
+        variant,
+        backend=backend,
+    )

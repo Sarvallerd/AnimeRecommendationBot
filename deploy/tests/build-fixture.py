@@ -8,8 +8,10 @@ import os
 import platform
 import shutil
 import zipfile
+from collections.abc import Iterable, Sequence
 from importlib import resources
 from pathlib import Path
+from typing import NotRequired, TypedDict, Unpack
 
 from recsys import __version__
 from recsys.content.glove import build
@@ -22,6 +24,7 @@ from recsys.data.interactions import CSV_COLUMNS as RATING_COLUMNS
 from recsys.data.mal2020 import normalize
 from recsys.data.metadata import DETAIL_COLUMNS
 from recsys.data.obtain import obtain
+from recsys.data.sources import SourceDescriptor, SourceRegistry
 from recsys.release.build import build_release, export_release_bundle
 from recsys.release.catalog import compose_release
 from recsys.release.export import export_bundle
@@ -32,7 +35,7 @@ raw = root / "raw"
 raw.mkdir(parents=True, exist_ok=True)
 
 
-def csv_data(header, rows):
+def csv_data(header: Sequence[str], rows: Iterable[Sequence[str]]) -> bytes:
     stream = io.StringIO(newline="")
     writer = csv.writer(stream, lineterminator="\n")
     writer.writerow(header)
@@ -40,7 +43,15 @@ def csv_data(header, rows):
     return stream.getvalue().encode()
 
 
-def descriptor(source_id, filename, content, **origin):
+class DescriptorOrigin(TypedDict):
+    url: NotRequired[str]
+    archive_id: NotRequired[str]
+    member: NotRequired[str]
+
+
+def descriptor(
+    source_id: str, filename: str, content: bytes, **origin: Unpack[DescriptorOrigin]
+) -> SourceDescriptor:
     return {
         "id": source_id,
         "filename": filename,
@@ -135,7 +146,7 @@ for filename, payload in [
     ("glove.6B.zip", zip_bytes),
 ]:
     (raw / filename).write_bytes(payload)
-registry = {
+registry: SourceRegistry = {
     "schema_version": 1,
     "provenance": {
         "mal": {"commit": "arb-019-fixture", "repository": "https://example.invalid/mal"},
@@ -226,7 +237,7 @@ source_cache = raw / "neelagiri-2025-v1"
 source_cache.mkdir()
 
 
-def details(mal, title, date, status, year):
+def details(mal: int, title: str, date: str, status: str, year: int) -> list[str]:
     row = {field: "" for field in DETAIL_COLUMNS}
     row.update(
         mal_id=str(mal),
@@ -277,7 +288,7 @@ base_sources = [
         url="https://example.invalid/ratings.csv",
     ),
 ]
-base_registry = {
+base_registry: SourceRegistry = {
     "schema_version": 1,
     "provenance": {"dataset": {"snapshot_id": "neelagiri-2025-v1"}},
     "sources": base_sources,
@@ -353,7 +364,7 @@ alias_cache = raw / "nafiul-2026-v1"
 alias_cache.mkdir()
 
 
-def alias_row(mal, main, english):
+def alias_row(mal: int, main: str, english: str) -> list[str]:
     row = {field: "" for field in ALIAS_COLUMNS}
     row.update(
         mal_id=str(mal),
@@ -371,7 +382,7 @@ alias_raw = csv_data(
 alias_source = descriptor(
     "nafiul_anime_csv", "anime_info.csv", alias_raw, url="https://example.invalid/anime_info.csv"
 )
-alias_registry = {
+alias_registry: SourceRegistry = {
     "schema_version": 1,
     "provenance": {"dataset": {"snapshot_id": "nafiul-2026-v1", "version": 1}},
     "sources": [alias_source],
@@ -429,7 +440,7 @@ release_manifest = compose_release(
 release_id = "sha256:" + hashlib.sha256(release_manifest.read_bytes()).hexdigest()
 release_dir = root / "releases" / release_id.replace(":", "-")
 release_temp.rename(release_dir)
-fixture_glove_registry = {
+fixture_glove_registry: SourceRegistry = {
     "schema_version": 1,
     "provenance": {
         "glove": {
@@ -449,28 +460,31 @@ fixture_glove_registry = {
     ],
 }
 fixture_glove_registry_bytes = canonical_bytes(fixture_glove_registry)
-common = {
-    "expected_release_identity": release_id,
-    "base_dir": base_dir,
-    "aliases_dir": alias_dir,
-    "alias_data_dir": alias_cache,
-    "_base_spec": base_spec,
-    "_alias_spec": alias_spec,
-    "_glove_registry_bytes": fixture_glove_registry_bytes,
-}
 fixture_report_path = build_release(
     release_dir,
     shared_glove / "glove.6B.300d.txt",
     root / "work" / "fixture-reference-build",
     block_size=256,
-    **common,
+    expected_release_identity=release_id,
+    base_dir=base_dir,
+    aliases_dir=alias_dir,
+    alias_data_dir=alias_cache,
+    _base_spec=base_spec,
+    _alias_spec=alias_spec,
+    _glove_registry_bytes=fixture_glove_registry_bytes,
 )
 fixture_candidate = export_release_bundle(
     release_dir,
     fixture_report_path.parent / "neighbors.json",
     fixture_report_path,
     root / "work" / "fixture-reference-store",
-    **common,
+    expected_release_identity=release_id,
+    base_dir=base_dir,
+    aliases_dir=alias_dir,
+    alias_data_dir=alias_cache,
+    _base_spec=base_spec,
+    _alias_spec=alias_spec,
+    _glove_registry_bytes=fixture_glove_registry_bytes,
 )
 fixture_report = json.loads(fixture_report_path.read_bytes())
 fixture_catalog = json.loads((release_dir / "catalog.json").read_bytes())["anime"]
@@ -533,7 +547,11 @@ prepared, prepared_identity, prepared_count = prepare_release(
     _alias_spec=alias_spec,
     _glove_registry_bytes=fixture_glove_registry_bytes,
 )
-assert prepared_identity == fixture_lock["reference"]["bundle_identity"] and prepared_count == 2
+assert (
+    prepared_identity
+    == ("sha256:" + hashlib.sha256((fixture_candidate / "manifest.json").read_bytes()).hexdigest())
+    and prepared_count == 2
+)
 assert (
     prepared
     == prepare_release(

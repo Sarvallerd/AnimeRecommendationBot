@@ -3,8 +3,13 @@
 import copy
 import unittest
 
+from recsys.contracts.bundle import Catalog
 from recsys.historical.assessment import (
     AssessmentError,
+    AssessmentJudgment,
+    AssessmentPacket,
+    HistoricalComparison,
+    HistoricalMethod,
     make_packet,
     make_template,
     score_method,
@@ -13,46 +18,55 @@ from recsys.historical.assessment import (
 
 
 class AssessmentTests(unittest.TestCase):
-    def fixture(self):
-        catalog = {
+    def fixture(self) -> AssessmentPacket:
+        catalog: Catalog = {
+            "schema_version": 1,
             "anime": {
                 str(i): {
                     "title": f"Anime {i}",
                     "aliases": [],
                     "genres": ["Drama"],
+                    "score": 8.0,
                     "type": "TV",
                     "episodes": 12,
                     "year": 2020,
                     "synopsis": f"Story {i}",
                 }
                 for i in (1, 2, 3)
-            }
+            },
         }
-        comparison = {
+        comparison: HistoricalComparison = {
             "catalog_sha256": "a" * 64,
             "query_set_sha256": "b" * 64,
             "methods": [
                 {
+                    "id": "first",
                     "queries": [
                         {
                             "query_mal_id": 1,
+                            "status": "ok",
                             "recommendations": [
-                                {"mal_id": 3, "score": 0.8},
-                                {"mal_id": 2, "score": 0.7},
+                                {"mal_id": 3, "rank": 1, "score": 0.8},
+                                {"mal_id": 2, "rank": 2, "score": 0.7},
                             ],
                         }
-                    ]
+                    ],
                 },
                 {
+                    "id": "second",
                     "queries": [
-                        {"query_mal_id": 1, "recommendations": [{"mal_id": 2, "score": 0.6}]}
-                    ]
+                        {
+                            "query_mal_id": 1,
+                            "status": "ok",
+                            "recommendations": [{"mal_id": 2, "rank": 1, "score": 0.6}],
+                        }
+                    ],
                 },
             ],
         }
         return make_packet(comparison, catalog)
 
-    def test_packet_blind_union_and_template_not_complete(self):
+    def test_packet_blind_union_and_template_not_complete(self) -> None:
         packet = self.fixture()
         self.assertEqual(
             packet["pairs"],
@@ -69,7 +83,7 @@ class AssessmentTests(unittest.TestCase):
         with self.assertRaises(AssessmentError):
             validate_assessment(make_template(packet), packet)
 
-    def test_complete_assessment_checks_evidence_and_pair_coverage(self):
+    def test_complete_assessment_checks_evidence_and_pair_coverage(self) -> None:
         packet = self.fixture()
         value = make_template(packet)
         value["assessor"] = {
@@ -80,7 +94,10 @@ class AssessmentTests(unittest.TestCase):
             "prompt_version": packet["prompt_version"],
             "prompt_sha256": packet["prompt_sha256"],
         }
-        for row in value["judgments"]:
+        judgments = value["judgments"]
+        assert isinstance(judgments, list)
+        for row in judgments:
+            assert isinstance(row, dict)
             row.update(
                 relevance=1,
                 rationale="Related narrative.",
@@ -96,25 +113,51 @@ class AssessmentTests(unittest.TestCase):
             )
         self.assertEqual(validate_assessment(value, packet), "reviewer")
         wrong = copy.deepcopy(value)
-        wrong["judgments"][0]["evidence"][0]["quote"] = "Invented"
+        wrong_rows = wrong["judgments"]
+        assert isinstance(wrong_rows, list) and isinstance(wrong_rows[0], dict)
+        evidence = wrong_rows[0]["evidence"]
+        assert isinstance(evidence, list) and isinstance(evidence[0], dict)
+        evidence[0]["quote"] = "Invented"
         with self.assertRaises(AssessmentError):
             validate_assessment(wrong, packet)
         wrong = copy.deepcopy(value)
-        wrong["judgments"][0]["relevance"] = True
+        wrong_rows = wrong["judgments"]
+        assert isinstance(wrong_rows, list) and isinstance(wrong_rows[0], dict)
+        wrong_rows[0]["relevance"] = True
         with self.assertRaises(AssessmentError):
             validate_assessment(wrong, packet)
         wrong = copy.deepcopy(value)
-        wrong["judgments"][0] = wrong["judgments"][1]
+        wrong_rows = wrong["judgments"]
+        assert isinstance(wrong_rows, list)
+        wrong_rows[0] = wrong_rows[1]
         with self.assertRaises(AssessmentError):
             validate_assessment(wrong, packet)
 
-    def test_unknown_returned_blocks_point_but_bounds_include_it(self):
-        queries = [{"query_mal_id": i, "status": "ok", "recommendations": []} for i in range(1, 21)]
-        queries[0]["recommendations"] = [{"mal_id": 22}, {"mal_id": 23}]
-        method = {"id": "test", "queries": queries}
-        judgments = [
-            {"query_mal_id": 1, "candidate_mal_id": 22, "relevance": 2, "same_franchise": True},
-            {"query_mal_id": 1, "candidate_mal_id": 23, "relevance": None, "same_franchise": None},
+    def test_unknown_returned_blocks_point_but_bounds_include_it(self) -> None:
+        method: HistoricalMethod = {
+            "id": "test",
+            "queries": [
+                {"query_mal_id": i, "status": "ok", "recommendations": []} for i in range(1, 21)
+            ],
+        }
+        method["queries"][0]["recommendations"] = [
+            {"mal_id": 22, "rank": 1, "score": 0.8},
+            {"mal_id": 23, "rank": 2, "score": 0.7},
+        ]
+        judgments: list[AssessmentJudgment] = [
+            {
+                "query_mal_id": 1,
+                "candidate_mal_id": candidate_id,
+                "relevance": relevance,
+                "rationale": "Fixture",
+                "evidence": [],
+                "same_franchise": same_franchise,
+                "franchise_rationale": "Fixture",
+            }
+            for candidate_id, relevance, same_franchise in (
+                (22, 2, True),
+                (23, None, None),
+            )
         ]
         result = score_method(method, judgments)
         row = result["queries"][0]

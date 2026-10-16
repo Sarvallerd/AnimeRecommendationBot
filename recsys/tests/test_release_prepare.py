@@ -1,6 +1,5 @@
 """Small verified inputs exercise the same locked prepare checks as production."""
 
-import copy
 import hashlib
 import json
 import platform
@@ -8,6 +7,7 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from typing import TypedDict
 from unittest.mock import patch
 
 import numpy as np
@@ -16,18 +16,37 @@ from test_aliases import Fixture
 from recsys import __version__
 from recsys.contracts.bundle import canonical_bytes
 from recsys.contracts.provenance import SOURCE_LAYOUT, source_fingerprints
+from recsys.data.aliases import AliasSpec
+from recsys.data.dataset import DatasetSpec
 from recsys.release.build import build_release, export_release_bundle
 from recsys.release.catalog import compose_release
-from recsys.release.lock import _lock, release_info
+from recsys.release.lock import ReleaseLock, _lock, release_info
 from recsys.release.prepare import PrepareError, prepare_release
 
 
-def sha(raw):
+def sha(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+class _BuildOptions(TypedDict):
+    expected_release_identity: str
+    base_dir: Path
+    aliases_dir: Path
+    alias_data_dir: Path
+    _base_spec: DatasetSpec
+    _alias_spec: AliasSpec
+    _glove_registry_bytes: bytes
+
+
+class _PrepareOptions(TypedDict):
+    _lock_bytes: bytes
+    _base_spec: DatasetSpec
+    _alias_spec: AliasSpec
+    _glove_registry_bytes: bytes
+
+
 class PrepareTests(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.data = Path(self.temp.name) / "data"
@@ -99,7 +118,7 @@ class PrepareTests(unittest.TestCase):
         release_identity = "sha256:" + sha(manifest.read_bytes())
         self.release = self.data / "releases" / release_identity.replace(":", "-")
         temporary_release.rename(self.release)
-        common = dict(
+        common: _BuildOptions = dict(
             expected_release_identity=release_identity,
             base_dir=self.base,
             aliases_dir=self.aliases,
@@ -127,7 +146,7 @@ class PrepareTests(unittest.TestCase):
         neighbors = json.loads((candidate / "neighbors.json").read_bytes())["neighbors"]
         nonready = report["coverage"]["zero_vector_ids"]
         self.assertEqual(nonready, [])
-        self.lock = {
+        lock = {
             "schema_version": 2,
             "kind": "arb-release-lock",
             "release_id": "fixture-v1",
@@ -175,8 +194,9 @@ class PrepareTests(unittest.TestCase):
                 "empty_seed": None,
             },
         }
-        self.lock_bytes = canonical_bytes(self.lock)
-        self.common = dict(
+        self.lock_bytes = canonical_bytes(lock)
+        self.lock: ReleaseLock = _lock(self.lock_bytes)
+        self.common: _PrepareOptions = dict(
             _lock_bytes=self.lock_bytes,
             _base_spec=self.base_spec,
             _alias_spec=self.alias_spec,
@@ -184,13 +204,13 @@ class PrepareTests(unittest.TestCase):
         )
         self.candidate = candidate
 
-    def test_current_alias_and_lock_schema(self):
+    def test_current_alias_and_lock_schema(self) -> None:
         self.assertEqual(release_info()["release_id"], "neelagiri-2025-nafiul-2026-v1")
         self.assertEqual(_lock(self.lock_bytes), self.lock)
         with self.assertRaisesRegex(PrepareError, "unknown_release"):
             release_info("latest")
 
-    def test_lock_schema_mutations_fail_before_input_access(self):
+    def test_lock_schema_mutations_fail_before_input_access(self) -> None:
         outside = Path(self.temp.name) / "outside-private"
         outside.mkdir()
         sentinel = outside / "sentinel"
@@ -255,7 +275,7 @@ class PrepareTests(unittest.TestCase):
         ]
         for path, replacement in cases:
             with self.subTest(path=path, value=replacement):
-                changed = copy.deepcopy(self.lock)
+                changed = json.loads(self.lock_bytes)
                 parent = changed
                 for key in path[:-1]:
                     parent = parent[key]
@@ -292,7 +312,7 @@ class PrepareTests(unittest.TestCase):
 
         for nonready in ([1, 1], [2, 1], [True, 2]):
             with self.subTest(nonready=nonready):
-                changed = copy.deepcopy(self.lock)
+                changed = json.loads(self.lock_bytes)
                 semantics = changed["semantic_expectations"]
                 semantics["vector_status_counts"] = {
                     "ready": 0,
@@ -313,7 +333,7 @@ class PrepareTests(unittest.TestCase):
                     _lock(canonical_bytes(changed))
                 self.assertEqual(str(failure.exception), "release_lock_invalid")
 
-    def test_wrong_semantic_never_publishes(self):
+    def test_wrong_semantic_never_publishes(self) -> None:
         bad = json.loads(self.lock_bytes)
         bad["semantic_expectations"]["smoke_seed"]["query"] = "Two"
         with self.assertRaisesRegex(PrepareError, "release_semantic_mismatch"):
@@ -326,7 +346,7 @@ class PrepareTests(unittest.TestCase):
             )
         self.assertEqual(list((self.data / "bundles").iterdir()), [])
 
-    def test_fresh_prepare_and_repeat_are_immutable(self):
+    def test_fresh_prepare_and_repeat_are_immutable(self) -> None:
         first, identity, count = prepare_release(self.data, **self.common)
         self.assertEqual((identity, count), (self.lock["reference"]["bundle_identity"], 2))
         saved = {
@@ -337,7 +357,7 @@ class PrepareTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(saved, {name: (second / name).read_bytes() for name in saved})
 
-    def test_missing_release_is_verified_before_publication(self):
+    def test_missing_release_is_verified_before_publication(self) -> None:
         shutil.rmtree(self.release)
         prepared, identity, count = prepare_release(self.data, **self.common)
         self.assertTrue(self.release.is_dir())
@@ -350,13 +370,13 @@ class PrepareTests(unittest.TestCase):
             ),
         )
 
-    def test_missing_frozen_prerequisite(self):
+    def test_missing_frozen_prerequisite(self) -> None:
         shutil.rmtree(self.base)
         with self.assertRaisesRegex(PrepareError, "release_prerequisite_missing"):
             prepare_release(self.data, **self.common)
         self.assertEqual(list((self.data / "bundles").iterdir()), [])
 
-    def test_prepare_uses_one_own_upstream_validation(self):
+    def test_prepare_uses_one_own_upstream_validation(self) -> None:
         import recsys.release.catalog as release_module
 
         original = release_module._verified_release
@@ -364,12 +384,12 @@ class PrepareTests(unittest.TestCase):
             prepare_release(self.data, **self.common)
         self.assertEqual(observed.call_count, 1)
 
-    def test_legacy_missing_cache_returns_fixed_error(self):
+    def test_legacy_missing_cache_returns_fixed_error(self) -> None:
         (self.data / "raw" / "mal-2020-glove-v1").mkdir()
         with self.assertRaisesRegex(PrepareError, "release_prepare_integrity_error"):
             prepare_release(self.data, "mal-2020-glove-v1")
 
-    def test_producer_mismatch_precedes_build(self):
+    def test_producer_mismatch_precedes_build(self) -> None:
         bad = json.loads(self.lock_bytes)
         bad["reference"]["producer"]["code_files_sha256"]["release/build.py"] = "0" * 64
         with self.assertRaisesRegex(PrepareError, "release_producer_mismatch"):
@@ -382,7 +402,7 @@ class PrepareTests(unittest.TestCase):
             )
         self.assertEqual(list((self.data / "bundles").iterdir()), [])
 
-    def test_reuse_uses_historical_producer_fingerprint(self):
+    def test_reuse_uses_historical_producer_fingerprint(self) -> None:
         target = self.data / "bundles" / self.lock["reference"]["bundle_identity"].replace(":", "-")
         shutil.copytree(self.candidate, target)
         with patch("recsys.release.prepare._producer", side_effect=AssertionError("rebuild")):
@@ -398,7 +418,7 @@ class PrepareTests(unittest.TestCase):
             )
         )
 
-    def test_symlink_tree_rejected_before_mutation(self):
+    def test_symlink_tree_rejected_before_mutation(self) -> None:
         (self.data / "bundles").rmdir()
         (self.data / "bundles").symlink_to(self.base, target_is_directory=True)
         with self.assertRaisesRegex(PrepareError, "unsafe_release_path"):

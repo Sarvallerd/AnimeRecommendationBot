@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 from pathlib import PurePath
+from typing import NotRequired, TypedDict, cast
 
 from recsys.contracts.resources import resource_bytes
 
@@ -22,7 +23,23 @@ _REGISTRY_RESOURCES = {
 }
 
 
-def load_registry(snapshot: str = DEFAULT_SNAPSHOT) -> tuple[dict, str]:
+class SourceDescriptor(TypedDict):
+    id: str
+    filename: str
+    size: int
+    sha256: str
+    url: NotRequired[str]
+    archive_id: NotRequired[str]
+    member: NotRequired[str]
+
+
+class SourceRegistry(TypedDict):
+    schema_version: int
+    provenance: dict[str, object]
+    sources: list[SourceDescriptor]
+
+
+def load_registry(snapshot: str = DEFAULT_SNAPSHOT) -> tuple[SourceRegistry, str]:
     """Load the registry packaged with the installed distribution."""
     if not isinstance(snapshot, str) or snapshot not in _REGISTRY_RESOURCES:
         raise SourceError("unknown source snapshot")
@@ -32,23 +49,26 @@ def load_registry(snapshot: str = DEFAULT_SNAPSHOT) -> tuple[dict, str]:
     except (ValueError, UnicodeError) as exc:
         raise SourceError(f"invalid packaged source registry: {exc}") from exc
     validate_registry(registry)
-    return registry, hashlib.sha256(raw).hexdigest()
+    return cast("SourceRegistry", registry), hashlib.sha256(raw).hexdigest()
 
 
-def validate_registry(registry: dict) -> None:
+def validate_registry(registry: object) -> None:
     """Reject unsafe or incomplete descriptors before touching the data directory."""
     if not isinstance(registry, dict) or registry.get("schema_version") != 1:
         raise SourceError("source registry must have schema_version 1")
+    registry = cast("dict[str, object]", registry)
     if not isinstance(registry.get("provenance"), dict):
         raise SourceError("source registry needs provenance")
     sources = registry.get("sources")
     if not isinstance(sources, list) or not sources:
         raise SourceError("source registry needs sources")
+    sources = cast("list[object]", sources)
     seen_ids: set[str] = set()
     seen_names: set[str] = set()
     for source in sources:
         if not isinstance(source, dict):
             raise SourceError("invalid source descriptor")
+        source = cast("dict[str, object]", source)
         source_id = source.get("id")
         filename = source.get("filename")
         size = source.get("size")
@@ -73,9 +93,8 @@ def validate_registry(registry: dict) -> None:
         if remote == archive:
             raise SourceError(f"source {source_id} needs exactly one origin")
         if remote:
-            if not isinstance(source["url"], str) or not source["url"].startswith(
-                ("https://", "http://")
-            ):
+            url = source["url"]
+            if not isinstance(url, str) or not url.startswith(("https://", "http://")):
                 raise SourceError(f"invalid URL for {source_id}")
         elif (
             source.get("archive_id") not in seen_ids

@@ -5,21 +5,35 @@ import json
 import shlex
 import unittest
 from pathlib import Path
+from typing import cast
 
 from recsys.data.sources import (
     DEFAULT_SNAPSHOT,
     SNAPSHOT_IDS,
     SourceError,
+    SourceRegistry,
     load_registry,
     validate_registry,
 )
 
 
+def _object(value: object) -> dict[str, object]:
+    if not isinstance(value, dict) or any(not isinstance(key, str) for key in value):
+        raise AssertionError("expected source-audit object with string keys")
+    return cast("dict[str, object]", value)
+
+
+def _items(value: object) -> list[object]:
+    if not isinstance(value, list):
+        raise AssertionError("expected source-audit list")
+    return cast("list[object]", value)
+
+
 class SourceTests(unittest.TestCase):
-    def assert_documented_download_pins(self, instructions, registry):
+    def assert_documented_download_pins(self, instructions: str, registry: SourceRegistry) -> None:
         """Read complete shell arguments as text; never execute the documentation."""
-        urls = {}
-        hashes = {}
+        urls: dict[str, str] = {}
+        hashes: dict[str, str] = {}
         for line in instructions.splitlines():
             if line.startswith("curl "):
                 tokens = shlex.split(line)
@@ -50,7 +64,7 @@ class SourceTests(unittest.TestCase):
             self.assertEqual(urls[filename], item["url"])
             self.assertEqual(hashes[filename], item["sha256"])
 
-    def test_packaged_registry_has_pinned_inputs(self):
+    def test_packaged_registry_has_pinned_inputs(self) -> None:
         registry, digest = load_registry()
         self.assertEqual(digest, "49bb399935f0ac7ec649fe2f4bd7715444c09c8513704866fa90b9bea29d182f")
         self.assertEqual(DEFAULT_SNAPSHOT, "mal-2020-glove-v1")
@@ -68,10 +82,11 @@ class SourceTests(unittest.TestCase):
             ],
         )
         self.assertEqual(
-            registry["provenance"]["mal"]["commit"], "9a1d7f56482accbde99e24cd7cfcad65e2d24b1f"
+            _object(registry["provenance"]["mal"])["commit"],
+            "9a1d7f56482accbde99e24cd7cfcad65e2d24b1f",
         )
 
-    def test_glove_selector_is_exact_legacy_projection(self):
+    def test_glove_selector_is_exact_legacy_projection(self) -> None:
         legacy, _ = load_registry()
         selected, _ = load_registry("glove-6b-300d-v1")
         self.assertEqual(
@@ -83,7 +98,7 @@ class SourceTests(unittest.TestCase):
             },
         )
 
-    def test_new_packaged_registry_matches_audit_pins(self):
+    def test_new_packaged_registry_matches_audit_pins(self) -> None:
         registry, digest = load_registry("neelagiri-2025-v1")
         self.assertEqual(len(digest), 64)
         self.assertEqual(
@@ -107,9 +122,15 @@ class SourceTests(unittest.TestCase):
             },
         )
         root = Path(__file__).resolve().parents[1]
-        audit = json.loads((root / "reports/dataset-audit-v1/source-audit.json").read_text())
-        selected = next(item for item in audit["candidates"] if item["id"] == "neelagiri-2025-v1")
-        expected = {item["id"]: item for item in selected["artifacts"]}
+        audit = _object(
+            json.loads((root / "reports/dataset-audit-v1/source-audit.json").read_text())
+        )
+        selected = next(
+            _object(item)
+            for item in _items(audit["candidates"])
+            if _object(item)["id"] == "neelagiri-2025-v1"
+        )
+        expected = {_object(item)["id"]: _object(item) for item in _items(selected["artifacts"])}
         for item, audit_id in zip(
             registry["sources"], ("neelagiri_details_csv", "neelagiri_ratings_csv"), strict=True
         ):
@@ -121,7 +142,7 @@ class SourceTests(unittest.TestCase):
         instructions = (root / "reports/dataset-audit-v1/README.md").read_text()
         self.assert_documented_download_pins(instructions, registry)
 
-    def test_nafiul_metadata_only_registry_and_unchanged_legacy_pin(self):
+    def test_nafiul_metadata_only_registry_and_unchanged_legacy_pin(self) -> None:
         registry, digest = load_registry("nafiul-2026-v1")
         self.assertEqual(digest, "56383b6fca667d1352ff9df7034b2d01415ef3a08aad1a82734f537defb26879")
         self.assertEqual(
@@ -137,13 +158,15 @@ class SourceTests(unittest.TestCase):
                 }
             ],
         )
-        self.assertEqual(registry["provenance"]["dataset"]["artifact_scope"], "anime-info-only")
-        self.assertEqual(registry["provenance"]["dataset"]["exact_collection_date"], None)
+        self.assertEqual(
+            _object(registry["provenance"]["dataset"])["artifact_scope"], "anime-info-only"
+        )
+        self.assertEqual(_object(registry["provenance"]["dataset"])["exact_collection_date"], None)
         self.assertEqual(
             load_registry()[1], "49bb399935f0ac7ec649fe2f4bd7715444c09c8513704866fa90b9bea29d182f"
         )
 
-    def test_documented_pins_reject_hash_suffix_and_changed_version(self):
+    def test_documented_pins_reject_hash_suffix_and_changed_version(self) -> None:
         registry, _ = load_registry("neelagiri-2025-v1")
         root = Path(__file__).resolve().parents[1]
         instructions = (root / "reports/dataset-audit-v1/README.md").read_text()
@@ -163,12 +186,14 @@ class SourceTests(unittest.TestCase):
                 registry,
             )
 
-    def test_unknown_snapshot_rejected_before_resource_lookup(self):
-        for snapshot in ("latest", "../source_registry.json", "NEELAGIRI", None):
+    def test_unknown_snapshot_rejected_before_resource_lookup(self) -> None:
+        for snapshot in ("latest", "../source_registry.json", "NEELAGIRI"):
             with self.subTest(snapshot=snapshot), self.assertRaises(SourceError):
                 load_registry(snapshot)
+        with self.subTest(snapshot=None), self.assertRaises(SourceError):
+            load_registry(None)  # type: ignore[arg-type]  # intentional invalid runtime input
 
-    def test_rejects_unsafe_filenames_and_archive_references(self):
+    def test_rejects_unsafe_filenames_and_archive_references(self) -> None:
         registry, _ = load_registry()
         for filename in ("../outside", "folder/file", "folder\\file", ".."):
             with self.subTest(filename=filename):

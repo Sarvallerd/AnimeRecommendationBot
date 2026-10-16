@@ -3,6 +3,7 @@
 import os
 import tempfile
 import unittest
+from collections.abc import Sequence
 from pathlib import Path
 from unittest.mock import patch
 
@@ -12,26 +13,34 @@ from test_research_model_content import _glove
 
 from recsys.research.models.hybrid import _fusion
 from recsys.research.models.package import fit_model, load_model, read_scoring_inputs
-from recsys.research.models.types import ScoreVector
+from recsys.research.models.types import CloseableScorer, ScoreVector
 from recsys.research.protocol import ResearchError
 
 
 class _Fake:
-    def __init__(self, values, available, supported):
+    def __init__(
+        self, values: Sequence[float], available: Sequence[bool], supported: set[int]
+    ) -> None:
         self.vector = ScoreVector(
             np.asarray(values, dtype=np.float64), np.asarray(available, dtype=np.bool_), 1
         )
         self.supported = supported
 
-    def score_many(self, seeds):
+    def score_many(self, seeds: tuple[tuple[int, ...], ...]) -> tuple[ScoreVector, ...]:
         return tuple(self.vector for _ in seeds)
 
-    def supported_seed_ids(self, seeds):
+    def score(self, seed_mal_ids: tuple[int, ...]) -> ScoreVector:
+        return self.vector
+
+    def close(self) -> None:
+        pass
+
+    def supported_seed_ids(self, seeds: tuple[int, ...]) -> frozenset[int]:
         return frozenset(self.supported & set(seeds))
 
 
 class FusionTests(unittest.TestCase):
-    def test_raw_ranks_negative_svd_visible_exclusion_and_support_union(self):
+    def test_raw_ranks_negative_svd_visible_exclusion_and_support_union(self) -> None:
         ids = (1, 2, 3, 4, 5)
         # Values 1.01e-10 and 1.02e-10 both publish as integer zero; raw order differs.
         content = _Fake([1, 1.01e-10, 1.02e-10, 0, 0], [True, True, True, False, False], {1})
@@ -45,16 +54,16 @@ class FusionTests(unittest.TestCase):
         self.assertTrue(negative.available[3])
         self.assertAlmostEqual(negative.values[3], 0.5 / 61)
 
-    def test_empty_and_invalid_seed_contract(self):
+    def test_empty_and_invalid_seed_contract(self) -> None:
         scorer = _Fake([0, 0], [False, False], set())
         self.assertFalse(_fusion(((),), (1, 2), scorer, scorer)[0].available.any())
         for seeds in ((1, 1), (True,), (3,), [1]):
             with self.subTest(seeds=seeds), self.assertRaises(ResearchError):
-                _fusion((seeds,), (1, 2), scorer, scorer)
+                _fusion((seeds,), (1, 2), scorer, scorer)  # type: ignore[arg-type]  # Invalid list input under test.
 
 
 class PortableTests(unittest.TestCase):
-    def test_fit_embed_remove_origins_then_score_and_tamper(self):
+    def test_fit_embed_remove_origins_then_score_and_tamper(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             fixture = ModelFixture(temporary)
             glove = Path(temporary) / "glove.txt"
@@ -144,7 +153,7 @@ class PortableTests(unittest.TestCase):
 
 @unittest.skipUnless(os.getenv("ARB_RESEARCH_GPU_TEST") == "1", "hardware opt-in")
 class HardwareTests(unittest.TestCase):
-    def test_four_gpu_components_and_cpu_hybrid_preserve_raw_ranks(self):
+    def test_four_gpu_components_and_cpu_hybrid_preserve_raw_ranks(self) -> None:
         from recsys.research.gpu import probe_gpu
         from recsys.research.predict import gpu_preflight, predict_validation
 
@@ -202,8 +211,9 @@ class HardwareTests(unittest.TestCase):
                     source.rmdir()
                 manifest, scorer = load_model(hybrid, inputs=inputs, backend="cpu")
                 self.assertEqual(scorer.score((1,)).supported_seeds, 1)
+                assert isinstance(scorer, CloseableScorer)
                 scorer.close()
-                measured = {}
+                measured: dict[str, object] = {}
                 predict_validation(
                     prepared,
                     hybrid,

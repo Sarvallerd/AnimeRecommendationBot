@@ -1,9 +1,13 @@
 """Paired user bootstrap and prespecified minimum-N rule."""
 
+from __future__ import annotations
+
 from collections import defaultdict
 from pathlib import Path
+from typing import TYPE_CHECKING, Literal, cast
 
 from recsys.research.artifacts import (
+    StreamDescriptor,
     cleanup,
     open_stage,
     publish,
@@ -13,10 +17,19 @@ from recsys.research.artifacts import (
     stream_jsonl,
     write_json,
 )
-from recsys.research.protocol import exact, fail, sha
+from recsys.research.evaluation.evaluate import EvaluationManifest, PrivateMetric
+from recsys.research.protocol import ProtocolSpec, exact, fail, sha
+
+if TYPE_CHECKING:
+    import numpy as np
+    from numpy.typing import NDArray
+
+type EvaluationRows = dict[tuple[str, str], PrivateMetric]
+type EvaluationRecord = tuple[EvaluationManifest, str, EvaluationRows]
+type PrimaryIndex = dict[str, dict[tuple[str, int], tuple[str, float]]]
 
 
-def _evaluation(path, expected_prepared_identity):
+def _evaluation(path: str | Path, expected_prepared_identity: str) -> EvaluationRecord:
     path = safe_path(path, directory=True)
     if {item.name for item in path.iterdir()} != {
         "evaluation-manifest.json",
@@ -24,9 +37,9 @@ def _evaluation(path, expected_prepared_identity):
         "user-metrics.jsonl.gz",
     }:
         fail()
-    manifest, raw = read_json(path / "evaluation-manifest.json")
+    value, raw = read_json(path / "evaluation-manifest.json")
     exact(
-        manifest,
+        value,
         {
             "schema_version",
             "kind",
@@ -41,6 +54,7 @@ def _evaluation(path, expected_prepared_identity):
             "files",
         },
     )
+    manifest = cast("EvaluationManifest", value)
     if (
         type(manifest["schema_version"]) is not int
         or manifest["schema_version"] != 1
@@ -51,20 +65,24 @@ def _evaluation(path, expected_prepared_identity):
         or set(manifest["files"]) != {"report.json", "user-metrics.jsonl.gz"}
     ):
         fail()
-    report, _ = read_json(path / "report.json", manifest["files"]["report.json"])
+    report_value, _ = read_json(path / "report.json", manifest["files"]["report.json"])
+    if not isinstance(report_value, dict):
+        fail()
+    report = cast("dict[str, object]", report_value)
     if (
         report["split"] != "validation"
         or report["prepared_identity"] != expected_prepared_identity
         or report["prediction_identity"] != manifest["prediction_identity"]
     ):
         fail()
-    rows = {}
-    per_query = defaultdict(set)
-    for row in stream_jsonl(
-        path / "user-metrics.jsonl.gz", manifest["files"]["user-metrics.jsonl.gz"]
+    rows: EvaluationRows = {}
+    per_query: defaultdict[str, set[str]] = defaultdict(set)
+    for row_value in stream_jsonl(
+        path / "user-metrics.jsonl.gz",
+        cast("StreamDescriptor", manifest["files"]["user-metrics.jsonl.gz"]),
     ):
         exact(
-            row,
+            row_value,
             {
                 "query_id",
                 "user_key",
@@ -83,6 +101,7 @@ def _evaluation(path, expected_prepared_identity):
                 "genre_diversity",
             },
         )
+        row = cast("PrivateMetric", row_value)
         key = (row["query_id"], row["mask"])
         if (
             key in rows
@@ -102,8 +121,8 @@ def _evaluation(path, expected_prepared_identity):
     return manifest, "sha256:" + sha(raw), rows
 
 
-def _primary(rows):
-    by_user = defaultdict(dict)
+def _primary(rows: EvaluationRows) -> tuple[list[str], PrimaryIndex]:
+    by_user: defaultdict[str, dict[tuple[str, int], tuple[str, float]]] = defaultdict(dict)
     for row in rows.values():
         if (
             row["cohort"] == "main"
@@ -122,13 +141,17 @@ def _primary(rows):
     return users, by_user
 
 
-def _quantile(values, probability, method):
+def _quantile(
+    values: NDArray[np.float64], probability: float, method: Literal["higher", "lower"]
+) -> float:
     import numpy as np
 
     return float(np.quantile(values, probability, method=method))
 
 
-def _bootstrap(matrix, seed, replicates):
+def _bootstrap(
+    matrix: NDArray[np.float64], seed: int, replicates: int
+) -> NDArray[np.float64] | None:
     import numpy as np
 
     rng = np.random.Generator(np.random.PCG64(seed))
@@ -144,7 +167,7 @@ def _bootstrap(matrix, seed, replicates):
     )
 
 
-def _policy(matrix, protocol):
+def _policy(matrix: NDArray[np.float64], protocol: ProtocolSpec) -> dict[str, object]:
     import numpy as np
 
     epsilon = protocol["comparison"]["epsilon_ndcg5"]
@@ -162,7 +185,9 @@ def _policy(matrix, protocol):
     bootstrap = _bootstrap(
         matrix, protocol["comparison"]["seed"], protocol["comparison"]["bootstrap_replicates"]
     )
-    errors = []
+    if bootstrap is None:
+        fail("research_unpaired_evaluation")
+    errors: list[NDArray[np.float64]] = []
     for n in range(10):
         for j in range(10):
             if j != n:
@@ -189,7 +214,9 @@ def _policy(matrix, protocol):
     }
 
 
-def _comparison_report(evaluations, prepared_identity, protocol):
+def _comparison_report(
+    evaluations: list[EvaluationRecord], prepared_identity: str, protocol: ProtocolSpec
+) -> dict[str, object]:
     """Derive every public comparison field from verified private validation rows."""
     import numpy as np
 
@@ -200,8 +227,8 @@ def _comparison_report(evaluations, prepared_identity, protocol):
         fail()
     reference_keys = set(evaluations[0][2])
     reference_users, reference_primary = _primary(evaluations[0][2])
-    models = []
-    matrices = []
+    models: list[dict[str, object]] = []
+    matrices: list[NDArray[np.float64]] = []
     for manifest, eval_id, rows in evaluations:
         if set(rows) != reference_keys:
             fail("research_unpaired_evaluation")
@@ -251,7 +278,7 @@ def _comparison_report(evaluations, prepared_identity, protocol):
                 "n_policy": _policy(matrix, protocol),
             }
         )
-    pairs = []
+    pairs: list[dict[str, object]] = []
     if len(reference_users) >= 2:
         base = matrices[0]
         for index in range(1, len(matrices)):
@@ -261,6 +288,8 @@ def _comparison_report(evaluations, prepared_identity, protocol):
                 protocol["comparison"]["seed"],
                 protocol["comparison"]["bootstrap_replicates"],
             )
+            if bootstrap is None:
+                fail("research_unpaired_evaluation")
             pairs.append(
                 {
                     "left": ids[0],
@@ -289,7 +318,12 @@ def _comparison_report(evaluations, prepared_identity, protocol):
     return report
 
 
-def compare_evaluations(evaluation_dirs, output_dir, *, expected_prepared_identity):
+def compare_evaluations(
+    evaluation_dirs: list[str | Path] | tuple[str | Path, ...],
+    output_dir: str | Path,
+    *,
+    expected_prepared_identity: str,
+) -> Path:
     if type(evaluation_dirs) not in (list, tuple) or not evaluation_dirs:
         fail()
     output_dir = Path(output_dir)

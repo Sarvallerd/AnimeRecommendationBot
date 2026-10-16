@@ -1,5 +1,7 @@
 """Pinned three-method comparison and fresh-process measurements for ARB-018."""
 
+from __future__ import annotations
+
 import importlib.metadata
 import json
 import os
@@ -11,10 +13,27 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING, TypedDict, cast
 
+from recsys.content.glove import GloveInfo
+from recsys.contracts.bundle import AnimeRecord, Catalog, Manifest, Neighbors
 from recsys.contracts.provenance import SOURCE_LAYOUT, source_fingerprints
 from recsys.contracts.resources import resource_bytes
-from recsys.historical.assessment import canonical, make_packet, make_template, sha
+from recsys.data.sources import SourceRegistry
+from recsys.historical.assessment import (
+    AssessmentAssessor,
+    AssessmentDocument,
+    HistoricalComparison,
+    HistoricalMethod,
+    HistoricalQuery,
+    HistoricalRecommendation,
+    ScoreMethod,
+    canonical,
+    make_packet,
+    make_template,
+    sha,
+)
+from recsys.historical.genre_baseline import GenreAnime, GenreQuery, GenreSpec
 from recsys.historical.legacy_vectors import (
     ANIME_COLUMNS,
     FEATURES,
@@ -28,6 +47,9 @@ from recsys.historical.legacy_vectors import (
     prepare_legacy_rows,
     retained_ids_sha,
 )
+
+if TYPE_CHECKING:
+    pass
 
 
 class EvaluationError(ValueError):
@@ -95,11 +117,166 @@ ORIGINAL_HASHES = {
 }
 
 
-def _hex(value, length=64):
+class PinnedInputs(TypedDict):
+    catalog: Catalog
+    neighbors: Neighbors
+    queries: list[GenreQuery]
+    spec: GenreSpec
+    spec_sha: str
+    registry: SourceRegistry
+    provenance: dict[str, object]
+    catalog_sha: str
+    count: int
+
+
+class WorkerTask(TypedDict):
+    method: str
+    paths: dict[str, str]
+
+
+class WorkerResult(TypedDict):
+    method: str
+    universe_count: int
+    universe_ids_sha256: str
+    queries: list[HistoricalQuery]
+    extra: dict[str, object]
+
+
+class WorkerOutput(TypedDict):
+    result: WorkerResult
+    prepare_wall_ns: int
+    rank20_wall_ns: int
+    peak_rss_bytes: int
+    effective_threadpools: list[dict[str, object]]
+    worker_wall_ns: int
+
+
+class RawSource(TypedDict):
+    id: str
+    size: int
+    sha256: str
+
+
+class ComparisonProvenance(TypedDict):
+    registry_sha256: str
+    raw_sources: list[RawSource]
+    bundle_identity: str
+    manifest_sha256: str
+    neighbors_sha256: str
+    normalization_report_sha256: str
+    build_report_sha256: str
+    code_revision: str
+    source_layout: str
+    code_files: dict[str, str]
+    lockfile_sha256: str
+    versions: dict[str, str]
+    legacy_originals: dict[str, str]
+
+
+class ComparisonMethod(HistoricalMethod):
+    version: str
+    parameters: dict[str, object]
+    parameters_sha256: str
+    universe_count: int
+    universe_ids_sha256: str
+
+
+class ComparisonArtifact(TypedDict):
+    schema_version: int
+    protocol_version: str
+    query_set_version: str
+    query_set_sha256: str
+    catalog_sha256: str
+    provenance: ComparisonProvenance
+    methods: list[ComparisonMethod]
+    legacy_diagnostics_sha256: str
+
+
+class MeasurementWorker(TypedDict):
+    method: str
+    repetition: int
+    exit_code: int
+    output_sha256: str
+    end_to_end_wall_ns: int
+    prepare_wall_ns: int
+    rank20_wall_ns: int
+    peak_rss_bytes: int
+    effective_threadpools: list[dict[str, object]]
+
+
+class MeasurementWorkload(TypedDict):
+    query_count: int
+    universe_counts: dict[str, int]
+
+
+class MeasurementSchedule(TypedDict):
+    repetition: int
+    order: list[str]
+
+
+class MeasurementArtifact(TypedDict):
+    schema_version: int
+    protocol_version: str
+    comparison_sha256: str
+    scope: str
+    runtime: dict[str, str]
+    machine: dict[str, str | int | None]
+    thread_environment: dict[str, str]
+    workload: MeasurementWorkload
+    schedule: list[MeasurementSchedule]
+    workers: list[MeasurementWorker]
+
+
+class ContextMethod(TypedDict):
+    id: str
+    version: str
+    parameters: dict[str, object]
+    parameters_sha256: str
+    universe_count: int
+    universe_ids_sha256: str
+    returned_slots: int
+    unavailable_queries: int
+    short_queries: int
+    status_counts: dict[str, int]
+
+
+class ComparisonContext(TypedDict):
+    query_set_version: str
+    query_set_sha256: str
+    catalog_sha256: str
+    legacy_diagnostics_sha256: str
+    provenance: ComparisonProvenance
+    methods: list[ContextMethod]
+
+
+class MeasurementContext(TypedDict):
+    scope: str
+    runtime: dict[str, str]
+    machine: dict[str, str | int | None]
+    thread_environment: dict[str, str]
+    workload: MeasurementWorkload
+    schedule: list[MeasurementSchedule]
+    verification_scope: dict[str, str]
+
+
+class AssessmentReport(TypedDict):
+    assessor: AssessmentAssessor
+    assessment_sha256: str
+    methods: list[ScoreMethod]
+
+
+class PerformanceStat(TypedDict):
+    samples: list[int]
+    median: int | float
+    min: int
+    max: int
+
+
+def _hex(value: object, length: int = 64) -> bool:
     return isinstance(value, str) and re.fullmatch(rf"[0-9a-f]{{{length}}}", value) is not None
 
 
-def _id_sha(ids):
+def _id_sha(ids: list[int]) -> str:
     return sha("".join(f"{i}\n" for i in ids).encode())
 
 
@@ -119,15 +296,15 @@ def _verify_originals(lockfile: Path, originals_root: Path | None = None) -> dic
 
 
 def _load_pins(
-    bundle_dir,
-    normalization_report,
-    build_report,
-    anime_csv,
-    synopsis_csv,
-    glove,
-    lockfile,
-    originals_root=None,
-):
+    bundle_dir: Path,
+    normalization_report: Path,
+    build_report: Path,
+    anime_csv: Path,
+    synopsis_csv: Path,
+    glove: Path,
+    lockfile: Path,
+    originals_root: Path | None = None,
+) -> PinnedInputs:
     """Validate every pinned public input before launching measured workers."""
     from recsys.content.glove import _read_canonical
     from recsys.contracts.bundle import check_bundle, read_canonical
@@ -144,9 +321,12 @@ def _load_pins(
     registry, registry_sha = load_registry()
     descriptors = {d["id"]: d for d in registry["sources"]}
     identity, count = check_bundle(bundle_dir)
-    catalog, catalog_raw = read_canonical(bundle_dir / "catalog.json")
-    neighbors, neighbors_raw = read_canonical(bundle_dir / "neighbors.json")
-    manifest, manifest_raw = read_canonical(bundle_dir / "manifest.json")
+    catalog_value, catalog_raw = read_canonical(bundle_dir / "catalog.json")
+    neighbors_value, neighbors_raw = read_canonical(bundle_dir / "neighbors.json")
+    manifest_value, manifest_raw = read_canonical(bundle_dir / "manifest.json")
+    catalog = cast("Catalog", catalog_value)  # check_bundle validated these exact wire bytes.
+    neighbors = cast("Neighbors", neighbors_value)
+    manifest = cast("Manifest", manifest_value)
     norm, norm_raw = _read_canonical(normalization_report)
     build, build_raw = _read_canonical(build_report)
     _validate_report(
@@ -159,6 +339,7 @@ def _load_pins(
         norm,
         norm_raw,
     )
+    build = cast("dict[str, object]", build)
     if manifest.get("algorithm") != build["algorithm"]:
         raise EvaluationError("manifest algorithm and build report disagree")
     spec_raw = resource_bytes("queries", "quality_queries_v1.json")
@@ -169,7 +350,7 @@ def _load_pins(
         or len(catalog["anime"]) != spec["catalog_count"]
     ):
         raise EvaluationError("catalog does not match pinned quality query set")
-    anime = _validate_catalog(catalog, spec["catalog_count"])
+    anime = _validate_catalog(cast("dict[str, object]", catalog), spec["catalog_count"])
     queries = _validate_query_set(spec, anime)
     anime_rows = _read_csv(anime_csv, descriptors["mal_anime"], ANIME_COLUMNS)
     synopsis_rows = _read_csv(synopsis_csv, descriptors["mal_synopsis"], SYNOPSIS_COLUMNS)
@@ -207,7 +388,7 @@ def _load_pins(
         "catalog": catalog,
         "neighbors": neighbors,
         "queries": queries,
-        "spec": spec,
+        "spec": cast("GenreSpec", spec),
         "spec_sha": sha(spec_raw),
         "registry": registry,
         "provenance": {
@@ -236,7 +417,12 @@ def _load_pins(
     }
 
 
-def _selected_queries(anime, queries, glove, descriptor):
+def _selected_queries(
+    anime: dict[str, AnimeRecord],
+    queries: list[GenreQuery],
+    glove: Path,
+    descriptor: GloveInfo,
+) -> tuple[list[int], list[HistoricalQuery], GloveInfo, int]:
     import numpy as np
 
     from recsys.content.glove import _tokens, build_vectors, load_embeddings
@@ -249,10 +435,11 @@ def _selected_queries(anime, queries, glove, descriptor):
     id_array = np.asarray(ids, dtype=np.int64)
     position = {mal_id: index for index, mal_id in enumerate(ids)}
     rank_started = time.perf_counter_ns()
-    results = []
+    results: list[HistoricalQuery] = []
     for query in queries:
         mal_id = query["mal_id"]
         index = position[mal_id]
+        recommendations: list[HistoricalRecommendation]
         if not ready[index]:
             recommendations = []
             status = diagnostics["anime"][str(mal_id)]["vector_status"]
@@ -284,13 +471,15 @@ def _selected_queries(anime, queries, glove, descriptor):
     return ids, results, glove_info, time.perf_counter_ns() - rank_started
 
 
-def _baseline_queries(anime, queries):
+def _baseline_queries(
+    anime: dict[str, AnimeRecord], queries: list[GenreQuery]
+) -> tuple[list[int], list[HistoricalQuery]]:
     from recsys.historical.genre_baseline import genre_neighbors
 
-    result = []
+    result: list[HistoricalQuery] = []
     for query in queries:
         mal_id = query["mal_id"]
-        items = genre_neighbors(anime, mal_id)
+        items = genre_neighbors(cast("dict[str, GenreAnime]", anime), mal_id)
         status = (
             "empty_genres"
             if not anime[str(mal_id)]["genres"]
@@ -309,7 +498,13 @@ def _baseline_queries(anime, queries):
     return sorted(int(i) for i in anime), result
 
 
-def _legacy_queries(anime_csv, synopsis_csv, registry, queries, glove):
+def _legacy_queries(
+    anime_csv: Path,
+    synopsis_csv: Path,
+    registry: SourceRegistry,
+    queries: list[GenreQuery],
+    glove: Path,
+) -> tuple[list[int], list[HistoricalQuery], dict[str, object], int]:
     from recsys.content.glove import load_embeddings
     from recsys.data.mal2020 import _read_csv
 
@@ -341,7 +536,7 @@ def _legacy_queries(anime_csv, synopsis_csv, registry, queries, glove):
     for row in results:
         if row["status"] == "zero_vector":
             row["status"] = vector_diagnostics["statuses"][row["query_mal_id"]]
-    diagnostics = {
+    diagnostics: dict[str, object] = {
         "counts": dataset.counts,
         "retained_ids_sha256": retained_ids_sha(dataset),
         "query_exclusions": {
@@ -367,11 +562,11 @@ def _legacy_queries(anime_csv, synopsis_csv, registry, queries, glove):
     return ids, results, diagnostics, rank_ns
 
 
-def _worker(input_path, output_path):
+def _worker(input_path: str | Path, output_path: str | Path) -> None:
     import threadpoolctl
 
     started = time.perf_counter_ns()
-    task = json.loads(Path(input_path).read_text())
+    task = cast("WorkerTask", json.loads(Path(input_path).read_text()))
     method = task["method"]
     paths = {k: Path(v) for k, v in task["paths"].items()}
     with threadpoolctl.threadpool_limits(limits=1):
@@ -388,6 +583,7 @@ def _worker(input_path, output_path):
         anime, queries = pins["catalog"]["anime"], pins["queries"]
         descriptor = {d["id"]: d for d in pins["registry"]["sources"]}["glove_300d"]
         # Loading vectors and features is preparation; query ranking starts after it.
+        extra: dict[str, object]
         if method == "glove-selected":
             # The selected adapter is one pass to preserve the exact published reduction.
             ids, rows, glove_info, rank_ns = _selected_queries(
@@ -411,7 +607,7 @@ def _worker(input_path, output_path):
         else:
             raise EvaluationError("unknown worker method")
         prepare_ns = prepared - started - rank_ns
-        result = {
+        result: WorkerResult = {
             "method": method,
             "universe_count": len(ids),
             "universe_ids_sha256": _id_sha(ids),
@@ -434,19 +630,19 @@ def _worker(input_path, output_path):
 
 
 def compare(
-    bundle_dir,
-    normalization_report,
-    build_report,
-    anime_csv,
-    synopsis_csv,
-    glove,
-    lockfile,
-    code_revision,
-    output_dir,
+    bundle_dir: str | Path,
+    normalization_report: str | Path,
+    build_report: str | Path,
+    anime_csv: str | Path,
+    synopsis_csv: str | Path,
+    glove: str | Path,
+    lockfile: str | Path,
+    code_revision: str,
+    output_dir: str | Path,
     *,
-    repetitions=3,
-    originals_root=None,
-):
+    repetitions: int = 3,
+    originals_root: str | Path | None = None,
+) -> Path:
     if type(repetitions) is not int or not 1 <= repetitions <= 10:
         raise EvaluationError("repetitions must be 1..10")
     if (
@@ -456,18 +652,13 @@ def compare(
     ):
         raise EvaluationError("code revision must be a lowercase commit SHA")
     paths = {
-        k: Path(v).resolve()
-        for k, v in locals().items()
-        if k
-        in (
-            "bundle_dir",
-            "normalization_report",
-            "build_report",
-            "anime_csv",
-            "synopsis_csv",
-            "glove",
-            "lockfile",
-        )
+        "bundle_dir": Path(bundle_dir).resolve(),
+        "normalization_report": Path(normalization_report).resolve(),
+        "build_report": Path(build_report).resolve(),
+        "anime_csv": Path(anime_csv).resolve(),
+        "synopsis_csv": Path(synopsis_csv).resolve(),
+        "glove": Path(glove).resolve(),
+        "lockfile": Path(lockfile).resolve(),
     }
     if originals_root is not None:
         paths["originals_root"] = Path(originals_root).resolve()
@@ -479,7 +670,9 @@ def compare(
     pins = _load_pins(**paths)
     pins["provenance"]["code_revision"] = code_revision
     output_dir.mkdir(parents=True, exist_ok=True)
-    schedule, workers, first = [], [], {}
+    schedule: list[dict[str, object]] = []
+    workers: list[dict[str, object]] = []
+    first: dict[str, WorkerResult] = {}
     try:
         for repetition in range(1, repetitions + 1):
             order = [METHODS[(j + repetition - 1) % len(METHODS)] for j in range(len(METHODS))]
@@ -522,7 +715,7 @@ def compare(
                     raise EvaluationError(
                         f"{method} repetition {repetition} worker failed: {process.stderr[-3000:]}"
                     )
-                output = json.loads(output_path.read_text())
+                output = cast("WorkerOutput", json.loads(output_path.read_text()))
                 output_path.unlink(missing_ok=True)
                 result = output["result"]
                 if method == "glove-selected":
@@ -601,7 +794,7 @@ def compare(
             "schedule": schedule,
             "workers": workers,
         }
-        packet = make_packet(comparison, pins["catalog"])
+        packet = make_packet(cast("HistoricalComparison", comparison), pins["catalog"])
         template = make_template(packet)
         from recsys.historical.genre_baseline import _write_atomic
 
@@ -627,7 +820,7 @@ if __name__ == "__main__":
         raise SystemExit("internal worker invocation only")
 
 
-def _validate_provenance(value, catalog_sha):
+def _validate_provenance(value: object, catalog_sha: str) -> None:
     from recsys.data.sources import load_registry
 
     fields = {
@@ -647,6 +840,7 @@ def _validate_provenance(value, catalog_sha):
     }
     if not isinstance(value, dict) or set(value) != fields:
         raise EvaluationError("invalid comparison provenance fields")
+    value = cast("dict[str, object]", value)
     registry, registry_sha = load_registry()
     sources = {item["id"]: item for item in registry["sources"]}
     expected_sources = [
@@ -664,7 +858,7 @@ def _validate_provenance(value, catalog_sha):
     ):
         if not _hex(value[name]):
             raise EvaluationError(f"invalid comparison {name}")
-    if value["bundle_identity"] != "sha256:" + value["manifest_sha256"]:
+    if value["bundle_identity"] != "sha256:" + cast("str", value["manifest_sha256"]):
         raise EvaluationError("bundle identity does not match manifest SHA256")
     if not _hex(value["code_revision"], 40):
         raise EvaluationError("invalid comparison code revision")
@@ -679,11 +873,16 @@ def _validate_provenance(value, catalog_sha):
         raise EvaluationError("invalid catalog SHA256")
 
 
-def _validate_bundle_links(provenance, catalog_path, catalog_raw):
+def _validate_bundle_links(
+    provenance: ComparisonProvenance, catalog_path: str | Path, catalog_raw: bytes
+) -> None:
     from recsys.contracts.bundle import check_bundle_bytes, read_canonical
 
     bundle_dir = Path(catalog_path).parent
-    manifest, manifest_raw = read_canonical(bundle_dir / "manifest.json")
+    manifest_value, manifest_raw = read_canonical(bundle_dir / "manifest.json")
+    manifest = cast(
+        "Manifest", manifest_value
+    )  # check_bundle_bytes below validates all wire bytes.
     _, neighbors_raw = read_canonical(bundle_dir / "neighbors.json")
     identity, _ = check_bundle_bytes(catalog_raw, neighbors_raw, manifest_raw)
     if (
@@ -698,15 +897,16 @@ def _validate_bundle_links(provenance, catalog_path, catalog_raw):
         ("normalization_report", "normalization_report_sha256"),
         ("source_registry", "registry_sha256"),
     ):
-        if sources.get(name) != provenance[key]:
+        if sources.get(name) != cast("dict[str, object]", provenance)[key]:
             raise EvaluationError(f"comparison {name} manifest link mismatch")
-    raw_by_id = {item["id"]: item["sha256"] for item in provenance["raw_sources"]}
+    raw_sources = provenance["raw_sources"]
+    raw_by_id = {item["id"]: item["sha256"] for item in raw_sources}
     for name in ("mal_anime", "mal_synopsis", "glove_300d"):
         if sources.get(name) != raw_by_id[name]:
             raise EvaluationError(f"comparison {name} source link mismatch")
 
 
-def _validate_legacy_diagnostics(value, raw, expected_sha):
+def _validate_legacy_diagnostics(value: object, raw: bytes, expected_sha: str) -> None:
     import math
 
     from recsys.data.sources import load_registry
@@ -723,6 +923,7 @@ def _validate_legacy_diagnostics(value, raw, expected_sha):
         "repairs",
     }:
         raise EvaluationError("invalid legacy diagnostics fields")
+    value = cast("dict[str, object]", value)
     counts = value["counts"]
     expected_missing = {
         "Aired": 309,
@@ -825,7 +1026,13 @@ def _validate_legacy_diagnostics(value, raw, expected_sha):
         raise EvaluationError("legacy diagnostics repair profile mismatch")
 
 
-def _validate_comparison(comparison, catalog, comparison_raw, diagnostics, diagnostics_raw):
+def _validate_comparison(
+    comparison: object,
+    catalog: Catalog,
+    comparison_raw: bytes,
+    diagnostics: object,
+    diagnostics_raw: bytes,
+) -> list[GenreQuery]:
     import math
 
     from recsys.contracts.bundle import check_catalog
@@ -847,6 +1054,7 @@ def _validate_comparison(comparison, catalog, comparison_raw, diagnostics, diagn
         "legacy_diagnostics_sha256",
     }:
         raise EvaluationError("invalid comparison fields")
+    comparison = cast("dict[str, object]", comparison)
     if (
         type(comparison["schema_version"]) is not int
         or comparison["schema_version"] != 2
@@ -862,13 +1070,15 @@ def _validate_comparison(comparison, catalog, comparison_raw, diagnostics, diagn
     ):
         raise EvaluationError("query set mismatch")
     check_catalog(catalog)
-    anime = _validate_catalog(catalog, spec["catalog_count"])
+    anime = _validate_catalog(
+        cast("dict[str, object]", catalog), cast("int", spec["catalog_count"])
+    )
     queries = _validate_query_set(spec, anime)
     if comparison["catalog_sha256"] != spec["catalog_sha256"]:
         raise EvaluationError("comparison catalog pin mismatch")
-    _validate_provenance(comparison["provenance"], comparison["catalog_sha256"])
+    _validate_provenance(comparison["provenance"], cast("str", comparison["catalog_sha256"]))
     _validate_legacy_diagnostics(
-        diagnostics, diagnostics_raw, comparison["legacy_diagnostics_sha256"]
+        diagnostics, diagnostics_raw, cast("str", comparison["legacy_diagnostics_sha256"])
     )
     methods = comparison["methods"]
     if (
@@ -972,7 +1182,12 @@ def _validate_comparison(comparison, catalog, comparison_raw, diagnostics, diagn
     return queries
 
 
-def _performance(measurements, comparison_raw, comparison, diagnostics):
+def _performance(
+    measurements: object,
+    comparison_raw: bytes,
+    comparison: ComparisonArtifact,
+    diagnostics: object,
+) -> dict[str, dict[str, PerformanceStat]]:
     import statistics
 
     fields = {
@@ -989,6 +1204,7 @@ def _performance(measurements, comparison_raw, comparison, diagnostics):
     }
     if not isinstance(measurements, dict) or set(measurements) != fields:
         raise EvaluationError("invalid measurements fields")
+    measurements = cast("MeasurementArtifact", measurements)
     if (
         type(measurements["schema_version"]) is not int
         or measurements["schema_version"] != 1
@@ -1036,7 +1252,7 @@ def _performance(measurements, comparison_raw, comparison, diagnostics):
     if not 1 <= repetitions <= 10:
         raise EvaluationError("invalid measurement repetition count")
     schedule = measurements["schedule"]
-    expected_schedule = [
+    expected_schedule: list[MeasurementSchedule] = [
         {"repetition": i, "order": [METHODS[(j + i - 1) % 3] for j in range(3)]}
         for i in range(1, repetitions + 1)
     ]
@@ -1056,7 +1272,7 @@ def _performance(measurements, comparison_raw, comparison, diagnostics):
         "sha256": sources["glove_300d"]["sha256"],
         "size": sources["glove_300d"]["size"],
     }
-    expected_digests = {}
+    expected_digests: dict[str, str] = {}
     for method in comparison["methods"]:
         name = method["id"]
         extra = (
@@ -1074,7 +1290,7 @@ def _performance(measurements, comparison_raw, comparison, diagnostics):
             "extra": extra,
         }
         expected_digests[name] = sha(canonical(result))
-    grouped = {}
+    grouped: dict[str, dict[str, PerformanceStat]] = {}
     worker_fields = {
         "method",
         "repetition",
@@ -1086,8 +1302,8 @@ def _performance(measurements, comparison_raw, comparison, diagnostics):
         "peak_rss_bytes",
         "effective_threadpools",
     }
-    for method in METHODS:
-        samples = [worker for worker in workers if worker["method"] == method]
+    for method_id in METHODS:
+        samples = [worker for worker in workers if worker["method"] == method_id]
         if [worker["repetition"] for worker in samples] != list(range(1, repetitions + 1)):
             raise EvaluationError("measurement repetitions incomplete")
         for row in samples:
@@ -1097,7 +1313,7 @@ def _performance(measurements, comparison_raw, comparison, diagnostics):
                 or row["exit_code"] != 0
             ):
                 raise EvaluationError("invalid measurement worker fields or exit code")
-            if row["output_sha256"] != expected_digests[method]:
+            if row["output_sha256"] != expected_digests[method_id]:
                 raise EvaluationError("worker output digest does not match comparison")
             for key in (
                 "end_to_end_wall_ns",
@@ -1110,7 +1326,7 @@ def _performance(measurements, comparison_raw, comparison, diagnostics):
             if row["end_to_end_wall_ns"] < row["prepare_wall_ns"] + row["rank20_wall_ns"]:
                 raise EvaluationError("worker timing exceeds parent elapsed time")
             pools = row["effective_threadpools"]
-            if not isinstance(pools, list) or (method != "genre-jaccard" and not pools):
+            if not isinstance(pools, list) or (method_id != "genre-jaccard" and not pools):
                 raise EvaluationError("worker threadpool metadata missing")
             for pool in pools:
                 if (
@@ -1123,7 +1339,7 @@ def _performance(measurements, comparison_raw, comparison, diagnostics):
                     or not pool["internal_api"]
                 ):
                     raise EvaluationError("worker native threadpool limit mismatch")
-        grouped[method] = {
+        grouped[method_id] = {
             key: {
                 "samples": [row[key] for row in samples],
                 "median": statistics.median(row[key] for row in samples),
@@ -1135,10 +1351,10 @@ def _performance(measurements, comparison_raw, comparison, diagnostics):
     return grouped
 
 
-def _comparison_context(comparison):
-    methods = []
+def _comparison_context(comparison: ComparisonArtifact) -> ComparisonContext:
+    methods: list[ContextMethod] = []
     for method in comparison["methods"]:
-        statuses = {}
+        statuses: dict[str, int] = {}
         for row in method["queries"]:
             statuses[row["status"]] = statuses.get(row["status"], 0) + 1
         methods.append(
@@ -1167,7 +1383,7 @@ def _comparison_context(comparison):
     }
 
 
-def _measurement_context(measurements):
+def _measurement_context(measurements: MeasurementArtifact) -> MeasurementContext:
     return {
         "scope": measurements["scope"],
         "runtime": measurements["runtime"],
@@ -1184,41 +1400,55 @@ def _measurement_context(measurements):
     }
 
 
-def summarize(comparison_path, catalog_path, measurements_path, assessment_paths, output_dir):
+def summarize(
+    comparison_path: str | Path,
+    catalog_path: str | Path,
+    measurements_path: str | Path,
+    assessment_paths: list[str | Path] | tuple[str | Path, ...],
+    output_dir: str | Path,
+) -> Path:
     from recsys.contracts.bundle import read_canonical
     from recsys.historical.assessment import make_packet, score_method, validate_assessment
 
     if not assessment_paths:
         raise EvaluationError("at least one assessment required")
-    comparison, comparison_raw = read_canonical(comparison_path)
-    catalog, catalog_raw = read_canonical(catalog_path)
-    measurements, measurements_raw = read_canonical(measurements_path)
+    comparison_value, comparison_raw = read_canonical(comparison_path)
+    catalog_value, catalog_raw = read_canonical(catalog_path)
+    measurements_value, measurements_raw = read_canonical(measurements_path)
     diagnostics, diagnostics_raw = read_canonical(
         Path(comparison_path).with_name("legacy-diagnostics.json")
     )
-    if sha(catalog_raw) != comparison.get("catalog_sha256"):
+    if not isinstance(comparison_value, dict) or sha(catalog_raw) != comparison_value.get(
+        "catalog_sha256"
+    ):
         raise EvaluationError("catalog SHA256 mismatch")
-    _validate_comparison(comparison, catalog, comparison_raw, diagnostics, diagnostics_raw)
+    catalog = cast("Catalog", catalog_value)
+    _validate_comparison(comparison_value, catalog, comparison_raw, diagnostics, diagnostics_raw)
+    comparison = cast("ComparisonArtifact", comparison_value)
     _validate_bundle_links(comparison["provenance"], catalog_path, catalog_raw)
-    performance = _performance(measurements, comparison_raw, comparison, diagnostics)
-    packet = make_packet(comparison, catalog)
-    assessments, seen = [], set()
+    performance = _performance(measurements_value, comparison_raw, comparison, diagnostics)
+    measurements = cast("MeasurementArtifact", measurements_value)
+    packet = make_packet(cast("HistoricalComparison", comparison), catalog)
+    assessments: list[AssessmentReport] = []
+    seen: set[str] = set()
     for path in assessment_paths:
-        assessment, raw = read_canonical(path)
-        assessor_id = validate_assessment(assessment, packet)
+        assessment_value, raw = read_canonical(path)
+        assessor_id = validate_assessment(assessment_value, packet)
+        document = cast("AssessmentDocument", assessment_value)
         if assessor_id in seen:
             raise EvaluationError(f"duplicate assessor ID {assessor_id}")
         seen.add(assessor_id)
         assessments.append(
             {
-                "assessor": assessment["assessor"],
+                "assessor": document["assessor"],
                 "assessment_sha256": sha(raw),
                 "methods": [
-                    score_method(method, assessment["judgments"])
-                    for method in comparison["methods"]
+                    score_method(method, document["judgments"]) for method in comparison["methods"]
                 ],
             }
         )
+    context = _comparison_context(comparison)
+    measure_context = _measurement_context(measurements)
     summary = {
         "schema_version": 1,
         "protocol_version": "arb018-v1",
@@ -1226,8 +1456,8 @@ def summarize(comparison_path, catalog_path, measurements_path, assessment_paths
         "catalog_sha256": sha(catalog_raw),
         "measurements_sha256": sha(measurements_raw),
         "packet_sha256": sha(canonical(packet)),
-        "comparison_context": _comparison_context(comparison),
-        "measurement_context": _measurement_context(measurements),
+        "comparison_context": context,
+        "measurement_context": measure_context,
         "performance": performance,
         "assessments": assessments,
     }
@@ -1238,8 +1468,6 @@ def summarize(comparison_path, catalog_path, measurements_path, assessment_paths
     from recsys.historical.genre_baseline import _write_atomic
 
     _write_atomic(out / "summary.json", canonical(summary))
-    context = summary["comparison_context"]
-    measure_context = summary["measurement_context"]
     provenance = context["provenance"]
     lines = [
         "# ARB-018 comparison",
@@ -1295,8 +1523,8 @@ def summarize(comparison_path, catalog_path, measurements_path, assessment_paths
         "## Performance",
         "",
     ]
-    for method, metrics in performance.items():
-        lines.append(f"- {method}:")
+    for method_id, metrics in performance.items():
+        lines.append(f"- {method_id}:")
         for key, unit in (
             ("end_to_end_wall_ns", "ns"),
             ("prepare_wall_ns", "ns"),
@@ -1310,7 +1538,7 @@ def summarize(comparison_path, catalog_path, measurements_path, assessment_paths
         pool_samples = [
             worker["effective_threadpools"]
             for worker in measurements["workers"]
-            if worker["method"] == method
+            if worker["method"] == method_id
         ]
         pool_counts = [[pool["num_threads"] for pool in pools] for pools in pool_samples]
         lines.append(
@@ -1339,10 +1567,10 @@ def summarize(comparison_path, catalog_path, measurements_path, assessment_paths
             f"Method version: `{assessor['method_version']}`. Model: `{assessor['model']}`. Prompt: `{assessor['prompt_version']}`.",
             "",
         ]
-        for method in assessment["methods"]:
-            macro = method["macro"]
+        for scored_method in assessment["methods"]:
+            macro = scored_method["macro"]
             lines += [
-                f"### {method['method_id']}",
+                f"### {scored_method['method_id']}",
                 "",
                 f"Returned {macro['returned']}/100; assessed {macro['assessed']}; coverage {macro['coverage']}; full-five queries {macro['full_five_queries']}.",
                 f"Mean grade@5 {macro['mean_grade_at_5']} bounds {macro['mean_grade_bounds']}; precision@5 {macro['precision_at_5']} bounds {macro['precision_bounds']}.",
@@ -1351,7 +1579,7 @@ def summarize(comparison_path, catalog_path, measurements_path, assessment_paths
                 "| Query MAL_ID | Status | Returned | Assessed | Unknown | Mean grade@5 | Grade bounds | Precision@5 | Precision bounds | Franchise@5 | Franchise bounds |",
                 "| --- | --- | ---: | ---: | ---: | ---: | --- | ---: | --- | ---: | --- |",
             ]
-            for row in method["queries"]:
+            for row in scored_method["queries"]:
                 lines.append(
                     f"| {row['query_mal_id']} | {row['status']} | {row['returned']} | {row['assessed']} | {row['unknown_returned']} | {row['mean_grade_at_5']} | {row['mean_grade_bounds']} | {row['precision_at_5']} | {row['precision_bounds']} | {row['same_franchise_at_5']} | {row['same_franchise_bounds']} |"
                 )

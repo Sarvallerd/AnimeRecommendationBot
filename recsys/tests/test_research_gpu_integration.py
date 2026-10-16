@@ -3,29 +3,30 @@
 import os
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
+from typing import IO
 from unittest.mock import patch
 
 import numpy as np
+from numpy.typing import NDArray
 from research_model_support import ModelFixture, patch_release_info
-from test_research_model_cf import hand_inputs
+from test_research_model_cf import _inputs, _manifest, _parameters, hand_inputs
 from test_research_model_content import _glove
 
-from recsys.research.artifacts import read_json, write_json
+from recsys.research.artifacts import StreamDescriptor, read_json, write_json
 from recsys.research.evaluation.evaluate import evaluate_predictions
-from recsys.research.models.collaborative import _SVD
 from recsys.research.models.collaborative import fit as fit_cf
 from recsys.research.models.collaborative import load as load_cf
 from recsys.research.models.content import ContentScorer
 from recsys.research.models.package import fit_model, load_model, read_scoring_inputs
-from recsys.research.models.types import ScoreVector
-from recsys.research.predict import _admit_gpu, gpu_preflight, predict_validation
+from recsys.research.models.types import CloseableScorer, ScoreVector, SupportedBatchScorer
+from recsys.research.predict import PredictionQuery, _admit_gpu, gpu_preflight, predict_validation
 from recsys.research.protocol import ResearchError
 
 
 class BackendContractTests(unittest.TestCase):
-    def test_publication_failure_writes_failed_measurement_without_output(self):
+    def test_publication_failure_writes_failed_measurement_without_output(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             fixture = ModelFixture(directory)
             prepared, identity = fixture.make_prepared()
@@ -34,7 +35,7 @@ class BackendContractTests(unittest.TestCase):
             evidence.mkdir(mode=0o700)
             measurement = evidence / "measure.json"
             output = fixture.root / "prediction"
-            measured = {}
+            measured: dict[str, object] = {}
             with (
                 patch_release_info(fixture.lock),
                 patch(
@@ -57,7 +58,7 @@ class BackendContractTests(unittest.TestCase):
             self.assertEqual(read_json(measurement)[0], measured)
             self.assertEqual(measurement.stat().st_mode & 0o777, 0o600)
 
-    def test_measurement_write_failure_keeps_published_output_honest(self):
+    def test_measurement_write_failure_keeps_published_output_honest(self) -> None:
         from recsys.research.predict import write_json as original_write
 
         with tempfile.TemporaryDirectory() as directory:
@@ -68,15 +69,15 @@ class BackendContractTests(unittest.TestCase):
             evidence.mkdir(mode=0o700)
             measurement = evidence / "measure.json"
             output = fixture.root / "prediction"
-            measured = {}
+            measured: dict[str, object] = {}
             failures = 0
 
-            def fail_once(path, body):
+            def fail_once(path: Path, body: object) -> None:
                 nonlocal failures
                 if path == measurement and failures == 0:
                     failures += 1
                     raise OSError("injected measurement failure")
-                return original_write(path, body)
+                original_write(path, body)
 
             with (
                 patch_release_info(fixture.lock),
@@ -95,7 +96,7 @@ class BackendContractTests(unittest.TestCase):
             self.assertEqual(measured["status"], "published_measurement_failed")
             self.assertEqual(read_json(measurement)[0], measured)
 
-    def test_measurement_output_is_private_separate_and_no_replace(self):
+    def test_measurement_output_is_private_separate_and_no_replace(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             fixture = ModelFixture(directory)
             prepared, identity = fixture.make_prepared()
@@ -117,7 +118,7 @@ class BackendContractTests(unittest.TestCase):
             self.assertFalse(output.exists())
             self.assertEqual(measurement.read_text(encoding="utf-8"), "existing")
 
-    def test_svd_gpu_batch_keeps_negative_zero_and_cold_semantics(self):
+    def test_svd_gpu_batch_keeps_negative_zero_and_cold_semantics(self) -> None:
         inputs, rows = hand_inputs()
         fake_svd = (
             np.empty((3, 2)),
@@ -126,13 +127,13 @@ class BackendContractTests(unittest.TestCase):
         )
 
         class FakeDots:
-            def __init__(self, features):
+            def __init__(self, features: NDArray[np.float64]) -> None:
                 self.features = features
 
-            def dot(self, left):
+            def dot(self, left: NDArray[np.float64]) -> NDArray[np.float64]:
                 return left @ self.features.T
 
-            def close(self):
+            def close(self) -> None:
                 pass
 
         with tempfile.TemporaryDirectory() as directory:
@@ -144,16 +145,13 @@ class BackendContractTests(unittest.TestCase):
                 ),
                 patch("sklearn.utils.extmath.randomized_svd", return_value=fake_svd),
             ):
-                metadata = fit_cf(inputs, dict(_SVD), {}, root)
-            manifest = {
-                "variant_id": "puresvd",
-                "parameters": dict(_SVD),
-                "metadata": metadata,
-                "files": {"factors.npy": {}},
-            }
+                metadata = fit_cf(inputs, _parameters("puresvd"), {}, root)
+            manifest = _manifest("puresvd", metadata, ("factors.npy",))
             cpu = load_cf(root, manifest, inputs)
             with patch("recsys.research.gpu.CupyDenseDots", FakeDots):
                 gpu = load_cf(root, manifest, inputs, backend="gpu")
+                assert isinstance(cpu, SupportedBatchScorer)
+                assert isinstance(gpu, SupportedBatchScorer)
                 try:
                     queries = ((1,), (1, 4), (4,), (3, 1, 2))
                     actual = gpu.score_many(queries)
@@ -169,32 +167,57 @@ class BackendContractTests(unittest.TestCase):
                 finally:
                     gpu.close()
 
-    def test_gpu_admission_rejects_full_rank_flip_inside_raw_tolerance(self):
+    def test_gpu_admission_rejects_full_rank_flip_inside_raw_tolerance(self) -> None:
         low, high = 0.5000000004999, 0.5000000005001
         mask = np.asarray([True, True, False], dtype=np.bool_)
         cpu = ScoreVector(np.asarray([low, high, 0.0]), mask, 1)
         gpu = ScoreVector(np.asarray([high, low, 0.0]), mask, 1)
-        reference = SimpleNamespace(score_many=lambda groups: (cpu,), close=lambda: None)
-        scored = SimpleNamespace(score_many=lambda groups: (gpu,))
-        module = SimpleNamespace(load=lambda *_args, **_kwargs: reference)
-        model = {
-            "variant_id": "puresvd",
-            "producer": {
-                "execution": {"scoring": {"backend": "cupy"}},
-                "code_files_sha256": {"research_gpu.py": "a" * 64},
-            },
-        }
-        first = (({"query_id": "q1_" + "a" * 64}, (3,)),)
-        inputs = SimpleNamespace(mal_ids=(1, 2, 3))
-        with patch("recsys.research.predict._backend", return_value=module):
-            with self.assertRaisesRegex(ResearchError, "research_gpu_parity_failed"):
-                _admit_gpu(first, Path("unused"), model, scored, inputs, {"sha256": "b" * 64})
 
-    def test_rank_zero_gpu_svd_never_creates_zero_dimension_dots(self):
+        class FakeScorer:
+            def __init__(self, vector: ScoreVector) -> None:
+                self.vector = vector
+
+            def score(self, seed_mal_ids: tuple[int, ...]) -> ScoreVector:
+                return self.vector
+
+            def score_many(self, groups: tuple[tuple[int, ...], ...]) -> tuple[ScoreVector, ...]:
+                return tuple(self.vector for _ in groups)
+
+            def close(self) -> None:
+                pass
+
+        reference, scored = FakeScorer(cpu), FakeScorer(gpu)
+        model = _manifest("puresvd", {}, ())
+        model["producer"]["execution"]["scoring"] = {"backend": "cupy"}
+        model["producer"]["code_files_sha256"]["research_gpu.py"] = "a" * 64
+        query: PredictionQuery = {
+            "query_id": "q1_" + "a" * 64,
+            "cohort": "main",
+            "seed_policy": "liked",
+            "order": "random-liked-1",
+            "n": 1,
+            "seed_mal_ids": [3],
+        }
+        first = ((query, (3,)),)
+        inputs = replace(hand_inputs()[0], mal_ids=(1, 2, 3))
+        descriptor: StreamDescriptor = {
+            "bytes": 0,
+            "sha256": "b" * 64,
+            "rows": 1,
+            "uncompressed_bytes": 0,
+            "canonical_sha256": "b" * 64,
+        }
+        with patch("recsys.research.predict._backend") as backend:
+            backend.return_value.load.return_value = reference
+            with self.assertRaisesRegex(ResearchError, "research_gpu_parity_failed"):
+                _admit_gpu(first, Path("unused"), model, scored, inputs, descriptor)
+
+    def test_rank_zero_gpu_svd_never_creates_zero_dimension_dots(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            inputs = SimpleNamespace(
-                mal_ids=(1, 2),
-                train_stats={
+            inputs = _inputs(
+                (1, 2),
+                {
+                    "schema_version": 1,
                     "train_users": 1,
                     "train_completed_rows": 1,
                     "items": {
@@ -203,12 +226,14 @@ class BackendContractTests(unittest.TestCase):
                             "positive_users": 1,
                             "rating_sum": 8,
                             "rating_count": 1,
+                            "band": "head",
                         },
                         "2": {
                             "completed_users": 0,
                             "positive_users": 0,
                             "rating_sum": 0,
                             "rating_count": 0,
+                            "band": "cold",
                         },
                     },
                 },
@@ -218,44 +243,40 @@ class BackendContractTests(unittest.TestCase):
                 "recsys.research.models.collaborative.iter_training_rows",
                 return_value=iter([("a", 1, 8)]),
             ):
-                metadata = fit_cf(inputs, dict(_SVD), {}, root)
+                metadata = fit_cf(inputs, _parameters("puresvd"), {}, root)
             self.assertEqual(metadata["effective_rank"], 0)
             with patch(
                 "recsys.research.gpu.CupyDenseDots", side_effect=AssertionError("rank-zero upload")
             ):
                 scorer = load_cf(
                     root,
-                    {
-                        "variant_id": "puresvd",
-                        "parameters": dict(_SVD),
-                        "metadata": metadata,
-                        "files": {"factors.npy": {}},
-                    },
+                    _manifest("puresvd", metadata, ("factors.npy",)),
                     inputs,
                     backend="gpu",
                 )
+                assert isinstance(scorer, CloseableScorer)
                 self.assertEqual(scorer.score((1,)).supported_seeds, 0)
                 scorer.close()
                 scorer.close()
                 with self.assertRaisesRegex(ResearchError, "research_gpu_closed"):
                     scorer.score((1,))
 
-    def test_content_gpu_batch_owns_cached_rows_and_preserves_query_order(self):
+    def test_content_gpu_batch_owns_cached_rows_and_preserves_query_order(self) -> None:
         ids = tuple(range(1, 131))
         vectors = np.zeros((len(ids), 300), dtype=np.float64)
         vectors[:, 0] = 1.0
-        calls = []
+        calls: list[int] = []
 
         class FakeDots:
-            def __init__(self, features):
+            def __init__(self, features: NDArray[np.float64]) -> None:
                 self.features = features
                 self.closed = False
 
-            def dot(self, left):
+            def dot(self, left: NDArray[np.float64]) -> NDArray[np.float64]:
                 calls.append(left.shape[0])
                 return left @ self.features.T
 
-            def close(self):
+            def close(self) -> None:
                 self.closed = True
 
         with patch("recsys.research.gpu.CupyDenseDots", FakeDots):
@@ -276,7 +297,7 @@ class BackendContractTests(unittest.TestCase):
             scorer.close()
             self.assertTrue(scorer.dots is None)
 
-    def test_unsupported_gpu_variants_fail_explicitly(self):
+    def test_unsupported_gpu_variants_fail_explicitly(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             fixture = ModelFixture(directory)
             prepared, identity = fixture.make_prepared()
@@ -295,22 +316,27 @@ class BackendContractTests(unittest.TestCase):
                             backend="gpu",
                         )
 
-    def test_cpu_manifest_keeps_original_execution_shape(self):
+    def test_cpu_manifest_keeps_original_execution_shape(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             fixture = ModelFixture(directory)
             prepared, identity = fixture.make_prepared()
             model = fixture.fit_popularity(prepared, identity)
             manifest, _ = read_json(model / "model-manifest.json")
+            assert isinstance(manifest, dict)
+            producer = manifest["producer"]
+            assert isinstance(producer, dict)
             self.assertEqual(
-                manifest["producer"]["execution"],
+                producer["execution"],
                 {"backend": "cpu", "dtype": "float64", "blas_threads": 1},
             )
-            self.assertNotIn("research_gpu.py", manifest["producer"]["code_files_sha256"])
+            hashes = producer["code_files_sha256"]
+            assert isinstance(hashes, dict)
+            self.assertNotIn("research_gpu.py", hashes)
 
 
 @unittest.skipUnless(os.getenv("ARB_RESEARCH_GPU_TEST") == "1", "hardware opt-in")
 class HardwareIntegrationTests(unittest.TestCase):
-    def test_four_variants_paired_payloads_prediction_parity_and_preflight(self):
+    def test_four_variants_paired_payloads_prediction_parity_and_preflight(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             fixture = ModelFixture(directory)
             glove = Path(directory) / "glove.txt"
@@ -320,7 +346,14 @@ class HardwareIntegrationTests(unittest.TestCase):
             evidence.mkdir(mode=0o700)
             original_open = Path.open
 
-            def development_only(path, *args, **kwargs):
+            def development_only(
+                path: Path,
+                mode: str = "r",
+                buffering: int = -1,
+                encoding: str | None = None,
+                errors: str | None = None,
+                newline: str | None = None,
+            ) -> IO[str] | IO[bytes]:
                 if path.name in {
                     "train-interactions.tsv.gz",
                     "validation-labels.jsonl.gz",
@@ -328,7 +361,7 @@ class HardwareIntegrationTests(unittest.TestCase):
                     "splits.tsv.gz",
                 }:
                     raise AssertionError("nondevelopment stream opened during scoring")
-                return original_open(path, *args, **kwargs)
+                return original_open(path, mode, buffering, encoding, errors, newline)
 
             with patch_release_info(fixture.lock):
                 inputs = read_scoring_inputs(prepared, expected_prepared_identity=identity)
@@ -362,9 +395,9 @@ class HardwareIntegrationTests(unittest.TestCase):
                             self.assertIn(
                                 "research_gpu.py", gpu_manifest["producer"]["code_files_sha256"]
                             )
-                            self.assertEqual(
-                                gpu_manifest["producer"]["execution"]["scoring"]["backend"], "cupy"
-                            )
+                            scoring = gpu_manifest["producer"]["execution"]["scoring"]
+                            assert isinstance(scoring, dict)
+                            self.assertEqual(scoring["backend"], "cupy")
                             for seeds in ((1,), (2, 1), (21,), (1, 2, 3)):
                                 actual = gpu_scorer.score(seeds)
                                 expected = cpu_scorer.score(seeds)
@@ -379,7 +412,7 @@ class HardwareIntegrationTests(unittest.TestCase):
                             if callable(close):
                                 close()
                         output = fixture.root / f"{variant}-pred"
-                        measured = {}
+                        measured: dict[str, object] = {}
                         measurement_path = evidence / f"{variant}.json"
                         with patch.object(Path, "open", development_only):
                             predict_validation(
@@ -394,14 +427,18 @@ class HardwareIntegrationTests(unittest.TestCase):
                         self.assertEqual(read_json(measurement_path)[0], measured)
                         self.assertEqual(measurement_path.stat().st_mode & 0o777, 0o600)
                         self.assertEqual(measured["status"], "published")
-                        self.assertTrue(
-                            measured["gpu_admission"]["complete_available_rankings_equal"]
-                        )
-                        self.assertGreater(measured["queries"], 0)
+                        admission = measured["gpu_admission"]
+                        assert isinstance(admission, dict)
+                        self.assertTrue(admission["complete_available_rankings_equal"])
+                        queries = measured["queries"]
+                        assert isinstance(queries, int)
+                        self.assertGreater(queries, 0)
+                        pool = measured["dedicated_pool_session_including_admission"]
+                        assert isinstance(pool, dict)
+                        reserved = pool["pool_peak_reserved_bytes"]
+                        assert isinstance(reserved, int)
                         self.assertGreaterEqual(
-                            measured["dedicated_pool_session_including_admission"][
-                                "pool_peak_reserved_bytes"
-                            ],
+                            reserved,
                             0,
                         )
                         evaluate_predictions(
@@ -418,11 +455,12 @@ class HardwareIntegrationTests(unittest.TestCase):
                                     prepared, gpu, diagnostic, expected_prepared_identity=identity
                                 )
                             report, _ = read_json(diagnostic / "preflight.json")
+                            assert isinstance(report, dict)
                             self.assertEqual(report["status"], "passed")
                             self.assertIsNotNone(report["single_query_latency"])
                             self.assertIsNotNone(report["score_many_batch_throughput"])
 
-    def test_gpu_manifest_runtime_type_tamper_is_rejected(self):
+    def test_gpu_manifest_runtime_type_tamper_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             fixture = ModelFixture(directory)
             prepared, identity = fixture.make_prepared()
@@ -438,13 +476,20 @@ class HardwareIntegrationTests(unittest.TestCase):
                 )
                 inputs = read_scoring_inputs(prepared, expected_prepared_identity=identity)
                 manifest, _ = read_json(model / "model-manifest.json")
-                manifest["producer"]["execution"]["scoring"]["device_index"] = False
+                assert isinstance(manifest, dict)
+                producer = manifest["producer"]
+                assert isinstance(producer, dict)
+                execution = producer["execution"]
+                assert isinstance(execution, dict)
+                scoring = execution["scoring"]
+                assert isinstance(scoring, dict)
+                scoring["device_index"] = False
                 (model / "model-manifest.json").unlink()
                 write_json(model / "model-manifest.json", manifest)
                 with self.assertRaisesRegex(ResearchError, "research_backend_mismatch"):
                     load_model(model, inputs=inputs, backend="gpu")
 
-    def test_admission_and_writer_failures_release_gpu_and_never_publish(self):
+    def test_admission_and_writer_failures_release_gpu_and_never_publish(self) -> None:
         from recsys.research.gpu import probe_gpu
         from recsys.research.predict import GzipOneWriter
 
@@ -503,7 +548,7 @@ class HardwareIntegrationTests(unittest.TestCase):
                 self.assertFalse((fixture.root / "publish-fail").exists())
                 self.assertEqual(probe_gpu()["backend"], "cupy")
 
-    def test_two_loaded_gpu_scorers_share_session_and_close_independently(self):
+    def test_two_loaded_gpu_scorers_share_session_and_close_independently(self) -> None:
         from recsys.research.gpu import gpu_execution, gpu_memory_usage, probe_gpu
 
         with tempfile.TemporaryDirectory() as directory:

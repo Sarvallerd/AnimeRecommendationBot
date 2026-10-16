@@ -1,12 +1,18 @@
 """Strict full-catalog ML-01 scoring and held-out metrics."""
 
+from __future__ import annotations
+
 import math
 import re
 from collections import Counter, defaultdict
+from collections.abc import Iterable, Iterator
 from pathlib import Path
+from typing import TypedDict, cast
 
-from recsys.contracts.bundle import canonical_bytes, check_catalog
+from recsys.contracts.bundle import Catalog, canonical_bytes, check_catalog
 from recsys.research.artifacts import (
+    FileDescriptor,
+    StreamDescriptor,
     StreamWriter,
     check_descriptor,
     check_identity,
@@ -20,16 +26,96 @@ from recsys.research.artifacts import (
     validate_preparation_producer,
     write_json,
 )
-from recsys.research.protocol import exact, fail, finite, sha
+from recsys.research.prepare import PreparationLabel, PreparationManifest
+from recsys.research.protocol import ProtocolSpec, exact, fail, finite, sha
+
+
+class EvaluationQuery(TypedDict):
+    query_id: str
+    cohort: str
+    seed_policy: str
+    order: str
+    n: int
+    seed_mal_ids: list[int]
+
+
+class EvaluationTrainItem(TypedDict):
+    completed_users: int
+    positive_users: int
+    rating_sum: int
+    rating_count: int
+    band: str
+
+
+class EvaluationTrainStats(TypedDict):
+    schema_version: int
+    train_users: int
+    train_completed_rows: int
+    items: dict[str, EvaluationTrainItem]
+
+
+class PredictionManifest(TypedDict):
+    schema_version: int
+    kind: str
+    prepared_identity: str
+    query_descriptor: StreamDescriptor
+    catalog_descriptor: FileDescriptor
+    split: str
+    model_id: str
+    config_sha256: str
+    fit_identity: str
+    train_interactions: StreamDescriptor
+    train_stats: FileDescriptor
+    code_revision: str
+    zero_seed_policy: str
+    scores: StreamDescriptor
+
+
+class EvaluationManifest(TypedDict):
+    schema_version: int
+    kind: str
+    prepared_identity: str
+    prediction_identity: str
+    split: str
+    model_id: str
+    config_sha256: str
+    fit_identity: str
+    prediction_code_revision: str
+    selection_identity: str | None
+    files: dict[str, FileDescriptor]
+
+
+class GenreDiversity(TypedDict):
+    mean: float | None
+    valid_pair_coverage: float
+
+
+class PrivateMetric(TypedDict):
+    query_id: str
+    user_key: str
+    split: str
+    cohort: str
+    mask: str
+    order: str
+    n: int
+    history_bin: str
+    seed_band: str
+    ranking: list[int]
+    metrics: dict[str, float]
+    known_history_repeats: int
+    completed_repeats: int
+    recent_2024_seed_count: int
+    genre_diversity: GenreDiversity
+
 
 METRICS = ("ndcg5", "ndcg10", "recall5", "recall10", "hit5", "hit10")
 
 
-def metrics(ranking, targets):
+def metrics(ranking: list[int], targets: set[int] | list[int]) -> dict[str, float]:
     if type(ranking) is not list or not targets or len(set(ranking)) != len(ranking):
         fail()
     targets = set(targets)
-    answer = {}
+    answer: dict[str, float] = {}
     for k in (5, 10):
         hits = [int(item in targets) for item in ranking[:k]]
         dcg = sum(hit / math.log2(index + 2) for index, hit in enumerate(hits))
@@ -40,38 +126,61 @@ def metrics(ranking, targets):
     return answer
 
 
-def _prepared(prepared_dir, expected_identity):
+def _prepared(
+    prepared_dir: str | Path, expected_identity: str
+) -> tuple[
+    PreparationManifest, ProtocolSpec, Catalog, dict[str, object], str, EvaluationTrainStats
+]:
     check_identity(expected_identity)
     prepared_dir = safe_path(prepared_dir, directory=True)
-    manifest, raw = read_json(prepared_dir / "prepare-manifest.json")
-    validate_preparation_producer(manifest)
+    manifest_value, raw = read_json(prepared_dir / "prepare-manifest.json")
+    validate_preparation_producer(manifest_value)
+    manifest = cast("PreparationManifest", manifest_value)
     if "sha256:" + sha(raw) != expected_identity or manifest.get("kind") != "arb-ml-preparation":
         fail()
     files = manifest["files"]
-    protocol, _ = read_json(prepared_dir / "protocol.json", files["protocol.json"])
-    catalog, _ = read_json(prepared_dir / "model-catalog.json", files["model-catalog.json"])
-    ids = check_catalog(catalog)
+    protocol_value, _ = read_json(prepared_dir / "protocol.json", files["protocol.json"])
+    catalog_value, _ = read_json(prepared_dir / "model-catalog.json", files["model-catalog.json"])
+    ids = check_catalog(catalog_value)
+    catalog = cast("Catalog", catalog_value)
     if any(item["score"] is not None for item in catalog["anime"].values()):
         fail()
-    fit, fit_raw = read_json(prepared_dir / "fit/manifest.json", files["fit/manifest.json"])
-    stats, _ = read_json(prepared_dir / "fit/train-stats.json", files["fit/train-stats.json"])
+    fit_value, fit_raw = read_json(prepared_dir / "fit/manifest.json", files["fit/manifest.json"])
+    stats_value, _ = read_json(prepared_dir / "fit/train-stats.json", files["fit/train-stats.json"])
+    if not isinstance(fit_value, dict) or not isinstance(stats_value, dict):
+        fail()
+    fit = cast("dict[str, object]", fit_value)
+    stats = cast("EvaluationTrainStats", stats_value)
     if (
         fit["train_stats"] != files["fit/train-stats.json"]
         or fit["train_interactions"] != files["fit/train-interactions.tsv.gz"]
         or set(stats["items"]) != ids
-        or "sha256:" + sha(canonical_bytes(protocol)) != manifest["protocol_identity"]
+        or "sha256:" + sha(canonical_bytes(protocol_value)) != manifest["protocol_identity"]
     ):
         fail()
-    return manifest, protocol, catalog, fit, "sha256:" + sha(fit_raw), stats
+    return (
+        manifest,
+        cast("ProtocolSpec", protocol_value),
+        catalog,
+        fit,
+        "sha256:" + sha(fit_raw),
+        stats,
+    )
 
 
-def _predictions(path, prepared_manifest, prepared_identity, split, fit_identity):
+def _predictions(
+    path: str | Path,
+    prepared_manifest: PreparationManifest,
+    prepared_identity: str,
+    split: str,
+    fit_identity: str,
+) -> tuple[PredictionManifest, str]:
     path = safe_path(path, directory=True)
     if {item.name for item in path.iterdir()} != {"prediction-manifest.json", "scores.jsonl.gz"}:
         fail()
-    manifest, raw = read_json(path / "prediction-manifest.json")
+    value, raw = read_json(path / "prediction-manifest.json")
     exact(
-        manifest,
+        value,
         {
             "schema_version",
             "kind",
@@ -89,6 +198,7 @@ def _predictions(path, prepared_manifest, prepared_identity, split, fit_identity
             "scores",
         },
     )
+    manifest = cast("PredictionManifest", value)
     if (
         type(manifest["schema_version"]) is not int
         or manifest["schema_version"] != 1
@@ -125,24 +235,30 @@ def _predictions(path, prepared_manifest, prepared_identity, split, fit_identity
     return manifest, "sha256:" + sha(raw)
 
 
-def _paired_rows(prepared_dir, prep, split, allowed=None):
+def _paired_rows(
+    prepared_dir: Path,
+    prep: PreparationManifest,
+    split: str,
+    allowed: set[tuple[str, str, int]] | None = None,
+) -> Iterator[tuple[EvaluationQuery, PreparationLabel]]:
     """Validation reads only development queries and validation labels."""
     files = prep["files"]
     labels = stream_jsonl(
         prepared_dir / f"evaluator/{split}-labels.jsonl.gz",
-        files[f"evaluator/{split}-labels.jsonl.gz"],
+        cast("StreamDescriptor", files[f"evaluator/{split}-labels.jsonl.gz"]),
     )
     queries = (
         stream_jsonl(
-            prepared_dir / "development/queries.jsonl.gz", files["development/queries.jsonl.gz"]
+            prepared_dir / "development/queries.jsonl.gz",
+            cast("StreamDescriptor", files["development/queries.jsonl.gz"]),
         )
         if split == "validation"
         else None
     )
-    seen = set()
-    for label in labels:
+    seen: set[str] = set()
+    for label_value in labels:
         exact(
-            label,
+            label_value,
             {
                 "cohort",
                 "user_key",
@@ -161,6 +277,7 @@ def _paired_rows(prepared_dir, prep, split, allowed=None):
                 "positive_ratings",
             },
         )
+        label = cast("PreparationLabel", label_value)
         query = (
             next(queries, None)
             if queries is not None
@@ -176,6 +293,7 @@ def _paired_rows(prepared_dir, prep, split, allowed=None):
         if query is None:
             fail()
         exact(query, {"query_id", "cohort", "seed_policy", "order", "n", "seed_mal_ids"})
+        query = cast("EvaluationQuery", query)
         qid = query["query_id"]
         if qid in seen:
             fail()
@@ -202,10 +320,17 @@ def _paired_rows(prepared_dir, prep, split, allowed=None):
         fail()
 
 
-def _rank(scores, ids, excluded, *, n0=False, stats=None):
+def _rank(
+    scores: object,
+    ids: list[int],
+    excluded: set[int],
+    *,
+    n0: bool = False,
+    stats: EvaluationTrainStats | None = None,
+) -> list[int]:
     if type(scores) is not list or len(scores) != len(ids):
         fail("research_prediction_invalid")
-    values = []
+    values: list[tuple[float, int]] = []
     for entry, expected in zip(scores, ids):
         if (
             type(entry) is not list
@@ -217,15 +342,15 @@ def _rank(scores, ids, excluded, *, n0=False, stats=None):
         score = entry[1]
         if score is not None:
             finite(score)
-        if n0 and score != stats["items"][str(expected)]["positive_users"]:
+        if n0 and (stats is None or score != stats["items"][str(expected)]["positive_users"]):
             fail("research_prediction_invalid")
         if expected not in excluded and score is not None:
-            values.append((-score, expected))
+            values.append((-cast("float", score), expected))
     values.sort()
     return [item for _, item in values[:10]]
 
 
-def _history_bin(count):
+def _history_bin(count: int) -> str:
     if count < 20:
         return "lt20"
     if count < 50:
@@ -237,16 +362,16 @@ def _history_bin(count):
     return "200plus"
 
 
-def _seed_band(seeds, stats):
+def _seed_band(seeds: set[int], stats: EvaluationTrainStats) -> str:
     if not seeds:
         return "none"
     bands = {stats["items"][str(item)]["band"] for item in seeds}
     return next(iter(bands)) if len(bands) == 1 else "mixed"
 
 
-def _genre_diversity(ranking, catalog):
+def _genre_diversity(ranking: list[int], catalog: Catalog) -> GenreDiversity:
     pairs = len(ranking) * (len(ranking) - 1) // 2
-    valid = []
+    valid: list[float] = []
     for index, left in enumerate(ranking):
         genres_left = set(catalog["anime"][str(left)]["genres"])
         for right in ranking[index + 1 :]:
@@ -259,8 +384,8 @@ def _genre_diversity(ranking, catalog):
     }
 
 
-def _slice(rows):
-    by_user = defaultdict(list)
+def _slice(rows: list[PrivateMetric]) -> dict[str, object] | None:
+    by_user: defaultdict[str, list[PrivateMetric]] = defaultdict(list)
     for row in rows:
         by_user[row["user_key"]].append(row)
     if len(by_user) < 20:
@@ -288,12 +413,14 @@ def _slice(rows):
     }
 
 
-def _aggregate(private_rows, catalog, stats):
-    groups = defaultdict(list)
-    users = defaultdict(set)
-    coverage = defaultdict(set)
-    short = Counter()
-    repeat = Counter()
+def _aggregate(
+    private_rows: Iterable[PrivateMetric], catalog: Catalog, stats: EvaluationTrainStats
+) -> list[dict[str, object]]:
+    groups: defaultdict[tuple[str, str, str, str, int], list[PrivateMetric]] = defaultdict(list)
+    users: defaultdict[tuple[str, str, str, str, int], set[str]] = defaultdict(set)
+    coverage: defaultdict[tuple[str, str, str, str, int], set[int]] = defaultdict(set)
+    short: Counter[tuple[str, str, str, str, int]] = Counter()
+    repeat: Counter[tuple[str, str, str, str, int]] = Counter()
     for row in private_rows:
         key = (row["split"], row["cohort"], row["mask"], row["order"], row["n"])
         groups[key].append(row)
@@ -301,13 +428,13 @@ def _aggregate(private_rows, catalog, stats):
         coverage[key].update(row["ranking"])
         short[key] += len(row["ranking"]) < 5
         repeat[key] += row["known_history_repeats"]
-    report = []
+    report: list[dict[str, object]] = []
     for key in sorted(groups):
         rows = groups[key]
         aggregate = _slice(rows)
         if aggregate is None:
             continue
-        slices = {}
+        slices: dict[str, dict[str, dict[str, object]]] = {}
         for field in ("history_bin", "seed_band"):
             values = sorted({row[field] for row in rows})
             slices[field] = {
@@ -337,15 +464,15 @@ def _aggregate(private_rows, catalog, stats):
 
 
 def evaluate_predictions(
-    prepared_dir,
-    prediction_dir,
-    output_dir,
+    prepared_dir: str | Path,
+    prediction_dir: str | Path,
+    output_dir: str | Path,
     *,
-    split,
-    expected_prepared_identity,
-    selection_path=None,
-    expected_selection_identity=None,
-):
+    split: str,
+    expected_prepared_identity: str,
+    selection_path: str | Path | None = None,
+    expected_selection_identity: str | None = None,
+) -> Path:
     if split not in ("validation", "test"):
         fail()
     prepared_dir, prediction_dir, output_dir = map(Path, (prepared_dir, prediction_dir, output_dir))
@@ -356,8 +483,8 @@ def evaluate_predictions(
     prediction, prediction_identity = _predictions(
         prediction_dir, prep, expected_prepared_identity, split, fit_identity
     )
-    allowed = None
-    selection_identity = None
+    allowed: set[tuple[str, str, int]] | None = None
+    selection_identity: str | None = None
     if split == "test":
         if selection_path is None or expected_selection_identity is None:
             fail("research_selection_required")
@@ -385,15 +512,16 @@ def evaluate_predictions(
         test_queries = (
             StreamWriter(stage / "recomputed-test-queries.jsonl.gz") if split == "test" else None
         )
-        rows_for_report = []
+        rows_for_report: list[PrivateMetric] = []
         nrows = 0
         from recsys.research.prepare import _check_label
 
-        for (query, label), row in zip(label_query, score_rows, strict=True):
+        for (query, label), row_value in zip(label_query, score_rows, strict=True):
             _check_label(label, protocol, set(catalog["anime"]))
             if test_queries is not None:
                 test_queries.write_json(query)
-            exact(row, {"query_id", "scores"})
+            exact(row_value, {"query_id", "scores"})
+            row = cast("dict[str, object]", row_value)
             if type(row["query_id"]) is not str or row["query_id"] != query["query_id"]:
                 fail("research_prediction_invalid")
             history, targets, seeds = (
@@ -422,7 +550,7 @@ def evaluate_predictions(
                     )
                 ):
                     fail()
-                result = {
+                result: PrivateMetric = {
                     "query_id": query["query_id"],
                     "user_key": label["user_key"],
                     "split": split,

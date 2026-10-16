@@ -17,9 +17,16 @@ from recsys.content.glove import (
     load_embeddings,
     tokenize,
 )
+from recsys.contracts.bundle import AnimeRecord
+from recsys.data.sources import SourceDescriptor, SourceRegistry
 
 
-def entry(title, aliases=None, genres=None, synopsis=None):
+def entry(
+    title: str,
+    aliases: list[str] | None = None,
+    genres: list[str] | None = None,
+    synopsis: str | None = None,
+) -> AnimeRecord:
     return {
         "title": title,
         "aliases": aliases or [],
@@ -32,12 +39,12 @@ def entry(title, aliases=None, genres=None, synopsis=None):
     }
 
 
-def sha(raw):
+def sha(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
 class BuildTests(unittest.TestCase):
-    def test_tokens_and_mean_occurrences(self):
+    def test_tokens_and_mean_occurrences(self) -> None:
         self.assertEqual(tokenize("IT'S co-op, R2D2 日本語"), ["it's", "co", "op", "r", "d"])
         a = np.zeros(300)
         a[0] = 2
@@ -54,7 +61,7 @@ class BuildTests(unittest.TestCase):
         self.assertEqual(info["anime"]["10"]["matched_token_count"], 4)
         self.assertEqual(info["anime"]["2"]["vector_status"], "no_tokens")
 
-    def test_zero_statuses_and_numeric_tie(self):
+    def test_zero_statuses_and_numeric_tie(self) -> None:
         x = np.zeros(300)
         x[0] = 1
         minus = -x
@@ -76,7 +83,7 @@ class BuildTests(unittest.TestCase):
         self.assertEqual(info["anime"]["6"]["vector_status"], "zero_vector")
         self.assertEqual(neighbors, cosine_neighbors(ids, vectors, block_size=7))
 
-    def test_fifth_tie_and_invalid_numeric_boundary(self):
+    def test_fifth_tie_and_invalid_numeric_boundary(self) -> None:
         ids = [1, 2, 3, 4, 5, 6, 7, 10]
         vectors = np.zeros((len(ids), 300), dtype=np.float64)
         vectors[:, 0] = 1
@@ -89,7 +96,7 @@ class BuildTests(unittest.TestCase):
         with self.assertRaises(BuildError):
             cosine_neighbors([1], vectors[:1], block_size=257)
 
-    def test_overshoot_clamp_and_negative_exclusion(self):
+    def test_overshoot_clamp_and_negative_exclusion(self) -> None:
         ids = [1, 2, 3, 4]
         vectors = np.zeros((4, 300), dtype=np.float64)
         vectors[0, 0] = 1
@@ -105,7 +112,12 @@ class BuildTests(unittest.TestCase):
         with self.assertRaises(BuildError):
             cosine_neighbors(ids, vectors)
 
-    def _fixture(self, root, anime=None, glove_lines=None):
+    def _fixture(
+        self,
+        root: Path,
+        anime: dict[str, AnimeRecord] | None = None,
+        glove_lines: list[str] | None = None,
+    ) -> tuple[SourceRegistry, str]:
         anime = anime or {"2": entry("alpha"), "10": entry("alpha", ["beta"])}
         glove_lines = glove_lines or [
             "alpha " + " ".join(["1"] + ["0"] * 299),
@@ -115,7 +127,7 @@ class BuildTests(unittest.TestCase):
         (root / "glove.txt").write_bytes(glove_raw)
         catalog_raw = _canonical({"schema_version": 1, "anime": anime})
         (root / "catalog.json").write_bytes(catalog_raw)
-        mal = [
+        mal: list[SourceDescriptor] = [
             {
                 "id": name,
                 "filename": name + ".csv",
@@ -125,7 +137,7 @@ class BuildTests(unittest.TestCase):
             }
             for name in ("mal_anime", "mal_synopsis")
         ]
-        registry = {
+        registry: SourceRegistry = {
             "schema_version": 1,
             "provenance": {
                 "mal": {"commit": "test", "repository": "https://example.org"},
@@ -163,7 +175,7 @@ class BuildTests(unittest.TestCase):
         (root / "normalization-report.json").write_bytes(_canonical(report))
         return registry, registry_sha
 
-    def test_end_to_end_deterministic_and_input_guards(self):
+    def test_end_to_end_deterministic_and_input_guards(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             registry, registry_sha = self._fixture(root)
@@ -215,7 +227,7 @@ class BuildTests(unittest.TestCase):
                     registry_sha256=registry_sha,
                 )
 
-    def test_oversized_canonical_integer_score_is_catalog_error(self):
+    def test_oversized_canonical_integer_score_is_catalog_error(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             registry, registry_sha = self._fixture(root)
@@ -233,7 +245,7 @@ class BuildTests(unittest.TestCase):
                 )
             self.assertFalse((root / "out").exists())
 
-    def test_report_and_raw_hash_mismatch_leave_no_output(self):
+    def test_report_and_raw_hash_mismatch_leave_no_output(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             registry, registry_sha = self._fixture(root)
@@ -256,7 +268,7 @@ class BuildTests(unittest.TestCase):
                 )
             self.assertFalse((root / "bad-glove-out").exists())
 
-    def test_consumed_glove_validation(self):
+    def test_consumed_glove_validation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             for line in (

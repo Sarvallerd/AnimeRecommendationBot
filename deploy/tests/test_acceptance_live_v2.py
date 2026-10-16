@@ -6,12 +6,16 @@ import importlib.util
 import os
 import tempfile
 import unittest
+from collections.abc import Mapping
 from pathlib import Path
-from types import SimpleNamespace
+from types import EllipsisType, SimpleNamespace
+from typing import Callable, NotRequired, TypedDict, cast
 from unittest import mock
 
 SCRIPT = Path(__file__).with_name("live_verifier_v2.py")
 spec = importlib.util.spec_from_file_location("arb034_test_verifier", SCRIPT)
+if spec is None or spec.loader is None:
+    raise ImportError(f"Cannot load live verifier from {SCRIPT}")
 v = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(v)
 A = "sha256:" + "a" * 64
@@ -19,11 +23,170 @@ B = "sha256:" + "b" * 64
 STAMP = dt.datetime(2026, 10, 12, tzinfo=dt.timezone.utc)
 
 
-def time(minute):
+class ArtifactMountFixture(TypedDict):
+    source: str
+    rw: bool
+
+
+class BotFixture(TypedDict):
+    id: str
+    image_id: str
+    project: str
+    service: str
+    user: str
+    status: str
+    running: bool
+    exit_code: int
+    started_at: str
+    restart_count: int
+    read_only_root: bool
+    artifact_mount: ArtifactMountFixture
+    database_volume: None
+    bundle_id: str
+    bundle_count: int
+
+
+type DatabaseFixture = dict[str, list[dict[str, int | str]]]
+
+
+class DeploymentFixture(TypedDict):
+    project: str
+    compose_sha256: str
+    settings_sha256: str
+
+
+class RuntimeFixture(TypedDict):
+    bot: BotFixture | None
+    prepare: BotFixture | None
+    postgres: dict[str, str | bool]
+
+
+class StateFixture(TypedDict):
+    schema_version: int
+    kind: str
+    captured_at: str
+    source_commit: str
+    snapshot_sql_sha256: str
+    deployment: DeploymentFixture
+    runtime: RuntimeFixture
+    database: DatabaseFixture
+
+
+class PollersFixture(TypedDict):
+    matching: int
+    scope_complete: bool
+    scope: str
+    matching_container_ids_sha256: list[str]
+
+
+class SettingsFixture(TypedDict):
+    sha256: str
+    uid: int
+    gid: int
+    mode: int
+
+
+class GuardsFixture(TypedDict):
+    stable: bool
+    daemon_id: str
+    settings: SettingsFixture
+    credential_sha256: dict[str, str]
+    postgres_health: str
+    postgres_identity: dict[str, str | None]
+    pollers: PollersFixture
+
+
+class ShotFixture(TypedDict):
+    schema_version: int
+    kind: str
+    state: StateFixture
+    guards: GuardsFixture
+
+
+class PlanSourceFixture(TypedDict):
+    commit: str
+    compose_sha256: str
+    snapshot_sql_sha256: str
+    verifier_sha256: NotRequired[str]
+    helper_sha256: NotRequired[str]
+    dispatch_sha256: NotRequired[str]
+
+
+class PlanSettingsFixture(TypedDict):
+    uid: int
+    gid: int
+    mode: int
+    credential_sha256: dict[str, str]
+    original_copy: NotRequired[str]
+    target_copy: NotRequired[str]
+
+
+class PlanExpectationsFixture(TypedDict):
+    smoke_seed: dict[str, str | int | list[int]]
+    empty_seed: dict[str, str | int] | None
+
+
+class PlanBundleFixture(TypedDict):
+    identity: str
+    path: str
+    count: int
+    image_id: str
+    expectations: PlanExpectationsFixture
+    histogram: dict[str, int]
+
+
+class AliasProbeFixture(TypedDict):
+    query: str
+    mal_id: int
+
+
+class DescriptionProbeFixture(TypedDict):
+    seed_mal_id: int
+    query: str
+    neighbor_mal_id: int
+
+
+class UiProbeFixture(TypedDict):
+    schema_version: int
+    kind: str
+    alias_search: AliasProbeFixture
+    description_edit: DescriptionProbeFixture
+
+
+class OfflineFixture(TypedDict):
+    report_sha256: str
+    evidence_dir: NotRequired[str]
+    project: NotRequired[str]
+    database_volume: NotRequired[str]
+
+
+class ProfileFixture(TypedDict):
+    id: str
+    sha256: str
+    lock_sha256: str
+    release_id: NotRequired[str]
+
+
+class PlanFixture(TypedDict):
+    schema_version: int
+    kind: str
+    service: dict[str, str]
+    source: PlanSourceFixture
+    settings: PlanSettingsFixture
+    expected_settings_sha256: dict[str, str]
+    bundles: dict[str, PlanBundleFixture]
+    ui_probes: UiProbeFixture
+    offline: OfflineFixture
+    profile: ProfileFixture
+    baseline: NotRequired[ShotFixture]
+    baseline_sha256: NotRequired[str]
+
+
+def time(minute: int | float) -> str:
     return (STAMP + dt.timedelta(minutes=minute)).isoformat()
 
 
-def bot(identity, role, identifier, started):
+def bot(identity: str, role: str, identifier: str, started: int | float) -> BotFixture:
     return {
         "id": identifier,
         "image_id": "image-" + role,
@@ -43,7 +206,7 @@ def bot(identity, role, identifier, started):
     }
 
 
-def database():
+def database() -> DatabaseFixture:
     return {
         "migrations": [{"version": 1, "applied_at": time(0)}],
         "users": [{"tg_id": 42, "created_at": time(0), "updated_at": time(0)}],
@@ -81,7 +244,7 @@ def database():
     }
 
 
-def plan():
+def plan() -> PlanFixture:
     return {
         "schema_version": 2,
         "kind": "arb-live-plan",
@@ -136,8 +299,14 @@ def plan():
 
 
 def shot(
-    minute, role="original", bot_item=None, prepare=None, settings=None, db=None, matching=None
-):
+    minute: int | float,
+    role: str = "original",
+    bot_item: BotFixture | None | EllipsisType = None,
+    prepare: BotFixture | None = None,
+    settings: str | None = None,
+    db: DatabaseFixture | None = None,
+    matching: int | None = None,
+) -> ShotFixture:
     settings = settings or ("1" * 64 if role == "original" else "2" * 64)
     if bot_item is ...:
         bot_item = bot(
@@ -198,12 +367,14 @@ def shot(
     }
 
 
-def sequence():
+def sequence() -> tuple[ShotFixture, ShotFixture, ShotFixture, ShotFixture]:
     before = shot(0, bot_item=bot(A, "original", "old-bot", -1))
     stopped = shot(1, bot_item=None, matching=0)
     prepared = shot(2, role="target", bot_item=None, matching=0)
     prep = bot(B, "target", "prepare-new", 1.5)
-    prep.update(service="prepare", status="exited", running=False)
+    prep["service"] = "prepare"
+    prep["status"] = "exited"
+    prep["running"] = False
     prepared["state"]["runtime"]["prepare"] = prep
     started = shot(
         3, role="target", bot_item=bot(B, "target", "new-bot", 2.5), prepare=copy.deepcopy(prep)
@@ -212,18 +383,20 @@ def sequence():
 
 
 class LiveV2Tests(unittest.TestCase):
-    def fail_code(self, code, fn):
+    def fail_code(self, code: str, fn: Callable[[], object]) -> None:
         with self.assertRaises(v.Error) as caught:
             fn()
         self.assertEqual(caught.exception.code, code)
 
-    def test_operation_recomputes_distinct_bundle_transition(self):
+    def test_operation_recomputes_distinct_bundle_transition(self) -> None:
         values = sequence()
         result = v.verify_operation(plan(), "initial-update", *values)
         self.assertEqual(result["counts"], [1, 0, 0, 1])
         self.assertEqual(result["to"], "target")
         changed = copy.deepcopy(values)
-        changed[2]["state"]["runtime"]["prepare"]["exit_code"] = 1
+        changed_prepare = changed[2]["state"]["runtime"]["prepare"]
+        assert changed_prepare is not None
+        changed_prepare["exit_code"] = 1
         self.fail_code(
             "PREPARE_GATE", lambda: v.verify_operation(plan(), "initial-update", *changed)
         )
@@ -250,12 +423,14 @@ class LiveV2Tests(unittest.TestCase):
             lambda: v.verify_operation(plan(), "initial-update", *changed),
         )
         changed = copy.deepcopy(values)
-        changed[3]["state"]["runtime"]["bot"]["started_at"] = time(1.5)
+        changed_bot = changed[3]["state"]["runtime"]["bot"]
+        assert changed_bot is not None
+        changed_bot["started_at"] = time(1.5)
         self.fail_code(
             "BOT_NOT_RECREATED", lambda: v.verify_operation(plan(), "initial-update", *changed)
         )
 
-    def test_poller_inventory_identifies_the_selected_bot(self):
+    def test_poller_inventory_identifies_the_selected_bot(self) -> None:
         value = plan()
         running = shot(4, "target", bot_item=bot(B, "target", "accepted-bot", 2.5))
         self.assertIs(v._valid_capture(running, value, "target"), running["state"])
@@ -278,7 +453,7 @@ class LiveV2Tests(unittest.TestCase):
         final["guards"]["pollers"]["matching_container_ids_sha256"] = []
         self.fail_code("POLLER_IDENTITY", lambda: v.summarize_evidence(value, {}, {}, final))
 
-    def test_real_flow_actor_order_and_private_chat(self):
+    def test_real_flow_actor_order_and_private_chat(self) -> None:
         before, stopped, prepared, started = sequence()
         operation = v.verify_operation(plan(), "initial-update", before, stopped, prepared, started)
         after = copy.deepcopy(started)
@@ -318,7 +493,9 @@ class LiveV2Tests(unittest.TestCase):
             context = v.bind_context(plan(), operation, started, after)
             self.assertEqual(context["actor"]["target_anchor_request_id"], 2)
             stopped_anchor = copy.deepcopy(started)
-            stopped_anchor["state"]["runtime"]["bot"]["running"] = False
+            stopped_bot = stopped_anchor["state"]["runtime"]["bot"]
+            assert stopped_bot is not None
+            stopped_bot["running"] = False
             self.fail_code(
                 "BOT_NOT_RUNNING", lambda: v.bind_context(plan(), operation, stopped_anchor, after)
             )
@@ -340,6 +517,14 @@ class LiveV2Tests(unittest.TestCase):
                 plan(), context, "initial-update", before, after, operation=operation
             )
             self.assertEqual(result["counts"]["delivered"], 2)
+            forged_operation = copy.deepcopy(operation)
+            forged_operation["started_capture_time"] = None
+            self.fail_code(
+                "OPERATION_REQUIRED",
+                lambda: v.verify_case(
+                    plan(), context, "initial-update", before, after, operation=forged_operation
+                ),
+            )
             wrong = copy.deepcopy(after)
             wrong["state"]["database"]["delivered"][-1]["mal_id"] = 9
             self.fail_code(
@@ -417,7 +602,7 @@ class LiveV2Tests(unittest.TestCase):
                 ),
             )
 
-    def test_case_windows_require_running_bot_and_one_poller(self):
+    def test_case_windows_require_running_bot_and_one_poller(self) -> None:
         value = plan()
         context = {
             "schema_version": 2,
@@ -431,7 +616,7 @@ class LiveV2Tests(unittest.TestCase):
         during = copy.deepcopy(before)
         during["state"]["kind"] = "runtime_only"
         during["state"]["captured_at"] = time(5)
-        during["state"]["database"] = None
+        during["state"]["database"] = None  # type: ignore[typeddict-item]  # runtime-only negative fixture
         during["state"]["runtime"]["postgres"]["running"] = False
         during["guards"]["postgres_health"] = "unhealthy"
         with mock.patch.object(v, "_bundle", return_value=({"id": B, "neighbors": {}}, None, None)):
@@ -443,15 +628,17 @@ class LiveV2Tests(unittest.TestCase):
                 "PASS",
             )
             for endpoint in ("before", "after"):
-                for field, replacement, code in (
-                    ("running", False, "BOT_NOT_RUNNING"),
-                    ("matching", 0, "POLLER_COUNT"),
+                for field, code in (
+                    ("running", "BOT_NOT_RUNNING"),
+                    ("matching", "POLLER_COUNT"),
                 ):
                     changed = {"before": copy.deepcopy(before), "after": copy.deepcopy(after)}
                     if field == "running":
-                        changed[endpoint]["state"]["runtime"]["bot"]["running"] = replacement
+                        changed_bot = changed[endpoint]["state"]["runtime"]["bot"]
+                        assert changed_bot is not None
+                        changed_bot["running"] = False
                     else:
-                        changed[endpoint]["guards"]["pollers"]["matching"] = replacement
+                        changed[endpoint]["guards"]["pollers"]["matching"] = 0
                         changed[endpoint]["guards"]["pollers"]["matching_container_ids_sha256"] = []
                     self.fail_code(
                         code, lambda: v.verify_case(value, context, "navigation-search", **changed)
@@ -464,20 +651,22 @@ class LiveV2Tests(unittest.TestCase):
                     "POLLER_IDENTITY",
                     lambda: v.verify_case(value, context, "navigation-search", **wrong_identity),
                 )
-            for field, replacement, code in (
-                ("running", False, "BOT_NOT_RUNNING"),
-                ("matching", 0, "POLLER_COUNT"),
+            for field, code in (
+                ("running", "BOT_NOT_RUNNING"),
+                ("matching", "POLLER_COUNT"),
             ):
-                changed = copy.deepcopy(during)
+                during_changed = copy.deepcopy(during)
                 if field == "running":
-                    changed["state"]["runtime"]["bot"]["running"] = replacement
+                    changed_bot = during_changed["state"]["runtime"]["bot"]
+                    assert changed_bot is not None
+                    changed_bot["running"] = False
                 else:
-                    changed["guards"]["pollers"]["matching"] = replacement
-                    changed["guards"]["pollers"]["matching_container_ids_sha256"] = []
+                    during_changed["guards"]["pollers"]["matching"] = 0
+                    during_changed["guards"]["pollers"]["matching_container_ids_sha256"] = []
                 self.fail_code(
                     code,
                     lambda: v.verify_case(
-                        value, context, "db-outage", before, after, during=changed
+                        value, context, "db-outage", before, after, during=during_changed
                     ),
                 )
             local_only = copy.deepcopy(during)
@@ -489,7 +678,7 @@ class LiveV2Tests(unittest.TestCase):
                 ),
             )
 
-    def test_description_coordinates_are_actor_owned_private_delivery(self):
+    def test_description_coordinates_are_actor_owned_private_delivery(self) -> None:
         value = plan()
         context = {
             "schema_version": 2,
@@ -525,7 +714,7 @@ class LiveV2Tests(unittest.TestCase):
         )
         live_bot = bot(B, "target", "target-bot", 2.5)
 
-        def window(rows):
+        def window(rows: DatabaseFixture) -> tuple[ShotFixture, ShotFixture]:
             return (
                 shot(4, "target", bot_item=live_bot, db=rows),
                 shot(5, "target", bot_item=live_bot, db=rows),
@@ -572,7 +761,7 @@ class LiveV2Tests(unittest.TestCase):
                 lambda: v.verify_case(value, context, "description-edit", before, after),
             )
 
-    def test_history_mutation_and_missing_ui_never_pass(self):
+    def test_history_mutation_and_missing_ui_never_pass(self) -> None:
         old = database()
         later = copy.deepcopy(old)
         later["legacy_users"][0]["old"] = 2
@@ -586,7 +775,7 @@ class LiveV2Tests(unittest.TestCase):
         self.assertEqual(value["live_acceptance"], "PENDING")
         self.assertEqual(value["production_history_preservation"], "PENDING")
 
-    def test_plan_binds_reference_a_and_separate_historical_source(self):
+    def test_plan_binds_reference_a_and_separate_historical_source(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             parent = Path(directory)
             report_path = parent / "preparation-report.json"
@@ -609,36 +798,32 @@ class LiveV2Tests(unittest.TestCase):
                 "sha256": v.p.TRUSTED_NEW_PROFILE_SHA,
                 "lock_sha256": v.p.TRUSTED_LOCK_SHA,
             }
-            value["offline"].update(
-                evidence_dir=str(parent),
-                project="offline-project",
-                database_volume="offline-volume",
-                report_sha256=v.sha(report_path.read_bytes()),
+            value["offline"]["evidence_dir"] = str(parent)
+            value["offline"]["project"] = "offline-project"
+            value["offline"]["database_volume"] = "offline-volume"
+            value["offline"]["report_sha256"] = v.sha(report_path.read_bytes())
+            value["source"]["verifier_sha256"] = v.sha(SCRIPT.read_bytes())
+            value["source"]["helper_sha256"] = v.sha(
+                SCRIPT.with_name("live_evidence_v2.py").read_bytes()
             )
-            value["source"].update(
-                verifier_sha256=v.sha(SCRIPT.read_bytes()),
-                helper_sha256=v.sha(SCRIPT.with_name("live_evidence_v2.py").read_bytes()),
-                dispatch_sha256=v.sha(SCRIPT.with_name("acceptance-evidence.py").read_bytes()),
-                compose_sha256=v.sha((v.e.ROOT / "compose.yaml").read_bytes()),
-                snapshot_sql_sha256=v.sha(v.e.SQL.read_bytes()),
+            value["source"]["dispatch_sha256"] = v.sha(
+                SCRIPT.with_name("acceptance-evidence.py").read_bytes()
             )
-            value["settings"].update(
-                uid=os.getuid(),
-                gid=os.getgid(),
-                mode=0o600,
-                original_copy=str(original),
-                target_copy=str(target),
-            )
+            value["source"]["compose_sha256"] = v.sha((v.e.ROOT / "compose.yaml").read_bytes())
+            value["source"]["snapshot_sql_sha256"] = v.sha(v.e.SQL.read_bytes())
+            value["settings"]["uid"] = os.getuid()
+            value["settings"]["gid"] = os.getgid()
+            value["settings"]["mode"] = 0o600
+            value["settings"]["original_copy"] = str(original)
+            value["settings"]["target_copy"] = str(target)
             value["expected_settings_sha256"] = {
                 "original": v.sha(original.read_bytes()),
                 "target": v.sha(target.read_bytes()),
             }
             base = shot(0, bot_item=bot(A, "original", "old-bot", -1))
-            base["guards"]["settings"].update(
-                uid=os.getuid(),
-                gid=os.getgid(),
-                sha256=value["expected_settings_sha256"]["original"],
-            )
+            base["guards"]["settings"]["uid"] = os.getuid()
+            base["guards"]["settings"]["gid"] = os.getgid()
+            base["guards"]["settings"]["sha256"] = value["expected_settings_sha256"]["original"]
             base["state"]["deployment"]["settings_sha256"] = value["expected_settings_sha256"][
                 "original"
             ]
@@ -675,7 +860,9 @@ class LiveV2Tests(unittest.TestCase):
                 "builds": {"A": {"identity": B, "file_sha256": target_summary.hashes}},
             }
 
-            def synthetic_bundle(_plan, role):
+            def synthetic_bundle(
+                _plan: PlanFixture, role: str
+            ) -> tuple[dict[str, object], SimpleNamespace, SimpleNamespace]:
                 summary = old_summary if role == "original" else target_summary
                 profile = old_profile if role == "original" else target_profile
                 return {"id": summary.identity, "neighbors": {}}, summary, profile
@@ -703,14 +890,16 @@ class LiveV2Tests(unittest.TestCase):
                 alternate["offline"]["report_sha256"] = "0" * 64
                 self.fail_code("OFFLINE_CHANGED", lambda: v.validate_plan(alternate))
 
-    def test_three_window_history_and_final_runtime(self):
+    def test_three_window_history_and_final_runtime(self) -> None:
         initial = sequence()
         first_target = bot(B, "target", "new-bot", 2.5)
         rollback_before = shot(5, "target", bot_item=first_target)
         rollback_stopped = shot(6, "target", bot_item=None, matching=0)
         rollback_prepared = shot(7, "original", bot_item=None, matching=0)
         old_prepare = bot(A, "original", "old-prepare-2", 6.5)
-        old_prepare.update(service="prepare", status="exited", running=False)
+        old_prepare["service"] = "prepare"
+        old_prepare["status"] = "exited"
+        old_prepare["running"] = False
         rollback_prepared["state"]["runtime"]["prepare"] = old_prepare
         second_old = bot(A, "original", "old-bot-2", 7.5)
         rollback_started = shot(
@@ -720,7 +909,9 @@ class LiveV2Tests(unittest.TestCase):
         final_stopped = shot(10, "original", bot_item=None, matching=0)
         final_prepared = shot(11, "target", bot_item=None, matching=0)
         target_prepare = bot(B, "target", "target-prepare-3", 10.5)
-        target_prepare.update(service="prepare", status="exited", running=False)
+        target_prepare["service"] = "prepare"
+        target_prepare["status"] = "exited"
+        target_prepare["running"] = False
         final_prepared["state"]["runtime"]["prepare"] = target_prepare
         final_bot = bot(B, "target", "new-bot-3", 11.5)
         final_started = shot(
@@ -755,14 +946,18 @@ class LiveV2Tests(unittest.TestCase):
             "OLD_HISTORY_CHANGED",
             lambda: v.summarize_evidence(value, ops, {}, changed, context, operation_inputs=inputs),
         )
-        changed = copy.deepcopy(inputs)
-        changed["final-update"]["started"]["state"]["runtime"]["bot"]["id"] = "new-bot"
+        changed_inputs = copy.deepcopy(inputs)
+        changed_final_bot = changed_inputs["final-update"]["started"]["state"]["runtime"]["bot"]
+        assert changed_final_bot is not None
+        changed_final_bot["id"] = "new-bot"
         self.fail_code(
             "OPERATION_CHAIN",
-            lambda: v.summarize_evidence(value, ops, {}, final, context, operation_inputs=changed),
+            lambda: v.summarize_evidence(
+                value, ops, {}, final, context, operation_inputs=changed_inputs
+            ),
         )
 
-    def test_summary_bounds_every_saved_case_window(self):
+    def test_summary_bounds_every_saved_case_window(self) -> None:
         value = plan()
         baseline = shot(0, bot_item=bot(A, "original", "old-bot", -1))
         value["baseline"] = baseline
@@ -783,8 +978,11 @@ class LiveV2Tests(unittest.TestCase):
             "final-update": {"before": shot(11, "original"), "started": shot(12, "target")},
         }
 
-        def summarize(current_inputs, current_operations=operations):
-            return v.summarize_evidence(
+        def summarize(
+            current_inputs: dict[str, dict[str, ShotFixture]],
+            current_operations: dict[str, dict[str, ShotFixture]] = operations,
+        ) -> Mapping[str, object]:
+            summary = v.summarize_evidence(
                 value,
                 {},
                 results,
@@ -793,6 +991,8 @@ class LiveV2Tests(unittest.TestCase):
                 operation_inputs=current_operations,
                 case_inputs=current_inputs,
             )
+            assert isinstance(summary, dict) and isinstance(summary.get("live_acceptance"), str)
+            return cast("Mapping[str, object]", summary)
 
         self.assertEqual(summarize(inputs)["live_acceptance"], "PENDING")
         missing = copy.deepcopy(inputs)
@@ -833,7 +1033,7 @@ class LiveV2Tests(unittest.TestCase):
             ),
         )
 
-    def test_ui_pass_needs_observation_and_verified_case_reference(self):
+    def test_ui_pass_needs_observation_and_verified_case_reference(self) -> None:
         value = plan()
         baseline = shot(0, bot_item=bot(A, "original", "old-bot", -1))
         anchor = shot(3, "target", bot_item=bot(B, "target", "new-bot", 2.5))
@@ -865,10 +1065,12 @@ class LiveV2Tests(unittest.TestCase):
             "scenarios": entries,
         }
 
-        def summarize():
-            return v.summarize_evidence(
+        def summarize() -> Mapping[str, object]:
+            summary = v.summarize_evidence(
                 value, {}, cases, final, context, observations, case_inputs=case_inputs
             )
+            assert isinstance(summary, dict) and isinstance(summary.get("live_ui_acceptance"), str)
+            return cast("Mapping[str, object]", summary)
 
         summary = summarize()
         self.assertEqual(summary["live_ui_acceptance"], "PENDING")
@@ -886,7 +1088,7 @@ class LiveV2Tests(unittest.TestCase):
         entries[-1]["id"] = entries[0]["id"]
         self.fail_code("INVALID_OBSERVATIONS", summarize)
 
-    def test_ui_probe_must_be_actual_alias_and_described_neighbor(self):
+    def test_ui_probe_must_be_actual_alias_and_described_neighbor(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory)
             (target / "catalog.json").write_bytes(
@@ -909,7 +1111,7 @@ class LiveV2Tests(unittest.TestCase):
             value["ui_probes"]["description_edit"]["neighbor_mal_id"] = 10
             self.fail_code("INVALID_UI_PROBES", lambda: v._check_probes(value, bundle))
 
-    def test_applicable_empty_case_requires_real_request_and_no_delivery(self):
+    def test_applicable_empty_case_requires_real_request_and_no_delivery(self) -> None:
         value = plan()
         value["bundles"]["target"]["expectations"]["empty_seed"] = {"mal_id": 12, "query": "Empty"}
         value["bundles"]["target"]["histogram"]["0"] = 1

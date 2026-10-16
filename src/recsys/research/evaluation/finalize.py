@@ -1,9 +1,11 @@
 """Irreversible validation-selection receipt and controlled test query release."""
 
 from pathlib import Path
+from typing import TypedDict, cast
 
 from recsys.contracts.bundle import canonical_bytes
 from recsys.research.artifacts import (
+    FileDescriptor,
     StreamWriter,
     check_descriptor,
     check_identity,
@@ -20,14 +22,65 @@ from recsys.research.evaluation.selection import read_selection
 from recsys.research.protocol import exact, fail, load_protocol, sha
 
 
-def _comparison(path, prepared_identity):
+class ComparisonManifest(TypedDict):
+    schema_version: int
+    kind: str
+    prepared_identity: str
+    evaluation_identities: list[str]
+    report: dict[str, object]
+
+
+class PolicyChoice(TypedDict):
+    status: str
+    chosen_n: int | None
+
+
+class ComparisonModel(TypedDict):
+    evaluation_identity: str
+    prediction_identity: str
+    model_id: str
+    config_sha256: str
+    fit_identity: str
+    code_revision: str
+    n_policy: PolicyChoice
+
+
+class ComparisonReport(TypedDict):
+    schema_version: int
+    kind: str
+    prepared_identity: str
+    metric: str
+    models: list[ComparisonModel]
+    paired_differences: list[dict[str, object]]
+    users: int
+    selection_limitations: str
+
+
+class SelectionDecision(TypedDict):
+    schema_version: int
+    prepared_identity: str
+    comparison_identity: str
+    evaluation_identity: str
+    model_id: str
+    config_sha256: str
+    fit_identity: str
+    n: int
+    code_revision: str
+    declared_comparison_arms: list[str]
+
+
+def _comparison(
+    path: str | Path, prepared_identity: str
+) -> tuple[ComparisonReport, str, list[str]]:
     path = safe_path(path, directory=True)
     if {item.name for item in path.iterdir()} != {"comparison.json", "comparison-manifest.json"}:
         fail()
-    manifest, raw = read_json(path / "comparison-manifest.json")
+    manifest_value, raw = read_json(path / "comparison-manifest.json")
     exact(
-        manifest, {"schema_version", "kind", "prepared_identity", "evaluation_identities", "report"}
+        manifest_value,
+        {"schema_version", "kind", "prepared_identity", "evaluation_identities", "report"},
     )
+    manifest = cast("ComparisonManifest", manifest_value)
     if (
         type(manifest["schema_version"]) is not int
         or manifest["schema_version"] != 1
@@ -46,9 +99,11 @@ def _comparison(path, prepared_identity):
             fail()
     if len(set(evaluation_ids)) != len(evaluation_ids):
         fail()
-    report, _ = read_json(path / "comparison.json", manifest["report"])
+    report_value, _ = read_json(
+        path / "comparison.json", cast("FileDescriptor", manifest["report"])
+    )
     exact(
-        report,
+        report_value,
         {
             "schema_version",
             "kind",
@@ -60,6 +115,7 @@ def _comparison(path, prepared_identity):
             "selection_limitations",
         },
     )
+    report = cast("ComparisonReport", report_value)
     if (
         type(report["schema_version"]) is not int
         or report["schema_version"] != 1
@@ -96,7 +152,12 @@ def _comparison(path, prepared_identity):
     return report, "sha256:" + sha(raw), evaluation_ids
 
 
-def finalize_selection(prepared_dir, decision_path, validation_reports, output_dir):
+def finalize_selection(
+    prepared_dir: str | Path,
+    decision_path: str | Path,
+    validation_reports: list[str | Path] | tuple[str | Path, ...],
+    output_dir: str | Path,
+) -> Path:
     from recsys.research.evaluation.compare import _comparison_report, _evaluation
     from recsys.research.evaluation.evaluate import _prepared
 
@@ -106,9 +167,9 @@ def finalize_selection(prepared_dir, decision_path, validation_reports, output_d
     separate(prepared_dir, decision_path, output_dir, *validation_reports)
     prepared_identity = identity(prepared_dir / "prepare-manifest.json")
     _prepared(prepared_dir, prepared_identity)
-    decision, _ = read_json(decision_path)
+    decision_value, _ = read_json(decision_path)
     exact(
-        decision,
+        decision_value,
         {
             "schema_version",
             "prepared_identity",
@@ -122,6 +183,7 @@ def finalize_selection(prepared_dir, decision_path, validation_reports, output_d
             "declared_comparison_arms",
         },
     )
+    decision = cast("SelectionDecision", decision_value)
     if (
         type(decision["schema_version"]) is not int
         or decision["schema_version"] != 1
@@ -205,7 +267,13 @@ def finalize_selection(prepared_dir, decision_path, validation_reports, output_d
         raise
 
 
-def export_test_queries(prepared_dir, selection_path, output_dir, *, expected_selection_identity):
+def export_test_queries(
+    prepared_dir: str | Path,
+    selection_path: str | Path,
+    output_dir: str | Path,
+    *,
+    expected_selection_identity: str,
+) -> Path:
     from recsys.research.evaluation.evaluate import _paired_rows, _prepared
 
     prepared_dir, selection_path, output_dir = map(Path, (prepared_dir, selection_path, output_dir))

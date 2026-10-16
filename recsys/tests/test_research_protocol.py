@@ -1,5 +1,6 @@
 import hashlib
 import unittest
+from collections.abc import Callable
 
 from recsys.contracts.bundle import canonical_bytes
 from recsys.research.protocol import (
@@ -12,7 +13,7 @@ from recsys.research.protocol import (
 
 
 class ProtocolTests(unittest.TestCase):
-    def test_frozen_policy_and_split(self):
+    def test_frozen_policy_and_split(self) -> None:
         protocol = load_protocol("ml01-v1")
         self.assertEqual(protocol["interaction_policy"]["positive_min_rating"], 8)
         self.assertEqual(protocol["comparison"]["epsilon_ndcg5"], 0.01)
@@ -26,12 +27,13 @@ class ProtocolTests(unittest.TestCase):
         self.assertNotEqual(order_hash(361, user, 1), order_hash(362, user, 1))
         self.assertTrue(protocol_identity().startswith("sha256:"))
 
-    def test_strict_types_and_canonical(self):
+    def test_strict_types_and_canonical(self) -> None:
         protocol = load_protocol()
-        for change in (
+        changes: tuple[Callable[[dict[str, object]], None], ...] = (
             lambda p: p.update(schema_version=True),
             lambda p: p.update(unexpected=True),
-        ):
+        )
+        for change in changes:
             copy = __import__("json").loads(canonical_bytes(protocol))
             change(copy)
             with self.assertRaises(ResearchError):

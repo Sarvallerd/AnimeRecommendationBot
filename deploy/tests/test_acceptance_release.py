@@ -1,5 +1,7 @@
 """Small saved-evidence tests for historical read-only verification."""
 
+from __future__ import annotations
+
 import contextlib
 import copy
 import datetime as dt
@@ -13,32 +15,78 @@ import stat
 import tempfile
 import unittest
 from types import SimpleNamespace
+from typing import TYPE_CHECKING, TypedDict, cast
 from unittest import mock
 
-from test_acceptance_evidence import database
-from test_acceptance_profiles import FIXTURE, encoded
+from deploy.tests.test_acceptance_evidence import database
+from deploy.tests.test_acceptance_profiles import FIXTURE, encoded
+
+if TYPE_CHECKING:
+    from deploy.tests.acceptance_types import SavedDescriptor
+
+
+class ReleaseFixtureProfile(TypedDict):
+    id: str
+    sha256: str
+    release_id: str
+    release_lock_sha256: str
+
+
+class ReleaseFixturePhase(TypedDict):
+    label: str
+    bundle_identity: str
+    settings: SavedDescriptor
+    snapshot: SavedDescriptor
+
+
+class ReleaseFixtureRuntime(TypedDict):
+    project: str
+    builder_image_id: str
+    bot_image_id: str
+    postgres_image_id: str
+    database_volume: str
+    baseline_snapshot_sha256: str
+    prepare_sequence: list[ReleaseFixturePhase]
+
+
+class ReleaseFixtureReport(TypedDict):
+    profile: ReleaseFixtureProfile
+    runtime: ReleaseFixtureRuntime
+    checks: dict[str, str]
+
 
 SCRIPT = pathlib.Path(__file__).with_name("release-acceptance.py")
 SPEC = importlib.util.spec_from_file_location("arb033_release_tests", SCRIPT)
+if SPEC is None or SPEC.loader is None:
+    raise ImportError(f"Cannot load release acceptance from {SCRIPT}")
 r = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(r)
 
 
-def variant(source, target, version):
+def variant(source: pathlib.Path, target: pathlib.Path, version: str) -> str:
     target.mkdir()
     for name in ("catalog.json", "neighbors.json", "manifest.json"):
         shutil.copyfile(source / name, target / name)
     manifest = json.loads((target / "manifest.json").read_bytes())
     manifest["sources"][0]["version"] = version
     (target / "manifest.json").write_bytes(encoded(manifest))
-    return "sha256:" + r.sha((target / "manifest.json").read_bytes())
+    digest = r.sha((target / "manifest.json").read_bytes())
+    assert isinstance(digest, str)
+    return "sha256:" + digest
 
 
-def saved(root, name, raw):
-    return r.private_file(root / name, raw)
+def saved(root: pathlib.Path, name: str, raw: bytes) -> SavedDescriptor:
+    descriptor = r.private_file(root / name, raw)
+    assert (
+        isinstance(descriptor, dict)
+        and set(descriptor) == {"file", "sha256"}
+        and isinstance(descriptor["file"], str)
+        and isinstance(descriptor["sha256"], str)
+    )
+    return cast("SavedDescriptor", descriptor)
 
 
-def make_fixture(root):
+def make_fixture(root: pathlib.Path) -> tuple[pathlib.Path, ReleaseFixtureReport]:
     root.chmod(0o700)
     bundles = root / "bundles"
     bundles.mkdir()
@@ -238,7 +286,9 @@ def make_fixture(root):
     }
     db = database()
 
-    def shot(settings_hash, prepare=None, minute=1):
+    def shot(
+        settings_hash: str, prepare: dict[str, object] | None = None, minute: int = 1
+    ) -> dict[str, object]:
         return {
             "schema_version": 1,
             "kind": "full",
@@ -361,11 +411,59 @@ def make_fixture(root):
         "saved_evidence": records,
     }
     r.save_json(evidence / "preparation-report.json", report)
-    return evidence, report
+    return evidence, cast("ReleaseFixtureReport", report)
 
 
 class ReleaseEvidenceTests(unittest.TestCase):
-    def test_linked_and_primary_checkout_share_private_roots_and_project_lock(self):
+    def test_build_report_checks_nested_shapes_and_full_semantics(self) -> None:
+        with tempfile.TemporaryDirectory() as scratch:
+            evidence, _ = make_fixture(pathlib.Path(scratch))
+            lock = r.p.canonical((evidence / "release-lock.json").read_bytes())
+            profile = SimpleNamespace(
+                inputs=lock["inputs"],
+                reference=lock["reference"],
+                expectations=lock["semantic_expectations"],
+            )
+            self.assertEqual(
+                set(profile.expectations),
+                {
+                    "catalog_count",
+                    "neighbor_count_histogram",
+                    "smoke_seed",
+                    "empty_seed",
+                    "vector_status_counts",
+                    "zero_vector_ids",
+                },
+            )
+            raw = (evidence / "build-report-A.json").read_bytes()
+            report = r.p.canonical(raw)
+            summary = SimpleNamespace(
+                hashes={name: item["sha256"] for name, item in report["files"].items()},
+                neighbors=json.loads(
+                    (pathlib.Path(scratch) / "bundles" / "A" / "neighbors.json").read_bytes()
+                )["neighbors"],
+            )
+            self.assertEqual(r.check_report(report, raw, summary, profile, 256), r.sha(raw))
+            for field in ("inputs", "producer", "execution", "coverage", "anime"):
+                with self.subTest(field=field):
+                    broken = copy.deepcopy(report)
+                    broken[field] = []
+                    with self.assertRaisesRegex(r.ReleaseError, "^BUILD_MISMATCH$"):
+                        r.check_report(broken, encoded(broken), summary, profile, 256)
+            broken = copy.deepcopy(report)
+            broken["inputs"]["glove.6B.300d.txt"] = []
+            with self.assertRaisesRegex(r.ReleaseError, "^BUILD_MISMATCH$"):
+                r.check_report(broken, encoded(broken), summary, profile, 256)
+
+    def test_descriptors_reject_non_string_path_and_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as scratch:
+            root = pathlib.Path(scratch)
+            with self.assertRaisesRegex(r.ReleaseError, "EVIDENCE_INVALID"):
+                r.saved(root, {"file": "receipt.json", "sha256": 7})
+            with self.assertRaisesRegex(r.ReleaseError, "EVIDENCE_INVALID"):
+                r.check_descriptor({"path": 7, "sha256": "0" * 64, "bytes": 0})
+
+    def test_linked_and_primary_checkout_share_private_roots_and_project_lock(self) -> None:
         primary = r.primary_root()
         self.assertEqual(r.primary_root(primary), primary)
         self.assertEqual(r.private_roots(), r.private_roots(primary))
@@ -376,7 +474,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
         )
         self.assertIn(primary / ".tools/arb033-acceptance", r.private_roots())
 
-    def test_probe_binds_installed_and_checkout_glove_registry(self):
+    def test_probe_binds_installed_and_checkout_glove_registry(self) -> None:
         profile = r.p.load_profile(r.NEW)
         ref = profile.reference["producer"]
         probe = {key: ref[key] for key in ("python_version", "numpy_version", "package_version")}
@@ -399,7 +497,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
             with self.assertRaisesRegex(r.ReleaseError, "BUILD_MISMATCH"):
                 r.require_v1_reference_checkout()
 
-    def test_retained_input_mutation_stops_next_prepare(self):
+    def test_retained_input_mutation_stops_next_prepare(self) -> None:
         for changed in ("input", "old_bundle"):
             with self.subTest(changed=changed), tempfile.TemporaryDirectory() as scratch:
                 root = pathlib.Path(scratch)
@@ -435,7 +533,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
                 baseline = {"captured_at": "2026-10-01T00:01:00Z"}
                 state_flag = {"begun": False}
 
-                def first_phase(*args):
+                def first_phase(*args: object) -> tuple[dict[str, str], str, str]:
                     (item if changed == "input" else old / "manifest.json").write_bytes(b"changed")
                     return ({"label": "old"}, "prepare-1", "2026-10-01T00:02:00Z")
 
@@ -463,7 +561,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
                     self.assertEqual(prepare.call_count, 1)
                     self.assertTrue(state_flag["begun"])
 
-    def test_restore_is_bounded_and_refuses_changed_settings_or_running_bot(self):
+    def test_restore_is_bounded_and_refuses_changed_settings_or_running_bot(self) -> None:
         with tempfile.TemporaryDirectory() as scratch:
             root = pathlib.Path(scratch)
             settings = root / "original.env"
@@ -543,7 +641,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
                     r.restore_old(t, settings, state, old_settings, old_path, old, pg0, {}), "FAIL"
                 )
 
-    def test_cli_failure_redacts_private_canary(self):
+    def test_cli_failure_redacts_private_canary(self) -> None:
         with tempfile.TemporaryDirectory() as scratch:
             evidence = pathlib.Path(scratch)
             evidence.chmod(0o700)
@@ -553,7 +651,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
                 self.assertEqual(r.main(["verify", "--evidence-dir", str(evidence)]), 1)
             self.assertEqual(output.getvalue(), "FAIL EVIDENCE_INVALID\n")
 
-    def test_phase_requires_fresh_prepare_and_identical_database(self):
+    def test_phase_requires_fresh_prepare_and_identical_database(self) -> None:
         with tempfile.TemporaryDirectory() as scratch:
             evidence = pathlib.Path(scratch)
             evidence.chmod(0o700)
@@ -612,7 +710,11 @@ class ReleaseEvidenceTests(unittest.TestCase):
                 self.assertEqual(captured, shot["captured_at"])
                 self.assertEqual(phase["bundle_identity"], expected["identity"])
                 changed = copy.deepcopy(shot)
-                changed["database"]["migrations"][0]["applied_at"] = "2026-10-02T00:00:00Z"
+                changed_database = changed["database"]
+                assert isinstance(changed_database, dict)
+                migrations = changed_database["migrations"]
+                assert isinstance(migrations, list) and isinstance(migrations[0], dict)
+                migrations[0]["applied_at"] = "2026-10-02T00:00:00Z"
                 with (
                     mock.patch.object(r.e, "snapshot", return_value=changed),
                     self.assertRaisesRegex(r.ReleaseError, "DATABASE_HISTORY"),
@@ -661,7 +763,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
                         pg,
                     )
 
-    def test_recompute_and_historical_read_only(self):
+    def test_recompute_and_historical_read_only(self) -> None:
         with tempfile.TemporaryDirectory() as scratch:
             evidence, report = make_fixture(pathlib.Path(scratch))
             with (
@@ -683,29 +785,16 @@ class ReleaseEvidenceTests(unittest.TestCase):
                 with self.assertRaises(r.ReleaseError):
                     r.verify_record(evidence)
 
-    def test_historical_phase_times_reject_equal_reversed_and_malformed(self):
+    def test_historical_phase_times_reject_equal_reversed_and_malformed(self) -> None:
         cases = (
-            ("equal_capture", lambda shot: shot.update(captured_at="2026-10-01T00:01:00+00:00")),
-            ("reversed_capture", lambda shot: shot.update(captured_at="2026-09-30T23:59:00+00:00")),
-            (
-                "early_prepare",
-                lambda shot: shot["runtime"]["prepare"].update(
-                    started_at="2026-10-01T00:00:59+00:00"
-                ),
-            ),
-            (
-                "late_prepare",
-                lambda shot: shot["runtime"]["prepare"].update(
-                    started_at="2026-10-01T00:03:00+00:00"
-                ),
-            ),
-            ("naive_capture", lambda shot: shot.update(captured_at="2026-10-01T00:02:00")),
-            (
-                "malformed_prepare",
-                lambda shot: shot["runtime"]["prepare"].update(started_at="not-a-time"),
-            ),
+            ("equal_capture", "captured_at", "2026-10-01T00:01:00+00:00"),
+            ("reversed_capture", "captured_at", "2026-09-30T23:59:00+00:00"),
+            ("early_prepare", "started_at", "2026-10-01T00:00:59+00:00"),
+            ("late_prepare", "started_at", "2026-10-01T00:03:00+00:00"),
+            ("naive_capture", "captured_at", "2026-10-01T00:02:00"),
+            ("malformed_prepare", "started_at", "not-a-time"),
         )
-        for name, change in cases:
+        for name, field, replacement in cases:
             with self.subTest(name=name), tempfile.TemporaryDirectory() as scratch:
                 evidence, report = make_fixture(pathlib.Path(scratch))
                 trusted = {
@@ -717,7 +806,10 @@ class ReleaseEvidenceTests(unittest.TestCase):
                 }
                 first = evidence / "snapshot-old.json"
                 shot = json.loads(first.read_bytes())
-                change(shot)
+                if field == "captured_at":
+                    shot["captured_at"] = replacement
+                else:
+                    shot["runtime"]["prepare"]["started_at"] = replacement
                 first.write_bytes(encoded(shot))
                 report["runtime"]["prepare_sequence"][0]["snapshot"]["sha256"] = r.sha(
                     first.read_bytes()
@@ -729,7 +821,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
                 ):
                     r.verify_record(evidence)
 
-    def test_forged_pass_and_settings_phase_binding(self):
+    def test_forged_pass_and_settings_phase_binding(self) -> None:
         with tempfile.TemporaryDirectory() as scratch:
             evidence, report = make_fixture(pathlib.Path(scratch))
             trusted = {
@@ -760,7 +852,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
                 with self.assertRaises(r.ReleaseError):
                     r.verify_record(evidence)
 
-    def test_bounded_transport_and_guarded_dispatch(self):
+    def test_bounded_transport_and_guarded_dispatch(self) -> None:
         with mock.patch.object(
             r.subprocess, "run", side_effect=r.subprocess.TimeoutExpired("docker", 1)
         ):

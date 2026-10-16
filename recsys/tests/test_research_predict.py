@@ -2,6 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from typing import IO, cast
 from unittest.mock import patch
 
 import numpy as np
@@ -9,24 +10,32 @@ from research_model_support import ModelFixture, patch_release_info
 
 from recsys.research.artifacts import read_json, stream_jsonl
 from recsys.research.evaluation.compare import compare_evaluations
-from recsys.research.evaluation.evaluate import evaluate_predictions
+from recsys.research.evaluation.evaluate import PredictionManifest, evaluate_predictions
+from recsys.research.models.inputs import read_scoring_inputs
 from recsys.research.models.types import ScoreVector
 from recsys.research.predict import _encode_vector, _query, predict_validation
 from recsys.research.protocol import ResearchError, load_protocol
 
 
 class PredictionTests(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.fixture = ModelFixture(tmp.name)
         self.prepared, self.prepared_identity = self.fixture.make_prepared()
         self.model = self.fixture.fit_popularity(self.prepared, self.prepared_identity)
 
-    def test_predict_evaluate_compare_and_repeat_bytes(self):
+    def test_predict_evaluate_compare_and_repeat_bytes(self) -> None:
         source_open = Path.open
 
-        def guarded(path, *args, **kwargs):
+        def guarded(
+            path: Path,
+            mode: str = "r",
+            buffering: int = -1,
+            encoding: str | None = None,
+            errors: str | None = None,
+            newline: str | None = None,
+        ) -> IO[str] | IO[bytes]:
             if path.name in {
                 "train-interactions.tsv.gz",
                 "validation-labels.jsonl.gz",
@@ -34,7 +43,7 @@ class PredictionTests(unittest.TestCase):
                 "splits.tsv.gz",
             }:
                 raise AssertionError("private stream opened")
-            return source_open(path, *args, **kwargs)
+            return source_open(path, mode, buffering, encoding, errors, newline)
 
         with patch.object(Path, "open", guarded):
             first = self.fixture.predict(self.prepared, self.prepared_identity, self.model, "first")
@@ -53,20 +62,36 @@ class PredictionTests(unittest.TestCase):
             .read_bytes()
             .startswith(bytes.fromhex("1f8b08000000000000ff"))
         )
-        manifest, _ = read_json(first / "prediction-manifest.json")
+        manifest_value, _ = read_json(first / "prediction-manifest.json")
+        assert isinstance(manifest_value, dict)
+        manifest = cast(
+            "PredictionManifest", manifest_value
+        )  # Published by predict_validation above.
         rows = list(stream_jsonl(first / "scores.jsonl.gz", manifest["scores"]))
         queries = list(
             stream_jsonl(
                 self.prepared / "development/queries.jsonl.gz", manifest["query_descriptor"]
             )
         )
-        stats, _ = read_json(self.prepared / "fit/train-stats.json")
+        with patch_release_info(self.fixture.lock):
+            stats = read_scoring_inputs(
+                self.prepared, expected_prepared_identity=self.prepared_identity
+            ).train_stats
         self.assertEqual(len(rows), len(queries))
-        self.assertEqual([row["query_id"] for row in rows], [q["query_id"] for q in queries])
-        for query, row in zip(queries, rows):
-            self.assertEqual(len(row["scores"]), len(self.fixture.items))
+        assert all(isinstance(row, dict) for row in rows)
+        assert all(isinstance(query, dict) for query in queries)
+        typed_rows = cast("list[dict[str, object]]", rows)
+        typed_queries = cast("list[dict[str, object]]", queries)
+        self.assertEqual(
+            [row["query_id"] for row in typed_rows],
+            [query["query_id"] for query in typed_queries],
+        )
+        for query, row in zip(typed_queries, typed_rows):
+            scores = row["scores"]
+            assert isinstance(scores, list)
+            self.assertEqual(len(scores), len(self.fixture.items))
             self.assertEqual(
-                row["scores"],
+                scores,
                 [
                     [item, stats["items"][str(item)]["positive_users"]]
                     for item in self.fixture.items
@@ -89,7 +114,7 @@ class PredictionTests(unittest.TestCase):
         )
         self.assertTrue((self.fixture.root / "comparison/comparison.json").exists())
 
-    def test_query_and_score_vector_fail_closed(self):
+    def test_query_and_score_vector_fail_closed(self) -> None:
         valid = {
             "query_id": "q1_" + "a" * 64,
             "cohort": "main",
@@ -125,7 +150,7 @@ class PredictionTests(unittest.TestCase):
                 with self.assertRaises(ResearchError):
                     _encode_vector(bad, 1, ids)
 
-    def test_bad_model_and_no_replace_do_not_publish(self):
+    def test_bad_model_and_no_replace_do_not_publish(self) -> None:
         output = self.fixture.root / "prediction"
         manifest_path = self.model / "model-manifest.json"
         original = manifest_path.read_bytes()
@@ -138,7 +163,7 @@ class PredictionTests(unittest.TestCase):
         with self.assertRaises(ResearchError):
             self.fixture.predict(self.prepared, self.prepared_identity, self.model)
 
-    def test_invalid_backend_vector_cleans_partial_stage(self):
+    def test_invalid_backend_vector_cleans_partial_stage(self) -> None:
         scorer = SimpleNamespace(
             score=lambda seeds: ScoreVector(
                 np.full(len(self.fixture.items), np.nan, dtype=np.float64),

@@ -7,13 +7,21 @@ import tempfile
 import traceback
 import unittest
 from pathlib import Path
+from typing import Sequence
 
-from recsys.data.interactions import CSV_COLUMNS, WS, build_interactions, user_key
-from recsys.data.metadata import MetadataResult
+from recsys.contracts.bundle import AnimeRecord
+from recsys.data.interactions import (
+    CSV_COLUMNS,
+    WS,
+    InteractionResult,
+    build_interactions,
+    user_key,
+)
+from recsys.data.metadata import MetadataFact, MetadataResult
 
 
-def _metadata(n=16):
-    entries = {
+def _metadata(n: int = 16) -> MetadataResult:
+    entries: dict[str, AnimeRecord] = {
         str(i): {
             "title": str(i),
             "aliases": [],
@@ -26,7 +34,7 @@ def _metadata(n=16):
         }
         for i in range(1, n + 1)
     }
-    facts = {
+    facts: dict[str, MetadataFact] = {
         str(i): {"first_release_date": None, "airing_status": "unknown", "seasonal_year": None}
         for i in range(1, n + 1)
     }
@@ -36,7 +44,12 @@ def _metadata(n=16):
 
 
 class InteractionTests(unittest.TestCase):
-    def run_rows(self, rows, metadata=None, threads=2):
+    def run_rows(
+        self,
+        rows: Sequence[tuple[str | None, str, str, str | None]],
+        metadata: MetadataResult | None = None,
+        threads: int = 2,
+    ) -> tuple[InteractionResult, bytes, bytes]:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             path = root / "ratings.csv"
@@ -57,7 +70,7 @@ class InteractionTests(unittest.TestCase):
             self.assertEqual((root / "work" / "ratings.duckdb").stat().st_mode & 0o777, 0o600)
             return result, output.read_bytes(), gzip.decompress(output.read_bytes())
 
-    def test_all_pair_states_and_mapping_denominator(self):
+    def test_all_pair_states_and_mapping_denominator(self) -> None:
         rows = [
             ("same", "1", "completed", "8"),
             ("same", "1", "completed", "8"),
@@ -86,7 +99,7 @@ class InteractionTests(unittest.TestCase):
         self.assertNotIn(b"mixed", plain)
         self.assertNotIn(b"same", plain)
 
-    def test_14_vs_15_distinct_positive_and_unicode_namespace(self):
+    def test_14_vs_15_distinct_positive_and_unicode_namespace(self) -> None:
         rows = [("Пользователь", str(i), "completed", "8") for i in range(1, 16)]
         rows += [("other", str(i), "completed", "8") for i in range(1, 15)]
         result, first, plain = self.run_rows(rows, threads=1)
@@ -103,7 +116,7 @@ class InteractionTests(unittest.TestCase):
             user_key("A"), "u1_" + hashlib.sha256(b"arb-user-v1\0neelagiri-2025-v1\0A").hexdigest()
         )
 
-    def test_all_whitespace_usernames_are_blank_without_normalizing_nonblank_names(self):
+    def test_all_whitespace_usernames_are_blank_without_normalizing_nonblank_names(self) -> None:
         self.assertEqual(len(WS), 29)
         self.assertEqual(len(set(WS)), 29)
         blanks = list(WS) + [WS, None, WS]
@@ -124,7 +137,7 @@ class InteractionTests(unittest.TestCase):
             self.assertIn(user_key(name).encode("ascii"), plain)
         self.assertEqual(len(set(plain.splitlines()[1:])), len(names))
 
-    def test_exact_score_grammar_does_not_underflow_or_coerce_invalid_values(self):
+    def test_exact_score_grammar_does_not_underflow_or_coerce_invalid_values(self) -> None:
         unset = (None, "\u00a0\u2003", "+000.000")
         explicit = ("+0010.000", "\u00a01\u3000")
         invalid = (
@@ -160,7 +173,7 @@ class InteractionTests(unittest.TestCase):
         self.assertIn(user_key("score-4").encode("ascii") + b"\t1\t1\tcompleted\n", plain)
         self.assertNotIn(user_key("score-5").encode("ascii"), plain)
 
-    def test_csv_failure_does_not_expose_private_row(self):
+    def test_csv_failure_does_not_expose_private_row(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "ratings.csv"
@@ -180,7 +193,7 @@ class InteractionTests(unittest.TestCase):
                 "private-canary-username", "".join(traceback.format_exception(context.exception))
             )
 
-    def test_exact_csv_header_rejects_renamed_reordered_and_duplicate_columns(self):
+    def test_exact_csv_header_rejects_renamed_reordered_and_duplicate_columns(self) -> None:
         columns = list(CSV_COLUMNS)
         cases = {
             "renamed": ("private-canary-column", *columns[1:]),

@@ -8,16 +8,24 @@ import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NotRequired, TypedDict, cast
 
 from recsys import __version__
-from recsys.contracts.bundle import ContractError, canonical_bytes, check_catalog, parse_canonical
+from recsys.contracts.bundle import (
+    AnimeRecord,
+    Catalog,
+    ContractError,
+    canonical_bytes,
+    check_catalog,
+    parse_canonical,
+)
 from recsys.contracts.provenance import (
     LEGACY_V1_PACKAGE_VERSION,
     LEGACY_V1_SOURCE_SHA256,
     SOURCE_FILES,
     source_fingerprints,
 )
-from recsys.data.aliases import AliasError, AliasSpec, validate_aliases
+from recsys.data.aliases import AliasError, AliasPayload, AliasSpec, AliasSummary, validate_aliases
 from recsys.data.aliases import _load_spec as _load_alias_spec
 from recsys.data.dataset import DatasetSpec
 from recsys.data.dataset import _load_spec as _load_base_spec
@@ -25,6 +33,54 @@ from recsys.data.dataset import _load_spec as _load_base_spec
 POLICY = "ordered-alias-overlay-v1"
 IDENTITY = re.compile(r"sha256:[0-9a-f]{64}\Z")
 HEX = re.compile(r"[0-9a-f]{64}\Z")
+
+
+class ReleaseDescriptor(TypedDict):
+    bytes: int
+    sha256: str
+
+
+class ReleaseNormalizer(TypedDict):
+    name: str
+    version: str
+    code_files_sha256: dict[str, str]
+
+
+class ReleaseInput(TypedDict):
+    snapshot_id: str
+    identity: str
+    manifest: ReleaseDescriptor
+    catalog: NotRequired[ReleaseDescriptor]
+    aliases: NotRequired[ReleaseDescriptor]
+
+
+class ReleaseProducer(TypedDict):
+    package_version: str
+    python_version: str
+
+
+class ReleaseManifest(TypedDict):
+    schema_version: int
+    kind: str
+    normalizer: ReleaseNormalizer
+    policy: str
+    inputs: dict[str, ReleaseInput]
+    producer: ReleaseProducer
+    counts: dict[str, int]
+    files: dict[str, ReleaseDescriptor]
+
+
+type LoadedInputs = tuple[
+    AliasSummary,
+    dict[str, object],
+    bytes,
+    Catalog,
+    bytes,
+    dict[str, object],
+    bytes,
+    AliasPayload,
+    bytes,
+]
 
 
 class ReleaseError(ValueError):
@@ -49,41 +105,44 @@ class ReleaseSummary:
 @dataclass(frozen=True)
 class VerifiedRelease:
     summary: ReleaseSummary
-    manifest: dict
+    manifest: ReleaseManifest
     manifest_raw: bytes
-    catalog: dict
+    catalog: Catalog
     catalog_raw: bytes
-    base_manifest: dict
-    alias_manifest: dict
+    base_manifest: dict[str, object]
+    alias_manifest: dict[str, object]
 
 
 def _sha(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def _equal(left, right) -> bool:
+def _equal(left: object, right: object) -> bool:
     return canonical_bytes(left) == canonical_bytes(right)
 
 
-def _read(path: Path) -> tuple[dict, bytes]:
+def _read(path: Path) -> tuple[dict[str, object], bytes]:
     if path.is_symlink() or not path.is_file():
         raise ReleaseError("release_integrity_error")
     raw = path.read_bytes()
-    return parse_canonical(raw, path.name), raw
+    value = parse_canonical(raw, path.name)
+    if not isinstance(value, dict):
+        raise ReleaseError("release_integrity_error")
+    return cast("dict[str, object]", value), raw
 
 
-def _descriptor(raw: bytes) -> dict:
+def _descriptor(raw: bytes) -> ReleaseDescriptor:
     return {"bytes": len(raw), "sha256": _sha(raw)}
 
 
-def _valid_descriptor(value, raw: bytes) -> bool:
+def _valid_descriptor(value: object, raw: bytes) -> bool:
     return (
         isinstance(value, dict)
         and set(value) == {"bytes", "sha256"}
         and type(value["bytes"]) is int
         and value["bytes"] >= 0
         and isinstance(value["sha256"], str)
-        and HEX.fullmatch(value["sha256"])
+        and HEX.fullmatch(value["sha256"]) is not None
         and _equal(value, _descriptor(raw))
     )
 
@@ -122,7 +181,7 @@ def _inputs(
     alias_identity: str,
     base_spec: DatasetSpec | None,
     alias_spec: AliasSpec | None,
-):
+) -> LoadedInputs:
     """One upstream full validation, followed by retained, hash-bound consumed bytes."""
     _identity(base_identity)
     _identity(alias_identity)
@@ -154,16 +213,19 @@ def _inputs(
     ):
         raise ReleaseError("release_integrity_error")
     check_catalog(base_catalog)
+    base_catalog_typed = cast("Catalog", base_catalog)  # Full wire validation above.
+    base_files = cast("dict[str, object]", base_manifest["files"])
+    alias_files = cast("dict[str, object]", alias_manifest["files"])
     base_block = alias_manifest.get("base")
     expected_base = {
         "snapshot_id": base_manifest["snapshot_id"],
         "identity": base_identity,
-        "catalog": base_manifest["files"]["catalog.json"],
-        "catalog_items": len(base_catalog["anime"]),
+        "catalog": base_files["catalog.json"],
+        "catalog_items": len(base_catalog_typed["anime"]),
     }
     if (
-        not _valid_descriptor(base_manifest["files"]["catalog.json"], base_catalog_raw)
-        or not _valid_descriptor(alias_manifest["files"]["aliases.json"], aliases_raw)
+        not _valid_descriptor(base_files["catalog.json"], base_catalog_raw)
+        or not _valid_descriptor(alias_files["aliases.json"], aliases_raw)
         or not isinstance(base_block, dict)
         or not _equal(base_block, expected_base)
         or type(base_block.get("catalog_items")) is not int
@@ -179,17 +241,19 @@ def _inputs(
         summary,
         base_manifest,
         base_raw,
-        base_catalog,
+        base_catalog_typed,
         base_catalog_raw,
         alias_manifest,
         alias_raw,
-        aliases,
+        cast("AliasPayload", aliases),  # Exact alias shape and count checked above.
         aliases_raw,
     )
 
 
-def _overlay(base: dict, aliases: dict, enrichment_items: int) -> tuple[dict, dict]:
-    anime = {}
+def _overlay(
+    base: Catalog, aliases: AliasPayload, enrichment_items: int
+) -> tuple[Catalog, dict[str, int]]:
+    anime: dict[str, AnimeRecord] = {}
     counts = {
         "catalog_count": len(base["anime"]),
         "enrichment_items": enrichment_items,
@@ -214,12 +278,18 @@ def _overlay(base: dict, aliases: dict, enrichment_items: int) -> tuple[dict, di
             previous[0] if previous else None
         )
         anime[key] = {**entry, "aliases": combined}
-    catalog = {"schema_version": 1, "anime": anime}
+    catalog: Catalog = {"schema_version": 1, "anime": anime}
     check_catalog(catalog)
     return catalog, counts
 
 
-def _expected(base_identity, alias_identity, loaded, catalog_raw, counts):
+def _expected(
+    base_identity: str,
+    alias_identity: str,
+    loaded: LoadedInputs,
+    catalog_raw: bytes,
+    counts: dict[str, int],
+) -> ReleaseManifest:
     (_, bm, bm_raw, _, bc_raw, am, am_raw, _, aliases_raw) = loaded
     return {
         "schema_version": 1,
@@ -232,13 +302,13 @@ def _expected(base_identity, alias_identity, loaded, catalog_raw, counts):
         "policy": POLICY,
         "inputs": {
             "base": {
-                "snapshot_id": bm["snapshot_id"],
+                "snapshot_id": cast("str", bm["snapshot_id"]),
                 "identity": base_identity,
                 "manifest": _descriptor(bm_raw),
                 "catalog": _descriptor(bc_raw),
             },
             "aliases": {
-                "snapshot_id": am["snapshot_id"],
+                "snapshot_id": cast("str", am["snapshot_id"]),
                 "identity": alias_identity,
                 "manifest": _descriptor(am_raw),
                 "aliases": _descriptor(aliases_raw),
@@ -272,15 +342,15 @@ def _publish(stage: Path, target: Path) -> None:
 
 
 def compose_release(
-    base_dir,
-    aliases_dir,
-    alias_data_dir,
-    output_dir,
+    base_dir: str | Path,
+    aliases_dir: str | Path,
+    alias_data_dir: str | Path,
+    output_dir: str | Path,
     *,
-    expected_base_identity,
-    expected_alias_identity,
-    _base_spec=None,
-    _alias_spec=None,
+    expected_base_identity: str,
+    expected_alias_identity: str,
+    _base_spec: DatasetSpec | None = None,
+    _alias_spec: AliasSpec | None = None,
 ) -> Path:
     base_dir, aliases_dir, alias_data_dir, output_dir = map(
         Path, (base_dir, aliases_dir, alias_data_dir, output_dir)
@@ -325,14 +395,14 @@ def compose_release(
 
 
 def _verified_release(
-    release_dir,
+    release_dir: str | Path,
     *,
-    base_dir,
-    aliases_dir,
-    alias_data_dir,
-    expected_identity,
-    _base_spec=None,
-    _alias_spec=None,
+    base_dir: str | Path,
+    aliases_dir: str | Path,
+    alias_data_dir: str | Path,
+    expected_identity: str,
+    _base_spec: DatasetSpec | None = None,
+    _alias_spec: AliasSpec | None = None,
 ) -> VerifiedRelease:
     release_dir, base_dir, aliases_dir, alias_data_dir = map(
         Path, (release_dir, base_dir, aliases_dir, alias_data_dir)
@@ -348,8 +418,17 @@ def _verified_release(
         manifest, manifest_raw = _read(release_dir / "release-manifest.json")
         if "sha256:" + _sha(manifest_raw) != expected_identity:
             raise ReleaseError("release_integrity_error")
-        base_identity = manifest["inputs"]["base"]["identity"]
-        alias_identity = manifest["inputs"]["aliases"]["identity"]
+        inputs_raw = manifest.get("inputs")
+        if not isinstance(inputs_raw, dict):
+            raise ReleaseError("release_integrity_error")
+        base_raw = inputs_raw.get("base")
+        alias_raw = inputs_raw.get("aliases")
+        if not isinstance(base_raw, dict) or not isinstance(alias_raw, dict):
+            raise ReleaseError("release_integrity_error")
+        base_identity = base_raw.get("identity")
+        alias_identity = alias_raw.get("identity")
+        if not isinstance(base_identity, str) or not isinstance(alias_identity, str):
+            raise ReleaseError("release_integrity_error")
         loaded = _inputs(
             base_dir,
             aliases_dir,
@@ -409,8 +488,8 @@ def _verified_release(
             and historical_producer["package_version"] != LEGACY_V1_PACKAGE_VERSION
         ):
             raise ReleaseError("release_integrity_error")
-        expected["normalizer"] = observed_normalizer
-        expected["producer"] = historical_producer
+        expected["normalizer"] = cast("ReleaseNormalizer", observed_normalizer)
+        expected["producer"] = cast("ReleaseProducer", historical_producer)
         if not _equal(manifest, expected):
             raise ReleaseError("release_integrity_error")
         summary = ReleaseSummary(
@@ -427,7 +506,13 @@ def _verified_release(
             counts["alias_strings_after"],
         )
         return VerifiedRelease(
-            summary, manifest, manifest_raw, catalog, actual_raw, loaded[1], loaded[5]
+            summary,
+            cast("ReleaseManifest", manifest),  # Equal to the fully checked expected manifest.
+            manifest_raw,
+            catalog,
+            actual_raw,
+            loaded[1],
+            loaded[5],
         )
     except (
         AliasError,
@@ -442,14 +527,14 @@ def _verified_release(
 
 
 def validate_release(
-    release_dir,
+    release_dir: str | Path,
     *,
-    base_dir,
-    aliases_dir,
-    alias_data_dir,
-    expected_identity,
-    _base_spec=None,
-    _alias_spec=None,
+    base_dir: str | Path,
+    aliases_dir: str | Path,
+    alias_data_dir: str | Path,
+    expected_identity: str,
+    _base_spec: DatasetSpec | None = None,
+    _alias_spec: AliasSpec | None = None,
 ) -> ReleaseSummary:
     return _verified_release(
         release_dir,

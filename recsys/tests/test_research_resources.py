@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import resource
 import signal
 import subprocess
 import sys
@@ -10,21 +11,32 @@ import tempfile
 import threading
 import time
 import unittest
+from collections.abc import Sequence
 from pathlib import Path
 from unittest import mock
 
 from recsys.research import resources
 from recsys.research.protocol import ResearchError
 
+StatFields = tuple[str, int, int, int, int, int]
+ProcessGroups = dict[int, dict[int, tuple[str, int, int, int]]]
+
 
 class ResourceSupervisorTests(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         self.number = 0
 
-    def launch(self, supervisor, code, *, seconds=4, args=()):
+    def launch(
+        self,
+        supervisor: resources.ResourceSupervisor,
+        code: str,
+        *,
+        seconds: float = 4,
+        args: tuple[str, ...] = (),
+    ) -> resources.JobHandle:
         self.number += 1
         return supervisor.start(
             [sys.executable, "-I", "-c", code, *args],
@@ -33,15 +45,30 @@ class ResourceSupervisorTests(unittest.TestCase):
             remaining_seconds=seconds,
         )
 
-    def await_result(self, supervisor, handle, *, wall=8):
+    def await_result(
+        self,
+        supervisor: resources.ResourceSupervisor,
+        handle: resources.JobHandle,
+        *,
+        wall: float = 8,
+    ) -> tuple[resources.ProcessResult, list[resources.JobHandle]]:
         deadline = time.monotonic() + wall
-        completions = []
+        completions: list[resources.JobHandle] = []
         while supervisor.result(handle) is None and time.monotonic() < deadline:
             completions.extend(supervisor.poll().completed)
-        self.assertIsNotNone(supervisor.result(handle))
-        return supervisor.result(handle), completions
+        result = supervisor.result(handle)
+        assert result is not None, "worker completion missing"
+        return result, completions
 
-    def await_text(self, supervisor, handle, path, expected, *, wall=5):
+    def await_text(
+        self,
+        supervisor: resources.ResourceSupervisor,
+        handle: resources.JobHandle,
+        path: Path,
+        expected: str,
+        *,
+        wall: float = 5,
+    ) -> None:
         deadline = time.monotonic() + wall
         while time.monotonic() < deadline:
             supervisor.poll()
@@ -49,7 +76,9 @@ class ResourceSupervisorTests(unittest.TestCase):
                 return
         self.fail("worker handshake missing")
 
-    def launch_held(self, supervisor):
+    def launch_held(
+        self, supervisor: resources.ResourceSupervisor
+    ) -> tuple[resources.JobHandle, Path]:
         ready = self.root / f"ready-{self.number + 1}"
         release = self.root / f"release-{self.number + 1}"
         code = (
@@ -65,7 +94,7 @@ class ResourceSupervisorTests(unittest.TestCase):
         return handle, release
 
     @staticmethod
-    def threaded_exit_code():
+    def threaded_exit_code() -> str:
         return (
             "import ctypes, os, sys, threading, time\n"
             "from pathlib import Path\n"
@@ -90,7 +119,7 @@ class ResourceSupervisorTests(unittest.TestCase):
             "libc.pthread_exit(None)\n"
         )
 
-    def wait_for_threaded_zombie(self, pid, *, waitable=False):
+    def wait_for_threaded_zombie(self, pid: int, *, waitable: bool = False) -> list[int]:
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             try:
@@ -113,7 +142,14 @@ class ResourceSupervisorTests(unittest.TestCase):
             time.sleep(0.01)
         self.fail("zombie leader with live threads not observed")
 
-    def launch_threaded(self, supervisor, *, count=1, mib=0, seconds=4):
+    def launch_threaded(
+        self,
+        supervisor: resources.ResourceSupervisor,
+        *,
+        count: int = 1,
+        mib: int = 0,
+        seconds: float = 4,
+    ) -> tuple[resources.JobHandle, Path]:
         ready = self.root / f"ready-{self.number + 1}"
         release = self.root / f"release-{self.number + 1}"
         handle = self.launch(
@@ -126,10 +162,12 @@ class ResourceSupervisorTests(unittest.TestCase):
         while not ready.exists() and time.monotonic() < deadline:
             time.sleep(0.01)
         self.assertTrue(ready.exists(), "threaded worker handshake missing")
-        self.wait_for_threaded_zombie(supervisor._jobs[handle].pid, waitable=True)
+        pid = supervisor._jobs[handle].pid
+        assert pid is not None
+        self.wait_for_threaded_zombie(pid, waitable=True)
         return handle, release
 
-    def test_zombie_leader_live_thread_waits_then_completes_once(self):
+    def test_zombie_leader_live_thread_waits_then_completes_once(self) -> None:
         with resources.ResourceSupervisor() as supervisor:
             handle, release = self.launch_threaded(supervisor)
             job = supervisor._jobs[handle]
@@ -149,10 +187,11 @@ class ResourceSupervisorTests(unittest.TestCase):
             self.assertEqual(completed, [handle])
             self.assertEqual(supervisor.poll(wait_seconds=0).completed, ())
 
-    def test_two_empty_scans_must_both_observe_waitable_leader(self):
+    def test_two_empty_scans_must_both_observe_waitable_leader(self) -> None:
         with resources.ResourceSupervisor() as supervisor:
             handle = self.launch(supervisor, "print('done')")
             leader = supervisor._jobs[handle].pid
+            assert leader is not None
             deadline = time.monotonic() + 3
             while os.waitid(os.P_PID, leader, os.WEXITED | os.WNOHANG | os.WNOWAIT) is None:
                 self.assertLess(time.monotonic(), deadline)
@@ -166,11 +205,11 @@ class ResourceSupervisorTests(unittest.TestCase):
             self.assertIsNone(supervisor.result(handle))
             self.assertTrue(supervisor._jobs[handle].empty_zombie_seen)
             self.assertEqual(supervisor.poll(wait_seconds=0).completed, (handle,))
-            self.assertEqual(
-                (supervisor.result(handle).outcome, supervisor.result(handle).returncode), ("ok", 0)
-            )
+            result = supervisor.result(handle)
+            assert result is not None
+            self.assertEqual((result.outcome, result.returncode), ("ok", 0))
 
-    def test_zombie_leader_timeout_and_cancel_clean_live_threads(self):
+    def test_zombie_leader_timeout_and_cancel_clean_live_threads(self) -> None:
         for action in ("timeout", "cancelled"):
             with self.subTest(action=action):
                 with resources.ResourceSupervisor() as supervisor:
@@ -186,7 +225,7 @@ class ResourceSupervisorTests(unittest.TestCase):
                     self.assertEqual(completed, [handle])
                     self.assertFalse(Path(f"/proc/{pid}").exists())
 
-    def test_adopted_zombie_with_live_thread_requires_descendant_cleanup(self):
+    def test_adopted_zombie_with_live_thread_requires_descendant_cleanup(self) -> None:
         child_ready = self.root / "child-ready"
         child_release = self.root / "child-release"
         parent_release = self.root / "parent-release"
@@ -219,9 +258,9 @@ class ResourceSupervisorTests(unittest.TestCase):
             adopted_pid = int(child_pid.read_text())
             self.wait_for_threaded_zombie(adopted_pid)
             real_wait = resources.ResourceSupervisor._wait4_one
-            pending = []
+            pending: list[int] = []
 
-            def record_wait(job, pid):
+            def record_wait(job: resources._Job, pid: int) -> bool | None:
                 result = real_wait(job, pid)
                 if pid == adopted_pid and result is None:
                     pending.append(pid)
@@ -239,10 +278,11 @@ class ResourceSupervisorTests(unittest.TestCase):
             self.assertEqual(completed, [handle])
             self.assertFalse(Path(f"/proc/{adopted_pid}").exists())
 
-    def test_zombie_thread_rss_is_counted_once_per_process_and_aggregate(self):
+    def test_zombie_thread_rss_is_counted_once_per_process_and_aggregate(self) -> None:
         with resources.ResourceSupervisor() as supervisor:
             handle, release = self.launch_threaded(supervisor, count=2, mib=16)
             pid = supervisor._jobs[handle].pid
+            assert pid is not None
             live = self.wait_for_threaded_zombie(pid, waitable=True)
             self.assertGreaterEqual(len(live), 2)
             thread_rss = [resources._stat_path(f"/proc/{pid}/task/{tid}/stat")[5] for tid in live]
@@ -274,14 +314,15 @@ class ResourceSupervisorTests(unittest.TestCase):
             )
             self.assertTrue(all(result.cleanup_complete for result in results))
 
-    def test_genuine_wait4_error_is_sticky_after_later_cleanup(self):
+    def test_genuine_wait4_error_is_sticky_after_later_cleanup(self) -> None:
         with resources.ResourceSupervisor() as supervisor:
             handle = self.launch(supervisor, "print('done')")
             leader = supervisor._jobs[handle].pid
+            assert leader is not None
             real_wait4 = os.wait4
-            failed = []
+            failed: list[int] = []
 
-            def once(pid, flags):
+            def once(pid: int, flags: int) -> tuple[int, int, resource.struct_rusage]:
                 if pid == leader and not failed:
                     failed.append(pid)
                     raise OSError("injected genuine wait failure")
@@ -296,12 +337,12 @@ class ResourceSupervisorTests(unittest.TestCase):
             )
             self.assertEqual(completed, [handle])
 
-    def test_malformed_live_thread_stat_fails_closed(self):
+    def test_malformed_live_thread_stat_fails_closed(self) -> None:
         with resources.ResourceSupervisor() as supervisor:
             handle, _release = self.launch_threaded(supervisor)
             real_stat = resources._stat_path
 
-            def malformed(path):
+            def malformed(path: str) -> StatFields:
                 if "/task/" in path:
                     raise ValueError("malformed live thread stat")
                 return real_stat(path)
@@ -312,7 +353,7 @@ class ResourceSupervisorTests(unittest.TestCase):
             self.assertEqual((result.outcome, result.cleanup_complete), ("monitor_failed", True))
             self.assertEqual(completed, [handle])
 
-    def test_initial_transient_proc_read_accepts_late_identity(self):
+    def test_initial_transient_proc_read_accepts_late_identity(self) -> None:
         for missing in (FileNotFoundError, ProcessLookupError):
             with self.subTest(missing=missing.__name__):
                 with resources.ResourceSupervisor() as supervisor:
@@ -341,17 +382,20 @@ class ResourceSupervisorTests(unittest.TestCase):
                     self.assertEqual(completed, [handle])
                     self.assertEqual(supervisor.poll(wait_seconds=0).completed, ())
 
-    def test_initial_nontransient_read_or_wrong_identity_remains_failed(self):
+    def test_initial_nontransient_read_or_wrong_identity_remains_failed(self) -> None:
         real_stat = resources._stat_fields
         for wrong in ("group", "session", "io"):
             with self.subTest(wrong=wrong):
 
-                def wrong_initial(pid):
+                def wrong_initial(pid: int) -> StatFields:
                     if wrong == "io":
                         raise OSError("nontransient")
-                    fields = list(real_stat(pid))
-                    fields[2 if wrong == "group" else 3] += 1
-                    return tuple(fields)
+                    state, ppid, pgrp, session, birth, rss = real_stat(pid)
+                    if wrong == "group":
+                        pgrp += 1
+                    else:
+                        session += 1
+                    return state, ppid, pgrp, session, birth, rss
 
                 with resources.ResourceSupervisor() as supervisor:
                     with mock.patch.object(
@@ -372,7 +416,7 @@ class ResourceSupervisorTests(unittest.TestCase):
                     )
                     self.assertEqual(completed, [handle])
 
-    def test_inconsistent_late_identity_cannot_signal_unverified_group(self):
+    def test_inconsistent_late_identity_cannot_signal_unverified_group(self) -> None:
         real_stat = resources._stat_fields
         for wrong in ("birth", "session"):
             with self.subTest(wrong=wrong):
@@ -384,14 +428,17 @@ class ResourceSupervisorTests(unittest.TestCase):
                     job = supervisor._jobs[handle]
                     leader_reads = 0
 
-                    def inconsistent_second_read(pid):
+                    def inconsistent_second_read(pid: int) -> StatFields:
                         nonlocal leader_reads
-                        fields = list(real_stat(pid))
+                        state, ppid, pgrp, session, birth, rss = real_stat(pid)
                         if pid == job.pid:
                             leader_reads += 1
                             if leader_reads == 2:
-                                fields[4 if wrong == "birth" else 3] += 1
-                        return tuple(fields)
+                                if wrong == "birth":
+                                    birth += 1
+                                else:
+                                    session += 1
+                        return state, ppid, pgrp, session, birth, rss
 
                     with mock.patch.object(
                         resources, "_stat_fields", side_effect=inconsistent_second_read
@@ -413,7 +460,7 @@ class ResourceSupervisorTests(unittest.TestCase):
                     )
                     self.assertEqual(completed, [handle])
 
-    def test_success_nonzero_signal_and_literal_argv(self):
+    def test_success_nonzero_signal_and_literal_argv(self) -> None:
         with resources.ResourceSupervisor() as supervisor:
             literal = "; touch should-not-exist"
             h = self.launch(
@@ -429,17 +476,19 @@ class ResourceSupervisorTests(unittest.TestCase):
             self.assertEqual((self.root / "log-1/stderr.log").read_text().strip(), "err")
             self.assertFalse((self.root / "should-not-exist").exists())
             h2 = self.launch(supervisor, "raise SystemExit(7)")
+            h2_result, _ = self.await_result(supervisor, h2)
             self.assertEqual(
-                (self.await_result(supervisor, h2)[0].outcome, supervisor.result(h2).returncode),
+                (h2_result.outcome, h2_result.returncode),
                 ("exit_nonzero", 7),
             )
             h3 = self.launch(supervisor, "import os,signal; os.kill(os.getpid(),signal.SIGUSR1)")
+            h3_result, _ = self.await_result(supervisor, h3)
             self.assertEqual(
-                (self.await_result(supervisor, h3)[0].outcome, supervisor.result(h3).returncode),
+                (h3_result.outcome, h3_result.returncode),
                 ("exit_nonzero", -signal.SIGUSR1),
             )
 
-    def test_inheritable_parent_fd_is_closed_in_worker(self):
+    def test_inheritable_parent_fd_is_closed_in_worker(self) -> None:
         sentinel = self.root / "parent-only"
         sentinel.write_text("private")
         fd = os.open(sentinel, os.O_RDONLY)
@@ -457,7 +506,7 @@ class ResourceSupervisorTests(unittest.TestCase):
         finally:
             os.close(fd)
 
-    def test_timeout_kills_term_ignoring_grandchild_and_reaps(self):
+    def test_timeout_kills_term_ignoring_grandchild_and_reaps(self) -> None:
         code = (
             "import os,signal,subprocess,sys,time; "
             "p=subprocess.Popen([sys.executable,'-I','-c',"
@@ -474,7 +523,7 @@ class ResourceSupervisorTests(unittest.TestCase):
             self.assertGreaterEqual(result.elapsed_seconds, 0.35)
             self.assertFalse(Path(f"/proc/{child}").exists())
 
-    def test_leader_exits_first_and_orphan_is_cleaned(self):
+    def test_leader_exits_first_and_orphan_is_cleaned(self) -> None:
         code = (
             "import subprocess,sys; "
             "p=subprocess.Popen([sys.executable,'-I','-c','import time; time.sleep(60)']); "
@@ -488,7 +537,7 @@ class ResourceSupervisorTests(unittest.TestCase):
             child = int((self.root / "log-1/stdout.log").read_text().strip())
             self.assertFalse(Path(f"/proc/{child}").exists())
 
-    def test_incomplete_first_scan_cannot_reap_leader_with_live_descendant(self):
+    def test_incomplete_first_scan_cannot_reap_leader_with_live_descendant(self) -> None:
         code = (
             "import subprocess,sys; "
             "p=subprocess.Popen([sys.executable,'-I','-c','import time; time.sleep(60)']); "
@@ -497,6 +546,7 @@ class ResourceSupervisorTests(unittest.TestCase):
         with resources.ResourceSupervisor() as supervisor:
             h = self.launch(supervisor, code)
             leader = supervisor._jobs[h].pid
+            assert leader is not None
             log = self.root / "log-1/stdout.log"
             deadline = time.monotonic() + 3
             while (not log.exists() or not log.read_text().strip()) and time.monotonic() < deadline:
@@ -509,9 +559,9 @@ class ResourceSupervisorTests(unittest.TestCase):
                 time.sleep(0.01)
             self.assertIsNotNone(os.waitid(os.P_PID, leader, os.WEXITED | os.WNOWAIT))
             real_scan = resources._scan_groups
-            hidden = []
+            hidden: list[bool] = []
 
-            def incomplete_once(jobs):
+            def incomplete_once(jobs: Sequence[resources._Job]) -> ProcessGroups:
                 groups = real_scan(jobs)
                 if not hidden and child in groups[leader]:
                     groups[leader].pop(child)
@@ -526,7 +576,7 @@ class ResourceSupervisorTests(unittest.TestCase):
             self.assertEqual(result.outcome, "descendants_remaining")
             self.assertFalse(Path(f"/proc/{child}").exists())
 
-    def test_local_and_aggregate_rss_limits(self):
+    def test_local_and_aggregate_rss_limits(self) -> None:
         held = "import time; b=bytearray(24*1024*1024); b[:]=b'X'*len(b); print('ready',flush=True); time.sleep(60)"
         with resources.ResourceSupervisor(rss_limit_bytes=18 * 1024**2) as supervisor:
             h = self.launch(supervisor, held)
@@ -552,10 +602,10 @@ class ResourceSupervisorTests(unittest.TestCase):
             self.assertLess(first.sampled_peak_rss_bytes, supervisor.rss_limit_bytes)
             self.assertLess(second.sampled_peak_rss_bytes, supervisor.rss_limit_bytes)
 
-    def test_final_wait4_highwater_is_not_aggregate(self):
+    def test_final_wait4_highwater_is_not_aggregate(self) -> None:
         real_wait4 = os.wait4
 
-        def inflated(pid, flags):
+        def inflated(pid: int, flags: int) -> tuple[int, int, resource.struct_rusage | mock.Mock]:
             got, status, usage = real_wait4(pid, flags)
             if got:
                 return got, status, mock.Mock(ru_maxrss=262144)
@@ -569,7 +619,7 @@ class ResourceSupervisorTests(unittest.TestCase):
             self.assertLess(result.sampled_peak_rss_bytes, supervisor.rss_limit_bytes)
             self.assertEqual(result.wait4_peak_rss_bytes, 256 * 1024**2)
 
-    def test_cancel_one_and_context_exception_cleans_all(self):
+    def test_cancel_one_and_context_exception_cleans_all(self) -> None:
         code = "import time; print('ready',flush=True); time.sleep(60)"
         with resources.ResourceSupervisor() as supervisor:
             a = self.launch(supervisor, code)
@@ -585,10 +635,12 @@ class ResourceSupervisorTests(unittest.TestCase):
                 h = self.launch(supervisor, code)
                 self.await_text(supervisor, h, self.root / "log-3/stdout.log", "ready")
                 raise RuntimeError("sentinel")
-        self.assertEqual(supervisor.result(h).outcome, "cancelled")
-        self.assertTrue(supervisor.result(h).cleanup_complete)
+        result = supervisor.result(h)
+        assert result is not None
+        self.assertEqual(result.outcome, "cancelled")
+        self.assertTrue(result.cleanup_complete)
 
-    def test_spawn_failure_private_logs_and_validation(self):
+    def test_spawn_failure_private_logs_and_validation(self) -> None:
         with resources.ResourceSupervisor() as supervisor:
             h = supervisor.start(
                 ["/definitely/missing/executable"],
@@ -596,7 +648,9 @@ class ResourceSupervisorTests(unittest.TestCase):
                 log_dir=self.root / "failed",
                 remaining_seconds=1,
             )
-            self.assertEqual(supervisor.result(h).outcome, "spawn_failed")
+            result = supervisor.result(h)
+            assert result is not None
+            self.assertEqual(result.outcome, "spawn_failed")
             self.assertEqual(supervisor.poll(wait_seconds=0).completed, (h,))
             self.assertEqual((self.root / "failed").stat().st_mode & 0o777, 0o700)
             self.assertEqual((self.root / "failed/stdout.log").stat().st_mode & 0o777, 0o600)
@@ -624,13 +678,19 @@ class ResourceSupervisorTests(unittest.TestCase):
                         args, cwd=self.root, log_dir=self.root / "unused", remaining_seconds=1
                     )
 
-    def test_partial_log_creation_preserves_private_artifact_without_spawning(self):
+    def test_partial_log_creation_preserves_private_artifact_without_spawning(self) -> None:
         real_open = os.open
 
-        def fail_second(name, *args, **kwargs):
+        def fail_second(
+            name: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+            flags: int,
+            mode: int = 0o777,
+            *,
+            dir_fd: int | None = None,
+        ) -> int:
             if name == "stderr.log":
                 raise OSError("injected private failure")
-            return real_open(name, *args, **kwargs)
+            return real_open(name, flags, mode, dir_fd=dir_fd)
 
         with resources.ResourceSupervisor() as supervisor:
             with mock.patch.object(resources.os, "open", side_effect=fail_second):
@@ -642,7 +702,7 @@ class ResourceSupervisorTests(unittest.TestCase):
             self.assertTrue((self.root / "log-1/stdout.log").exists())
             self.assertFalse((self.root / "log-1/stderr.log").exists())
 
-    def test_restrictive_umask_and_log_sync_failure(self):
+    def test_restrictive_umask_and_log_sync_failure(self) -> None:
         previous_umask = os.umask(0o777)
         try:
             with resources.ResourceSupervisor() as supervisor:
@@ -656,10 +716,10 @@ class ResourceSupervisorTests(unittest.TestCase):
         finally:
             os.umask(previous_umask)
 
-    def test_elapsed_includes_delayed_final_log_cleanup(self):
+    def test_elapsed_includes_delayed_final_log_cleanup(self) -> None:
         close_logs = resources._close_logs
 
-        def delayed_close(job):
+        def delayed_close(job: resources._Job) -> bool:
             self.assertIsNone(job.outcome)
             time.sleep(1.15)
             return close_logs(job)
@@ -677,10 +737,10 @@ class ResourceSupervisorTests(unittest.TestCase):
             self.assertGreaterEqual(wall_elapsed, result.elapsed_seconds)
             self.assertLess(wall_elapsed - result.elapsed_seconds, 0.5)
 
-    def test_invalid_time_and_memory_inputs_have_fixed_errors(self):
+    def test_invalid_time_and_memory_inputs_have_fixed_errors(self) -> None:
         for limit in (0, -1, True, 1.5):
             with self.assertRaisesRegex(ResearchError, "research_resources_invalid"):
-                resources.ResourceSupervisor(rss_limit_bytes=limit)
+                resources.ResourceSupervisor(rss_limit_bytes=limit)  # type: ignore[arg-type]
         with resources.ResourceSupervisor() as supervisor:
             for value in (0, -1, float("nan"), float("inf"), 10**1000):
                 with self.assertRaisesRegex(ResearchError, "research_resources_invalid"):
@@ -695,7 +755,7 @@ class ResourceSupervisorTests(unittest.TestCase):
                     supervisor.poll(wait_seconds=value)
             self.assertFalse((self.root / "unused").exists())
 
-    def test_proc_scan_failure_stops_worker_and_restores_owner(self):
+    def test_proc_scan_failure_stops_worker_and_restores_owner(self) -> None:
         code = "import time; print('ready',flush=True); time.sleep(60)"
         with resources.ResourceSupervisor() as supervisor:
             h = self.launch(supervisor, code)
@@ -706,7 +766,7 @@ class ResourceSupervisorTests(unittest.TestCase):
             self.assertEqual(result.outcome, "monitor_failed")
             self.assertTrue(result.cleanup_complete)
 
-    def test_cleanup_failure_retains_ownership_until_later_recovery(self):
+    def test_cleanup_failure_retains_ownership_until_later_recovery(self) -> None:
         supervisor = resources.ResourceSupervisor()
         supervisor.__enter__()
         try:
@@ -717,7 +777,7 @@ class ResourceSupervisorTests(unittest.TestCase):
             # post-KILL failure state without creating an unkillable process.
             real_scan = resources._scan_groups
 
-            def held_group(jobs):
+            def held_group(jobs: Sequence[resources._Job]) -> ProcessGroups:
                 groups = real_scan(jobs)
                 if pid in groups and pid in groups[pid]:
                     groups[pid][pid + 100000] = ("S", pid, 1, 0)
@@ -728,7 +788,7 @@ class ResourceSupervisorTests(unittest.TestCase):
                 while supervisor.result(h) is None and time.monotonic() < deadline:
                     supervisor.poll()
                 result = supervisor.result(h)
-                self.assertIsNotNone(result)
+                assert result is not None
                 self.assertEqual(
                     (result.outcome, result.cleanup_complete), ("cleanup_failed", False)
                 )
@@ -737,23 +797,28 @@ class ResourceSupervisorTests(unittest.TestCase):
                     self.launch(supervisor, "print('blocked')")
                 with self.assertRaisesRegex(ResearchError, "research_resources_cleanup_failed"):
                     supervisor.close()
-            completed = []
+            completed: list[resources.JobHandle] = []
             for _ in range(3):
                 completed.extend(supervisor.poll(wait_seconds=0).completed)
-                if supervisor.result(h).cleanup_complete:
+                current = supervisor.result(h)
+                assert current is not None
+                if current.cleanup_complete:
                     break
             final = supervisor.result(h)
+            assert final is not None
             self.assertEqual((final.outcome, final.cleanup_complete), ("cleanup_failed", True))
             self.assertEqual(completed, [h])
             self.assertEqual(supervisor.poll(wait_seconds=0).completed, ())
         finally:
             supervisor.close()
+        final = supervisor.result(h)
+        assert final is not None
         self.assertEqual(
-            (supervisor.result(h).outcome, supervisor.result(h).cleanup_complete),
+            (final.outcome, final.cleanup_complete),
             ("cleanup_failed", True),
         )
 
-    def test_sample_gap_records_blocking_caller_delay(self):
+    def test_sample_gap_records_blocking_caller_delay(self) -> None:
         with resources.ResourceSupervisor() as supervisor:
             h = self.launch(supervisor, "import time; time.sleep(60)")
             supervisor.poll(wait_seconds=0)
@@ -764,7 +829,7 @@ class ResourceSupervisorTests(unittest.TestCase):
             result, _ = self.await_result(supervisor, h)
             self.assertGreaterEqual(result.max_sample_gap_seconds, 0.15)
 
-    def test_unrelated_child_and_subreaper_restored(self):
+    def test_unrelated_child_and_subreaper_restored(self) -> None:
         original = resources._subreaper_state()
         sig = signal.getsignal(signal.SIGCHLD)
         outsider = subprocess.Popen([sys.executable, "-I", "-c", "raise SystemExit(11)"])
@@ -784,11 +849,11 @@ class ResourceSupervisorTests(unittest.TestCase):
             if outsider.returncode is None:
                 outsider.wait()
 
-    def test_thread_fork_and_handle_boundaries(self):
+    def test_thread_fork_and_handle_boundaries(self) -> None:
         with resources.ResourceSupervisor() as supervisor:
             other_errors = []
 
-            def thread_call():
+            def thread_call() -> None:
                 try:
                     supervisor.poll(wait_seconds=0)
                 except ResearchError as error:
@@ -825,7 +890,7 @@ class ResourceSupervisorTests(unittest.TestCase):
             0,
         )
 
-    def test_no_import_side_effects(self):
+    def test_no_import_side_effects(self) -> None:
         source = str(Path(__file__).resolve().parents[2] / "src")
         code = (
             "import sys,signal,ctypes,os; sys.path.insert(0," + repr(source) + "); "

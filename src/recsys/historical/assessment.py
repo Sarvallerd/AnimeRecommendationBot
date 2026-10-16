@@ -2,7 +2,9 @@
 
 import hashlib
 import json
+from typing import NotRequired, TypedDict, cast
 
+from recsys.contracts.bundle import Catalog
 from recsys.contracts.resources import resource_bytes
 
 
@@ -15,7 +17,115 @@ PROMPT_VERSION = "arb018-catalog-evidence-v1"
 FIELDS = ("title", "aliases", "genres", "type", "episodes", "year", "synopsis")
 
 
-def canonical(value):
+class HistoricalRecommendation(TypedDict):
+    mal_id: int
+    rank: int
+    score: float
+
+
+class HistoricalQuery(TypedDict):
+    query_mal_id: int
+    status: str
+    recommendations: list[HistoricalRecommendation]
+    reasons: NotRequired[list[str]]
+
+
+class HistoricalMethod(TypedDict):
+    id: str
+    queries: list[HistoricalQuery]
+
+
+class HistoricalComparison(TypedDict):
+    catalog_sha256: str
+    query_set_sha256: str
+    methods: list[HistoricalMethod]
+
+
+class AssessmentPair(TypedDict):
+    query_mal_id: int
+    candidate_mal_id: int
+
+
+class AssessmentPacket(TypedDict):
+    schema_version: int
+    packet_version: str
+    comparison_sha256: str
+    catalog_sha256: str
+    query_set_sha256: str
+    prompt_version: str
+    prompt_sha256: str
+    anime: dict[str, dict[str, object]]
+    pairs: list[AssessmentPair]
+
+
+class AssessmentJudgment(AssessmentPair):
+    relevance: int | None
+    rationale: str
+    evidence: list[dict[str, str]]
+    same_franchise: bool | None
+    franchise_rationale: str
+
+
+class AssessmentAssessor(TypedDict):
+    id: str
+    kind: str
+    method_version: str
+    model: str | None
+    prompt_version: str | None
+    prompt_sha256: str | None
+
+
+class AssessmentDocument(TypedDict):
+    schema_version: int
+    assessment_version: str
+    packet_sha256: str
+    assessor: AssessmentAssessor
+    judgments: list[AssessmentJudgment]
+
+
+class ScoreRow(TypedDict):
+    query_mal_id: int
+    status: str
+    returned: int
+    missing_slots: int
+    assessed: int
+    unknown_returned: int
+    fullness: float
+    mean_grade_at_5: float | None
+    mean_grade_bounds: list[float]
+    precision_at_5: float | None
+    precision_bounds: list[float]
+    same_franchise_at_5: float | None
+    same_franchise_bounds: list[float]
+    franchise_known: int
+    franchise_unknown: int
+    grade_histogram: dict[str, int]
+
+
+class ScoreMacro(TypedDict):
+    returned: int
+    missing_slots: int
+    assessed: int
+    unknown_returned: int
+    coverage: float | None
+    full_five_queries: int
+    mean_grade_at_5: float | None
+    mean_grade_bounds: list[float]
+    precision_at_5: float | None
+    precision_bounds: list[float]
+    same_franchise_at_5: float | None
+    same_franchise_bounds: list[float]
+    franchise_coverage: float | None
+    grade_histogram: dict[str, int]
+
+
+class ScoreMethod(TypedDict):
+    method_id: str
+    queries: list[ScoreRow]
+    macro: ScoreMacro
+
+
+def canonical(value: object) -> bytes:
     return (
         json.dumps(
             value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
@@ -24,15 +134,15 @@ def canonical(value):
     ).encode("utf-8")
 
 
-def sha(raw):
+def sha(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def prompt_sha():
+def prompt_sha() -> str:
     return sha(resource_bytes("prompts", "assessment_prompt_v1.md"))
 
 
-def make_packet(comparison, catalog):
+def make_packet(comparison: HistoricalComparison, catalog: Catalog) -> AssessmentPacket:
     anime = catalog["anime"]
     pairs = sorted(
         {
@@ -43,7 +153,10 @@ def make_packet(comparison, catalog):
         }
     )
     ids = sorted({i for pair in pairs for i in pair})
-    evidence = {str(i): {field: anime[str(i)][field] for field in FIELDS} for i in ids}
+    evidence = {
+        str(i): {field: cast("dict[str, object]", anime[str(i)])[field] for field in FIELDS}
+        for i in ids
+    }
     return {
         "schema_version": 1,
         "packet_version": PACKET_VERSION,
@@ -57,7 +170,7 @@ def make_packet(comparison, catalog):
     }
 
 
-def make_template(packet):
+def make_template(packet: AssessmentPacket) -> dict[str, object]:
     return {
         "schema_version": 1,
         "assessment_version": PACKET_VERSION,
@@ -84,7 +197,7 @@ def make_template(packet):
     }
 
 
-def validate_assessment(value, packet):
+def validate_assessment(value: object, packet: AssessmentPacket) -> str:
     if not isinstance(value, dict) or set(value) != {
         "schema_version",
         "assessment_version",
@@ -93,6 +206,7 @@ def validate_assessment(value, packet):
         "judgments",
     }:
         raise AssessmentError("invalid assessment fields")
+    value = cast("dict[str, object]", value)
     if (
         type(value["schema_version"]) is not int
         or value["schema_version"] != 1
@@ -111,8 +225,9 @@ def validate_assessment(value, packet):
         "prompt_sha256",
     }:
         raise AssessmentError("invalid assessor declaration")
+    assessor = cast("dict[str, object]", assessor)
     if any(
-        not isinstance(assessor[k], str) or not assessor[k].strip()
+        not isinstance(assessor[k], str) or not cast("str", assessor[k]).strip()
         for k in ("id", "method_version")
     ):
         raise AssessmentError("assessor ID and method version are required")
@@ -132,7 +247,7 @@ def validate_assessment(value, packet):
     expected = [(p["query_mal_id"], p["candidate_mal_id"]) for p in packet["pairs"]]
     if not isinstance(judgments, list) or len(judgments) != len(expected):
         raise AssessmentError("judgments must cover every packet pair")
-    seen = set()
+    seen: set[tuple[int, int]] = set()
     for row in judgments:
         if not isinstance(row, dict) or set(row) != {
             "query_mal_id",
@@ -144,6 +259,7 @@ def validate_assessment(value, packet):
             "franchise_rationale",
         }:
             raise AssessmentError("invalid judgment fields")
+        row = cast("dict[str, object]", row)
         q, c = row["query_mal_id"], row["candidate_mal_id"]
         if type(q) is not int or type(c) is not int or (q, c) not in expected or (q, c) in seen:
             raise AssessmentError("unknown or duplicate judgment pair")
@@ -156,7 +272,7 @@ def validate_assessment(value, packet):
         evidence = row["evidence"]
         if not isinstance(evidence, list):
             raise AssessmentError("evidence must be a list")
-        sides = set()
+        sides: set[str] = set()
         for citation in evidence:
             if (
                 not isinstance(citation, dict)
@@ -165,10 +281,13 @@ def validate_assessment(value, packet):
                 or citation["field"] not in FIELDS
             ):
                 raise AssessmentError("invalid evidence citation")
+            citation = cast("dict[str, object]", citation)
             quote = citation["quote"]
             if not isinstance(quote, str) or not quote.strip() or len(quote) > 240:
                 raise AssessmentError("evidence quote must be 1..240 characters")
-            item = packet["anime"][str(q if citation["side"] == "query" else c)][citation["field"]]
+            item = packet["anime"][str(q if citation["side"] == "query" else c)][
+                cast("str", citation["field"])
+            ]
             if isinstance(item, str):
                 valid = quote in item
             elif isinstance(item, list):
@@ -179,7 +298,7 @@ def validate_assessment(value, packet):
                 valid = False
             if not valid:
                 raise AssessmentError("evidence quote absent from cited catalog field")
-            sides.add(citation["side"])
+            sides.add(cast("str", citation["side"]))
         if grade is not None and sides != {"query", "candidate"}:
             raise AssessmentError("numeric grade needs evidence from both sides")
         franchise = row["same_franchise"]
@@ -190,13 +309,13 @@ def validate_assessment(value, packet):
             or not row["franchise_rationale"].strip()
         ):
             raise AssessmentError("franchise rationale required")
-    return assessor["id"]
+    return cast("str", assessor["id"])
 
 
-def score_method(method, judgments):
+def score_method(method: HistoricalMethod, judgments: list[AssessmentJudgment]) -> ScoreMethod:
     """Compute grade and franchise bounds over five slots for every query."""
     by_pair = {(j["query_mal_id"], j["candidate_mal_id"]): j for j in judgments}
-    rows = []
+    rows: list[ScoreRow] = []
     for query in method["queries"]:
         q = query["query_mal_id"]
         items = [by_pair[(q, c["mal_id"])] for c in query["recommendations"]]
@@ -228,12 +347,19 @@ def score_method(method, judgments):
             }
         )
 
-    def macro(key):
-        values = [row[key] for row in rows]
-        return sum(values) / 20 if all(value is not None for value in values) else None
+    def macro(key: str) -> float | None:
+        values = [cast("float | None", cast("dict[str, object]", row)[key]) for row in rows]
+        return (
+            sum(cast("float", value) for value in values) / 20
+            if all(value is not None for value in values)
+            else None
+        )
 
-    def bounds(key):
-        return [sum(row[key][i] for row in rows) / 20 for i in (0, 1)]
+    def bounds(key: str) -> list[float]:
+        return [
+            sum(cast("list[float]", cast("dict[str, object]", row)[key])[i] for row in rows) / 20
+            for i in (0, 1)
+        ]
 
     returned = sum(row["returned"] for row in rows)
     assessed = sum(row["assessed"] for row in rows)

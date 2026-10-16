@@ -1,5 +1,7 @@
 """Build deterministic cosine neighbors from the pinned normalized MAL catalog and GloVe."""
 
+from __future__ import annotations
+
 import hashlib
 import json
 import math
@@ -8,11 +10,18 @@ import platform
 import re
 import tempfile
 from collections import Counter
+from collections.abc import Iterable, Iterator
 from pathlib import Path
+from typing import TYPE_CHECKING, Never, NotRequired, TypedDict, cast
 
 from recsys import __version__
+from recsys.contracts.bundle import AnimeRecord, JSONValue, ManifestSource, Neighbor
 from recsys.contracts.provenance import SOURCE_LAYOUT, source_fingerprints
-from recsys.data.sources import load_registry, validate_registry
+from recsys.data.sources import SourceRegistry, load_registry, validate_registry
+
+if TYPE_CHECKING:
+    import numpy as np
+    from numpy.typing import NDArray
 
 BUILDER_VERSION = "arb009-v1"
 MAX_ID = 2_147_483_647
@@ -23,11 +32,39 @@ FIELDS = ("title", "aliases", "genres", "synopsis")
 CATALOG_FIELDS = {"title", "aliases", "genres", "score", "year", "type", "episodes", "synopsis"}
 
 
+class GloveInfo(TypedDict):
+    sha256: str
+    size: int
+
+
+class AnimeDiagnostics(TypedDict):
+    token_count: int
+    matched_token_count: int
+    vector_status: str
+    neighbor_count: NotRequired[int]
+
+
+class Coverage(TypedDict):
+    catalog_count: int
+    vocabulary_count: int
+    matched_vocabulary_count: int
+    token_occurrences: int
+    matched_token_occurrences: int
+    vector_status_counts: dict[str, int]
+    zero_vector_ids: list[int]
+    neighbor_count_histogram: NotRequired[dict[str, int]]
+
+
+class BuildDiagnostics(TypedDict):
+    coverage: Coverage
+    anime: dict[str, AnimeDiagnostics]
+
+
 class BuildError(ValueError):
     """The inputs cannot produce a valid recommendation artifact."""
 
 
-def _canonical(value):
+def _canonical(value: object) -> bytes:
     return (
         json.dumps(
             value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
@@ -36,12 +73,12 @@ def _canonical(value):
     ).encode("utf-8")
 
 
-def _sha(raw):
+def _sha(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def _unique(pairs):
-    value = {}
+def _unique(pairs: list[tuple[str, JSONValue]]) -> dict[str, JSONValue]:
+    value: dict[str, JSONValue] = {}
     for key, item in pairs:
         if key in value:
             raise BuildError(f"duplicate JSON key {key!r}")
@@ -49,11 +86,11 @@ def _unique(pairs):
     return value
 
 
-def _nonfinite(value):
+def _nonfinite(value: str) -> Never:
     raise BuildError(f"nonfinite JSON constant {value}")
 
 
-def _read_canonical(path):
+def _read_canonical(path: str | Path) -> tuple[object, bytes]:
     raw = Path(path).read_bytes()
     try:
         value = json.loads(
@@ -66,7 +103,7 @@ def _read_canonical(path):
     return value, raw
 
 
-def _positive_id(key):
+def _positive_id(key: object) -> bool:
     return (
         isinstance(key, str)
         and re.fullmatch(r"[1-9][0-9]*", key) is not None
@@ -75,7 +112,7 @@ def _positive_id(key):
     )
 
 
-def _catalog(value):
+def _catalog(value: object) -> dict[str, AnimeRecord]:
     if (
         not isinstance(value, dict)
         or set(value) != {"schema_version", "anime"}
@@ -116,10 +153,12 @@ def _catalog(value):
             x = item[field]
             if x is not None and (not isinstance(x, str) or not x.strip()):
                 raise BuildError(f"invalid {field}: {key}")
-    return anime
+    return cast("dict[str, AnimeRecord]", anime)  # Every catalog entry checked above.
 
 
-def _report(value, registry, registry_sha, catalog_sha, count):
+def _report(
+    value: object, registry: SourceRegistry, registry_sha: str, catalog_sha: str, count: int
+) -> None:
     descriptors = {entry["id"]: entry for entry in registry["sources"]}
     if (
         not isinstance(value, dict)
@@ -145,19 +184,25 @@ def tokenize(text: str) -> list[str]:
     return re.findall(TOKEN_PATTERN, text.lower())
 
 
-def _tokens(entry):
+def _tokens(entry: AnimeRecord) -> Iterator[str]:
     for field in FIELDS:
-        values = entry[field] if field in ("aliases", "genres") else [entry[field]]
+        entry_values = cast("dict[str, object]", entry)  # Catalog validation fixed these fields.
+        values = cast(
+            "Iterable[str | None]",
+            entry_values[field] if field in ("aliases", "genres") else [entry_values[field]],
+        )
         for value in values:
             if value is not None:
                 yield from tokenize(value)
 
 
-def load_embeddings(path: Path, vocabulary: set[str], descriptor: dict) -> tuple[dict, dict]:
+def load_embeddings(
+    path: Path, vocabulary: set[str], descriptor: GloveInfo
+) -> tuple[dict[str, NDArray[np.float64]], GloveInfo]:
     """Hash all GloVe bytes; parse only requested 300-dimensional vectors."""
     import numpy as np
 
-    vectors = {}
+    vectors: dict[str, NDArray[np.float64]] = {}
     digest = hashlib.sha256()
     size = 0
     with Path(path).open("rb") as stream:
@@ -199,7 +244,9 @@ def load_embeddings(path: Path, vocabulary: set[str], descriptor: dict) -> tuple
     return vectors, {"sha256": observed, "size": size}
 
 
-def build_vectors(anime: dict[str, dict], embeddings: dict) -> tuple[list[int], object, dict]:
+def build_vectors(
+    anime: dict[str, AnimeRecord], embeddings: dict[str, NDArray[np.float64]]
+) -> tuple[list[int], NDArray[np.float64], BuildDiagnostics]:
     """Mean known token occurrences and normalize each anime vector in float64."""
     import numpy as np
 
@@ -215,11 +262,11 @@ def build_vectors(anime: dict[str, dict], embeddings: dict) -> tuple[list[int], 
             raise BuildError(f"invalid embedding for {word!r}")
     ids = sorted(int(key) for key in anime)
     vectors = np.zeros((len(ids), DIMENSION), dtype=np.float64)
-    details = {}
-    vocabulary = set()
+    details: dict[str, AnimeDiagnostics] = {}
+    vocabulary: set[str] = set()
     occurrences = 0
     matched_occurrences = 0
-    statuses = Counter()
+    statuses: Counter[str] = Counter()
     for index, mal_id in enumerate(ids):
         entry = anime[str(mal_id)]
         tokens = list(_tokens(entry))
@@ -228,9 +275,9 @@ def build_vectors(anime: dict[str, dict], embeddings: dict) -> tuple[list[int], 
         occurrences += count
         matched = 0
         for token in tokens:
-            vector = embeddings.get(token)
-            if vector is not None:
-                vectors[index] += vector
+            token_vector = embeddings.get(token)
+            if token_vector is not None:
+                vectors[index] += token_vector
                 matched += 1
         matched_occurrences += matched
         if matched:
@@ -257,7 +304,7 @@ def build_vectors(anime: dict[str, dict], embeddings: dict) -> tuple[list[int], 
             "matched_token_count": matched,
             "vector_status": status,
         }
-    coverage = {
+    coverage: Coverage = {
         "catalog_count": len(ids),
         "vocabulary_count": len(vocabulary),
         "matched_vocabulary_count": len(vocabulary & embeddings.keys()),
@@ -273,7 +320,7 @@ def build_vectors(anime: dict[str, dict], embeddings: dict) -> tuple[list[int], 
     return ids, vectors, {"coverage": coverage, "anime": details}
 
 
-def _effective_rows(count, block_size):
+def _effective_rows(count: int, block_size: int) -> int:
     if type(block_size) is not int or not 1 <= block_size <= 256:
         raise BuildError("block_size must be an integer in 1..256")
     rows = SCORE_BLOCK_BUDGET // (8 * count)
@@ -283,8 +330,8 @@ def _effective_rows(count, block_size):
 
 
 def cosine_neighbors(
-    mal_ids: list[int], vectors, *, block_size: int = 256
-) -> dict[str, list[dict]]:
+    mal_ids: list[int], vectors: NDArray[np.float64], *, block_size: int = 256
+) -> dict[str, list[Neighbor]]:
     """Compute exact deterministic top five positive cosine scores in bounded blocks."""
     import numpy as np
 
@@ -306,7 +353,7 @@ def cosine_neighbors(
     rows = _effective_rows(count, block_size)
     nonzero = np.any(vectors != 0, axis=1)
     ids_array = np.asarray(mal_ids, dtype=np.int64)
-    result = {}
+    result: dict[str, list[Neighbor]] = {}
     for start in range(0, count, rows):
         scores = np.einsum("ik,jk->ij", vectors[start : start + rows], vectors, optimize=False)
         if not np.isfinite(scores).all():
@@ -334,14 +381,20 @@ def cosine_neighbors(
     return result
 
 
-def _source(name, version, digest, metadata):
+def _source(name: str, version: str, digest: str, metadata: dict[str, JSONValue]) -> ManifestSource:
     return {"name": name, "version": version, "sha256": digest, "metadata": metadata}
 
 
-def _sources(registry, registry_sha, catalog_sha, report_sha, glove_info):
+def _sources(
+    registry: SourceRegistry,
+    registry_sha: str,
+    catalog_sha: str,
+    report_sha: str,
+    glove_info: GloveInfo,
+) -> list[ManifestSource]:
     descriptors = {entry["id"]: entry for entry in registry["sources"]}
-    mal = registry["provenance"]["mal"]
-    glove = registry["provenance"]["glove"]
+    mal = cast("dict[str, str]", registry["provenance"]["mal"])
+    glove = cast("dict[str, str]", registry["provenance"]["glove"])
     sources = [
         _source(
             "glove_300d",
@@ -390,7 +443,7 @@ def _sources(registry, registry_sha, catalog_sha, report_sha, glove_info):
     return sorted(sources, key=lambda item: (item["name"], item["version"]))
 
 
-def _atomic(path, content):
+def _atomic(path: Path, content: bytes) -> None:
     temp = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -407,14 +460,14 @@ def _atomic(path, content):
 
 
 def build(
-    catalog_path,
-    normalization_report_path,
-    glove_path,
-    output_dir,
+    catalog_path: Path,
+    normalization_report_path: Path,
+    glove_path: Path,
+    output_dir: Path,
     *,
-    block_size=256,
-    registry=None,
-    registry_sha256=None,
+    block_size: int = 256,
+    registry: SourceRegistry | None = None,
+    registry_sha256: str | None = None,
 ) -> Path:
     """Build neighbors and deterministic report after validating every pinned input."""
     import numpy as np

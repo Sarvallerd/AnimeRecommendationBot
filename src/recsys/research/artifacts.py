@@ -7,7 +7,9 @@ import platform
 import re
 import shutil
 import tempfile
+from collections.abc import Iterator
 from pathlib import Path
+from typing import TypedDict, cast
 
 from recsys.contracts.bundle import canonical_bytes, parse_canonical
 from recsys.contracts.io import ArtifactIOError, iter_single_member_gzip, publish_no_replace
@@ -17,8 +19,30 @@ from recsys.research.protocol import ResearchError, exact, fail, sha
 MAX_LINE = 4 * 1024 * 1024
 MAX_STREAM = 64 * 1024**3
 
+type PathInput = str | os.PathLike[str]
 
-def safe_path(path, *, directory=None):
+
+class FileDescriptor(TypedDict):
+    bytes: int
+    sha256: str
+
+
+class StreamDescriptor(FileDescriptor):
+    rows: int
+    uncompressed_bytes: int
+    canonical_sha256: str
+
+
+class PreparationProducer(TypedDict):
+    code_revision: str
+    code_files_sha256: dict[str, str]
+    source_layout: str
+    python_version: str
+    package_version: str
+    numpy_version: str
+
+
+def safe_path(path: PathInput, *, directory: bool | None = None) -> Path:
     path = Path(path)
     if any(part.is_symlink() for part in (path, *path.parents)):
         fail("research_unsafe_path")
@@ -29,7 +53,7 @@ def safe_path(path, *, directory=None):
     return path
 
 
-def file_descriptor(path):
+def file_descriptor(path: PathInput) -> FileDescriptor:
     """Hash a bounded, regular private artifact without opening a scientific stream."""
     path = safe_path(path, directory=False)
     if path.stat().st_size > MAX_STREAM:
@@ -45,7 +69,7 @@ def file_descriptor(path):
     return {"bytes": size, "sha256": digest.hexdigest()}
 
 
-def separate(*paths):
+def separate(*paths: PathInput) -> None:
     resolved = [safe_path(path).resolve(strict=False) for path in paths]
     for i, a in enumerate(resolved):
         for b in resolved[i + 1 :]:
@@ -53,28 +77,27 @@ def separate(*paths):
                 fail("research_unsafe_path")
 
 
-def descriptor(raw):
+def descriptor(raw: bytes) -> FileDescriptor:
     return {"bytes": len(raw), "sha256": sha(raw)}
 
 
-def check_descriptor(value, *, stream=False):
+def check_descriptor(value: object, *, stream: bool = False) -> None:
     fields = {"bytes", "sha256"}
     if stream:
         fields |= {"rows", "uncompressed_bytes", "canonical_sha256"}
     exact(value, fields)
+    value = cast("dict[str, object]", value)  # exact validated the field map.
     for key in ("bytes", "rows", "uncompressed_bytes"):
-        if key in value and (
-            type(value[key]) is not int or value[key] < 0 or value[key] > MAX_STREAM
-        ):
+        item = value.get(key)
+        if key in value and (type(item) is not int or item < 0 or item > MAX_STREAM):
             fail()
     for key in ("sha256", "canonical_sha256"):
-        if key in value and (
-            type(value[key]) is not str or re.fullmatch(r"[0-9a-f]{64}", value[key]) is None
-        ):
+        item = value.get(key)
+        if key in value and (type(item) is not str or re.fullmatch(r"[0-9a-f]{64}", item) is None):
             fail()
 
 
-def read_json(path, expected=None):
+def read_json(path: PathInput, expected: FileDescriptor | None = None) -> tuple[object, bytes]:
     path = safe_path(path, directory=False)
     if path.stat().st_size > 128 * 1024 * 1024:
         fail()
@@ -90,7 +113,7 @@ def read_json(path, expected=None):
     return value, raw
 
 
-def write_json(path, value):
+def write_json(path: PathInput, value: object) -> FileDescriptor:
     raw = canonical_bytes(value)
     with open(path, "xb", opener=lambda name, flags: os.open(name, flags, 0o600)) as stream:
         stream.write(raw)
@@ -99,14 +122,16 @@ def write_json(path, value):
     return descriptor(raw)
 
 
-def _stream_lines(path):
+def _stream_lines(path: Path) -> Iterator[bytes]:
     try:
         yield from iter_single_member_gzip(path)
     except ArtifactIOError as exc:
         raise ResearchError("research_integrity_error") from exc
 
 
-def stream_jsonl(path, expected=None, *, max_total=MAX_STREAM):
+def stream_jsonl(
+    path: PathInput, expected: StreamDescriptor | None = None, *, max_total: int = MAX_STREAM
+) -> Iterator[object]:
     """Check both byte layers while yielding canonical rows; no full decompression."""
     if expected is not None:
         check_descriptor(expected, stream=True)
@@ -143,7 +168,7 @@ def stream_jsonl(path, expected=None, *, max_total=MAX_STREAM):
         fail()
 
 
-def stream_tsv(path, expected=None):
+def stream_tsv(path: PathInput, expected: StreamDescriptor | None = None) -> Iterator[bytes]:
     if expected is not None:
         check_descriptor(expected, stream=True)
     path = safe_path(path, directory=False)
@@ -179,7 +204,7 @@ def stream_tsv(path, expected=None):
 
 
 class StreamWriter:
-    def __init__(self, path):
+    def __init__(self, path: Path) -> None:
         self.path = path
         self.file = open(path, "xb", opener=lambda name, flags: os.open(name, flags, 0o600))
         self.gzip = gzip.GzipFile(
@@ -189,7 +214,7 @@ class StreamWriter:
         self.bytes = 0
         self.hash = hashlib.sha256()
 
-    def write(self, raw):
+    def write(self, raw: bytes) -> None:
         if len(raw) > MAX_LINE or self.bytes + len(raw) > MAX_STREAM:
             fail("research_resource_limit")
         self.gzip.write(raw)
@@ -197,22 +222,22 @@ class StreamWriter:
         self.bytes += len(raw)
         self.hash.update(raw)
 
-    def write_json(self, value):
+    def write_json(self, value: object) -> None:
         self.write(canonical_bytes(value))
 
-    def abort(self):
+    def abort(self) -> None:
         if not self.gzip.closed:
             self.gzip.close()
         if not self.file.closed:
             self.file.close()
 
-    def __del__(self):
+    def __del__(self) -> None:
         try:
             self.abort()
         except (AttributeError, OSError):
             pass
 
-    def close(self):
+    def close(self) -> StreamDescriptor:
         self.gzip.close()
         self.file.flush()
         os.fsync(self.file.fileno())
@@ -236,7 +261,7 @@ class StreamWriter:
         }
 
 
-def open_stage(target):
+def open_stage(target: PathInput) -> Path:
     target = safe_path(target)
     if target.exists() or not target.parent.is_dir():
         fail("research_unsafe_path")
@@ -245,7 +270,7 @@ def open_stage(target):
     return stage
 
 
-def publish(stage, target):
+def publish(stage: Path, target: Path) -> None:
     for root, dirs, files in os.walk(stage):
         for name in dirs:
             os.chmod(Path(root) / name, 0o700)
@@ -259,12 +284,12 @@ def publish(stage, target):
     publish_no_replace(stage, target)
 
 
-def cleanup(stage):
+def cleanup(stage: Path) -> None:
     if stage.exists():
         shutil.rmtree(stage)
 
 
-def producer(code_revision):
+def producer(code_revision: object) -> PreparationProducer:
     import numpy as np
 
     from recsys import __version__
@@ -285,7 +310,7 @@ def producer(code_revision):
     }
 
 
-def validate_preparation_producer(manifest: dict) -> None:
+def validate_preparation_producer(manifest: object) -> None:
     """Reject an old or foreign preparation before opening any payload stream."""
     if (
         type(manifest) is not dict
@@ -295,7 +320,8 @@ def validate_preparation_producer(manifest: dict) -> None:
         or manifest["producer"].get("source_layout") != SOURCE_LAYOUT
     ):
         fail("research_source_layout_unsupported")
-    observed = manifest["producer"]
+    manifest = cast("dict[str, object]", manifest)  # Schema and producer shape checked above.
+    observed = cast("dict[str, object]", manifest["producer"])
     exact(
         observed,
         {
@@ -317,11 +343,11 @@ def validate_preparation_producer(manifest: dict) -> None:
         fail("research_integrity_error")
 
 
-def identity(path):
+def identity(path: PathInput) -> str:
     return "sha256:" + sha(safe_path(path, directory=False).read_bytes())
 
 
-def check_identity(value):
+def check_identity(value: object) -> None:
     if type(value) is not str or len(value) != 71 or not value.startswith("sha256:"):
         fail()
     try:

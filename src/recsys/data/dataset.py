@@ -9,12 +9,14 @@ import sys
 import tempfile
 import zlib
 from collections import Counter
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from datetime import date
 from importlib import metadata as package_metadata
 from pathlib import Path
+from typing import TypedDict, cast
 
-from recsys.contracts.bundle import MAX_ID, canonical_bytes, check_catalog, parse_canonical
+from recsys.contracts.bundle import MAX_ID, Catalog, canonical_bytes, check_catalog, parse_canonical
 from recsys.contracts.io import (
     ArtifactIOError,
     fsync_directory,
@@ -33,10 +35,11 @@ from recsys.data.interactions import (
     SCHEMA,
     STATUSES,
     InteractionResult,
+    LossReasons,
     build_interactions,
 )
-from recsys.data.metadata import MetadataResult, normalize_metadata
-from recsys.data.sources import SourceError, validate_registry
+from recsys.data.metadata import MetadataFact, MetadataFacts, MetadataResult, normalize_metadata
+from recsys.data.sources import SourceDescriptor, SourceError, SourceRegistry, validate_registry
 
 SNAPSHOT = "neelagiri-2025-v1"
 REGISTRY_RESOURCE = "source_registry_neelagiri_2025_v1.json"
@@ -65,6 +68,27 @@ class DatasetError(Exception):
     """Safe, fixed-code public failure for dataset operations."""
 
 
+class DatasetExpectations(TypedDict):
+    schema_version: int
+    snapshot_id: str
+    source_sha256: dict[str, str]
+    counts: dict[str, int]
+    distributions: dict[str, dict[str, int]]
+
+
+class DatasetQa(TypedDict):
+    schema_version: int
+    counts: dict[str, int]
+    distributions: dict[str, dict[str, int]]
+    loss_reasons: LossReasons
+    metadata_diagnostics: dict[str, int]
+
+
+class DerivedQa(TypedDict):
+    counts: dict[str, int]
+    distributions: dict[str, dict[str, int]]
+
+
 @dataclass(frozen=True)
 class DatasetSpec:
     snapshot_id: str
@@ -86,7 +110,9 @@ def _sha(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def _load_spec(spec: DatasetSpec | None) -> tuple[DatasetSpec, dict, dict, str, str]:
+def _load_spec(
+    spec: DatasetSpec | None,
+) -> tuple[DatasetSpec, SourceRegistry, DatasetExpectations, str, str]:
     if spec is None:
         spec = DatasetSpec(
             SNAPSHOT,
@@ -129,7 +155,13 @@ def _load_spec(spec: DatasetSpec | None) -> tuple[DatasetSpec, dict, dict, str, 
         )
     ):
         raise DatasetError("dataset_integrity_error")
-    return spec, registry, expected, _sha(spec.registry_bytes), _sha(spec.expectations_bytes)
+    return (
+        spec,
+        cast("SourceRegistry", registry),
+        cast("DatasetExpectations", expected),
+        _sha(spec.registry_bytes),
+        _sha(spec.expectations_bytes),
+    )
 
 
 _COUNT_KEYS = {
@@ -175,7 +207,7 @@ _DISTRIBUTION_KEYS = {
 }
 
 
-def _check_input_manifest(data_dir: Path, registry: dict, registry_sha: str) -> None:
+def _check_input_manifest(data_dir: Path, registry: SourceRegistry, registry_sha: str) -> None:
     path = data_dir / "source-manifest.json"
     if data_dir.is_symlink() or not data_dir.is_dir() or path.is_symlink() or not path.is_file():
         raise DatasetError("input_hash_mismatch")
@@ -196,7 +228,7 @@ def _check_input_manifest(data_dir: Path, registry: dict, registry_sha: str) -> 
         raise DatasetError("input_hash_mismatch")
 
 
-def _copy_verified(source: Path, destination: Path, descriptor: dict) -> None:
+def _copy_verified(source: Path, destination: Path, descriptor: SourceDescriptor) -> None:
     if source.is_symlink() or not source.is_file():
         raise DatasetError("input_hash_mismatch")
     h = hashlib.sha256()
@@ -218,7 +250,7 @@ def _copy_verified(source: Path, destination: Path, descriptor: dict) -> None:
         raise DatasetError("input_hash_mismatch")
 
 
-def _write_json(path: Path, value: dict) -> bytes:
+def _write_json(path: Path, value: object) -> bytes:
     raw = canonical_bytes(value)
     with path.open("xb") as stream:
         os.chmod(path, 0o600)
@@ -228,15 +260,16 @@ def _write_json(path: Path, value: dict) -> bytes:
     return raw
 
 
-def _recent(facts: dict, rated_ids: frozenset[int] | set[int]) -> dict[str, int]:
-    counters = Counter()
+def _recent(facts: dict[str, MetadataFact], rated_ids: frozenset[int] | set[int]) -> dict[str, int]:
+    counters: Counter[str] = Counter()
+    cutoff = cast("str", POLICIES["recent_cutoff"])  # Frozen policy field is a date string.
     for number in rated_ids:
         fact = facts[str(number)]
         aired = fact["airing_status"] in ("finished_airing", "currently_airing")
         release = fact["first_release_date"]
-        if aired and release and "2024-01-01" <= release <= POLICIES["recent_cutoff"]:
+        if aired and release and "2024-01-01" <= release <= cutoff:
             counters["recent_2024_plus"] += 1
-        if aired and release and "2025-01-01" <= release <= POLICIES["recent_cutoff"]:
+        if aired and release and "2025-01-01" <= release <= cutoff:
             counters["recent_2025_plus"] += 1
         if fact["airing_status"] == "not_yet_aired" and release:
             if release.startswith("2025-"):
@@ -254,7 +287,7 @@ def _recent(facts: dict, rated_ids: frozenset[int] | set[int]) -> dict[str, int]
     }
 
 
-def _qa(metadata_result: MetadataResult, interaction: InteractionResult) -> dict:
+def _qa(metadata_result: MetadataResult, interaction: InteractionResult) -> DatasetQa:
     meta = metadata_result.qa
     counts = dict(interaction.qa["counts"])
     counts.update(
@@ -281,7 +314,7 @@ def _qa(metadata_result: MetadataResult, interaction: InteractionResult) -> dict
     }
 
 
-def _compare_expectations(qa: dict, expected: dict) -> None:
+def _compare_expectations(qa: DatasetQa, expected: DatasetExpectations) -> None:
     if any(qa["counts"].get(key) != value for key, value in expected["counts"].items()) or any(
         qa["distributions"].get(key) != value for key, value in expected["distributions"].items()
     ):
@@ -423,7 +456,7 @@ def normalize_dataset(
         shutil.rmtree(own_scratch, ignore_errors=True)
 
 
-def _read_json_checked(path: Path) -> tuple[dict, bytes]:
+def _read_json_checked(path: Path) -> tuple[dict[str, object], bytes]:
     if path.is_symlink() or not path.is_file():
         raise DatasetError("dataset_integrity_error")
     try:
@@ -433,17 +466,19 @@ def _read_json_checked(path: Path) -> tuple[dict, bytes]:
         raise DatasetError("dataset_integrity_error") from exc
     if not isinstance(value, dict):
         raise DatasetError("dataset_integrity_error")
-    return value, raw
+    return cast("dict[str, object]", value), raw  # Top-level object checked above.
 
 
-def _stream_lines(path: Path):
+def _stream_lines(path: Path) -> Iterator[bytes]:
     try:
         yield from iter_single_member_gzip(path)
     except ArtifactIOError as exc:
         raise DatasetError("dataset_integrity_error") from exc
 
 
-def _validate_interactions(path: Path, facts: dict, manifest_entry: dict) -> tuple[dict, set[int]]:
+def _validate_interactions(
+    path: Path, facts: dict[str, MetadataFact], manifest_entry: dict[str, object]
+) -> tuple[DerivedQa, set[int]]:
     canonical = hashlib.sha256()
     uncompressed_bytes = 0
     rows = 0
@@ -526,7 +561,7 @@ def _validate_interactions(path: Path, facts: dict, manifest_entry: dict) -> tup
         or canonical.hexdigest() != manifest_entry.get("canonical_sha256")
     ):
         raise DatasetError("dataset_integrity_error")
-    derived = {
+    derived: DerivedQa = {
         "counts": {
             "accepted_pairs": rows,
             "accepted_users": users,
@@ -583,9 +618,10 @@ def validate_dataset(
             or manifest["provenance"] != registry["provenance"]
             or manifest["sources"] != registry["sources"]
             or manifest["parameters"] != POLICIES
-            or set(manifest["files"]) != set(OUTPUTS)
+            or set(cast("Iterable[str]", manifest["files"])) != set(OUTPUTS)
         ):
             raise DatasetError("dataset_integrity_error")
+        manifest_files = cast("dict[str, object]", manifest["files"])  # Checked output set.
         normalizer = manifest["normalizer"]
         if (
             not isinstance(normalizer, dict)
@@ -637,7 +673,7 @@ def validate_dataset(
             raise DatasetError("dataset_integrity_error")
         for name in OUTPUTS:
             path = dataset_dir / name
-            item = manifest["files"][name]
+            item = manifest_files[name]
             fields = {"bytes", "sha256"}
             if name == "interactions.tsv.gz":
                 fields |= {"rows", "uncompressed_bytes", "canonical_sha256"}
@@ -676,6 +712,7 @@ def validate_dataset(
             catalog_keys = check_catalog(catalog)
         except ValueError as exc:
             raise DatasetError("dataset_integrity_error") from exc
+        catalog_typed = cast("Catalog", catalog)  # Full catalog validation above.
         if (
             set(facts) != {"schema_version", "anime"}
             or type(facts["schema_version"]) is not int
@@ -708,7 +745,7 @@ def validate_dataset(
                 and (
                     type(fact["seasonal_year"]) is not int or not 1 <= fact["seasonal_year"] <= 9999
                 )
-                or catalog["anime"][key]["year"] != (int(release[:4]) if release else None)
+                or catalog_typed["anime"][key]["year"] != (int(release[:4]) if release else None)
             ):
                 raise DatasetError("dataset_integrity_error")
         if (
@@ -749,17 +786,19 @@ def validate_dataset(
             or qa["metadata_diagnostics"].get("catalog_items") != qa["counts"].get("catalog_items")
         ):
             raise DatasetError("dataset_integrity_error")
+        facts_typed = cast("MetadataFacts", facts)  # All keys and per-record fields checked.
+        qa_typed = cast("DatasetQa", qa)  # QA shape and loss aggregates checked above.
         derived, rated_ids = _validate_interactions(
             dataset_dir / "interactions.tsv.gz",
-            facts["anime"],
-            manifest["files"]["interactions.tsv.gz"],
+            facts_typed["anime"],
+            cast("dict[str, object]", manifest_files["interactions.tsv.gz"]),
         )
-        derived["counts"].update(_recent(facts["anime"], rated_ids))
-        if any(qa["counts"].get(k) != v for k, v in derived["counts"].items()) or any(
-            qa["distributions"].get(k) != v for k, v in derived["distributions"].items()
+        derived["counts"].update(_recent(facts_typed["anime"], rated_ids))
+        if any(qa_typed["counts"].get(k) != v for k, v in derived["counts"].items()) or any(
+            qa_typed["distributions"].get(k) != v for k, v in derived["distributions"].items()
         ):
             raise DatasetError("dataset_integrity_error")
-        _compare_expectations(qa, expected)
+        _compare_expectations(qa_typed, expected)
         return DatasetSummary(
             identity,
             len(catalog_keys),

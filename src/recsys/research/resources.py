@@ -15,6 +15,7 @@ import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal, cast
 
 from recsys.research.protocol import ResearchError
 
@@ -35,7 +36,7 @@ def _valid_seconds(value: object, *, zero_allowed: bool = False) -> bool:
     if type(value) not in (int, float):
         return False
     try:
-        number = float(value)
+        number = float(cast("int | float", value))
     except OverflowError:
         return False
     return math.isfinite(number) and (number >= 0 if zero_allowed else number > 0)
@@ -104,7 +105,7 @@ def _prctl(option: int, value: int | ctypes.c_void_p) -> None:
 
 def _subreaper_state() -> int:
     state = ctypes.c_int()
-    _prctl(_GET_SUBREAPER, ctypes.byref(state))
+    _prctl(_GET_SUBREAPER, cast("ctypes.c_void_p", ctypes.byref(state)))
     return state.value
 
 
@@ -242,7 +243,7 @@ def _close_logs(job: _Job) -> bool:
 class ResourceSupervisor:
     """One synchronous owner for a set of trusted, same-session worker groups."""
 
-    def __init__(self, *, rss_limit_bytes: int = 8 * 1024**3):
+    def __init__(self, *, rss_limit_bytes: int = 8 * 1024**3) -> None:
         if type(rss_limit_bytes) is not int or rss_limit_bytes <= 0:
             raise _error("invalid")
         self.rss_limit_bytes = rss_limit_bytes
@@ -291,7 +292,7 @@ class ResourceSupervisor:
             _active_owner = self
         return self
 
-    def __exit__(self, _type: object, _value: object, _traceback: object) -> bool:
+    def __exit__(self, _type: object, _value: object, _traceback: object) -> Literal[False]:
         self.close()
         return False
 
@@ -584,7 +585,11 @@ class ResourceSupervisor:
                 self._finish(job, "cleanup_failed", clean=False)
                 continue
             confirmed_empty = (
-                leader_valid and len(group) == 1 and leader[0] == "Z" and observed is not None
+                leader is not None
+                and leader_valid
+                and len(group) == 1
+                and leader[0] == "Z"
+                and observed is not None
             )
             if confirmed_empty and job.empty_zombie_seen:
                 waited = self._wait4_one(job, job.pid)

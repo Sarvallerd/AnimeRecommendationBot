@@ -4,16 +4,30 @@ import os
 import platform
 import shutil
 import tempfile
+from collections.abc import Iterable
 from pathlib import Path
+from typing import cast
 
 from recsys import __version__
-from recsys.contracts.bundle import check_bundle_bytes, parse_canonical
+from recsys.contracts.bundle import (
+    Manifest,
+    ManifestSource,
+    Neighbors,
+    check_bundle_bytes,
+    parse_canonical,
+)
 from recsys.contracts.provenance import SOURCE_LAYOUT, source_fingerprints
 from recsys.contracts.resources import resource_bytes
+from recsys.data.aliases import AliasSpec
+from recsys.data.dataset import DatasetSpec
+from recsys.data.sources import SourceRegistry
+from recsys.release.build import BuildReport
+from recsys.release.catalog import VerifiedRelease
 from recsys.release.lock import (
     CURRENT_RELEASE,
     LEGACY_RELEASE,
     PrepareError,
+    ReleaseLock,
     _fail,
     _sha,
     release_info,
@@ -22,13 +36,13 @@ from recsys.release.lock import (
 RUNTIME_FILES = ("catalog.json", "neighbors.json", "manifest.json")
 
 
-def _read(path):
+def _read(path: Path) -> bytes:
     if path.is_symlink() or not path.is_file():
         _fail()
     return path.read_bytes()
 
 
-def _safe_layout(data):
+def _safe_layout(data: Path) -> None:
     """Reject symlink ancestors and nested input/output trees before any mutation."""
     paths = [
         data,
@@ -48,8 +62,8 @@ def _safe_layout(data):
         _fail("unsafe_release_path")
 
 
-def _separate(paths):
-    resolved = []
+def _separate(paths: Iterable[Path]) -> None:
+    resolved: list[Path] = []
     for path in paths:
         for part in (path, *path.parents):
             if part.is_symlink():
@@ -61,7 +75,7 @@ def _separate(paths):
                 _fail("unsafe_release_path")
 
 
-def _producer(lock):
+def _producer(lock: ReleaseLock) -> None:
     """Allow current producers only for an explicit version-2 test lock."""
     if lock["schema_version"] == 1:
         _fail("release_reference_producer_required")
@@ -78,7 +92,7 @@ def _producer(lock):
         _fail("release_producer_mismatch")
 
 
-def _release_pins(verified, lock):
+def _release_pins(verified: VerifiedRelease, lock: ReleaseLock) -> None:
     source = lock["inputs"]
     summary = verified.summary
     if (
@@ -109,7 +123,7 @@ def _release_pins(verified, lock):
             _fail("release_semantic_mismatch")
 
 
-def _sources_pins(sources, lock):
+def _sources_pins(sources: list[ManifestSource], lock: ReleaseLock) -> None:
     by_name = {item["name"]: item for item in sources}
     if len(by_name) != len(sources):
         _fail("release_reference_mismatch")
@@ -168,7 +182,9 @@ def _sources_pins(sources, lock):
         _fail("release_reference_mismatch")
 
 
-def _bundle_files(directory, verified, lock):
+def _bundle_files(
+    directory: Path, verified: VerifiedRelease, lock: ReleaseLock
+) -> tuple[dict[str, bytes], str, int]:
     if (
         directory.is_symlink()
         or not directory.is_dir()
@@ -185,17 +201,18 @@ def _bundle_files(directory, verified, lock):
         or _sha(files["neighbors.json"]) != ref["neighbors_sha256"]
     ):
         _fail("release_reference_mismatch")
-    manifest = parse_canonical(files["manifest.json"], "manifest.json")
+    manifest = cast("Manifest", parse_canonical(files["manifest.json"], "manifest.json"))
     if manifest["algorithm"] != lock["inputs"]["algorithm"]:
         _fail("release_reference_mismatch")
     _sources_pins(manifest["sources"], lock)
     return files, identity, count
 
 
-def _report_pins(report_raw, neighbors_raw, lock):
+def _report_pins(report_raw: bytes, neighbors_raw: bytes, lock: ReleaseLock) -> None:
     ref, inp, sem = lock["reference"], lock["inputs"], lock["semantic_expectations"]
-    report = parse_canonical(report_raw, "build-report.json")
-    neighbors = parse_canonical(neighbors_raw, "neighbors.json")
+    report = cast("BuildReport", parse_canonical(report_raw, "build-report.json"))
+    neighbors = cast("Neighbors", parse_canonical(neighbors_raw, "neighbors.json"))
+    glove_input = cast("dict[str, object]", report["inputs"]["glove.6B.300d.txt"])
     if lock["schema_version"] == 2:
         producer = ref["producer"]
         if (
@@ -220,7 +237,7 @@ def _report_pins(report_raw, neighbors_raw, lock):
         or report["algorithm"] != inp["algorithm"]
         or report["catalog_release_identity"] != inp["catalog_release"]["identity"]
         or report["registry_sha256"] != inp["embeddings"]["registry_sha256"]
-        or report["inputs"]["glove.6B.300d.txt"]
+        or glove_input
         != {"size": inp["embeddings"]["text_size"], "sha256": inp["embeddings"]["text_sha256"]}
         or report["coverage"]["catalog_count"] != sem["catalog_count"]
         or report["coverage"]["vector_status_counts"] != sem["vector_status_counts"]
@@ -236,13 +253,20 @@ def _report_pins(report_raw, neighbors_raw, lock):
         _fail("release_reference_mismatch")
 
 
-def _published_permissions(path):
+def _published_permissions(path: Path) -> None:
     os.chmod(path, 0o755)
     for name in RUNTIME_FILES:
         os.chmod(path / name, 0o644)
 
 
-def _prepare_current(data, lock, *, _base_spec=None, _alias_spec=None, _glove_registry_bytes=None):
+def _prepare_current(
+    data: Path,
+    lock: ReleaseLock,
+    *,
+    _base_spec: DatasetSpec | None = None,
+    _alias_spec: AliasSpec | None = None,
+    _glove_registry_bytes: bytes | None = None,
+) -> tuple[Path, str, int]:
     from recsys.release.build import build_release, export_release_bundle
     from recsys.release.catalog import _verified_release, compose_release
     from recsys.release.export import _publish
@@ -362,7 +386,9 @@ def _prepare_current(data, lock, *, _base_spec=None, _alias_spec=None, _glove_re
         shutil.rmtree(stage)
 
 
-def _prepare_legacy(data, registry=None):
+def _prepare_legacy(
+    data: Path, registry: tuple[SourceRegistry, str] | None = None
+) -> tuple[Path, str, int]:
     from recsys.content.glove import build
     from recsys.contracts.bundle import check_bundle
     from recsys.data.mal2020 import normalize
@@ -374,23 +400,41 @@ def _prepare_legacy(data, registry=None):
     _separate((raw, glove.parent, work, data / "bundles"))
     if not raw.is_dir() or glove.is_symlink() or not glove.is_file():
         _fail("release_prerequisite_missing")
-    kwargs = {} if registry is None else {"registry": registry[0], "registry_sha256": registry[1]}
-    obtain(raw, offline=True, **({"snapshot": LEGACY_RELEASE} if registry is None else kwargs))
+    if registry is None:
+        obtain(raw, offline=True, snapshot=LEGACY_RELEASE)
+    else:
+        obtain(raw, offline=True, registry=registry[0], registry_sha256=registry[1])
     work.mkdir(parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix="prepare-legacy-", dir=work))
     os.chmod(stage, 0o700)
     try:
         normalized = stage / "normalized"
         built = stage / "build"
-        report = normalize(raw / "anime.csv", raw / "anime_with_synopsis.csv", normalized, **kwargs)
-        build_report = build(normalized / "catalog.json", report, glove, built, **kwargs)
+        source_registry = registry[0] if registry is not None else None
+        registry_sha = registry[1] if registry is not None else None
+        report = normalize(
+            raw / "anime.csv",
+            raw / "anime_with_synopsis.csv",
+            normalized,
+            registry=source_registry,
+            registry_sha256=registry_sha,
+        )
+        build_report = build(
+            normalized / "catalog.json",
+            report,
+            glove,
+            built,
+            registry=source_registry,
+            registry_sha256=registry_sha,
+        )
         bundle = export_bundle(
             normalized / "catalog.json",
             built / "neighbors.json",
             build_report,
             report,
             data / "bundles",
-            **kwargs,
+            registry=source_registry,
+            registry_sha256=registry_sha,
         )
         identity, count = check_bundle(bundle)
         _published_permissions(bundle)
@@ -400,15 +444,15 @@ def _prepare_legacy(data, registry=None):
 
 
 def prepare_release(
-    data_dir,
-    selector="current",
+    data_dir: str | Path,
+    selector: str = "current",
     *,
-    _lock_bytes=None,
-    _base_spec=None,
-    _alias_spec=None,
-    _glove_registry_bytes=None,
-    _legacy_registry=None,
-):
+    _lock_bytes: bytes | None = None,
+    _base_spec: DatasetSpec | None = None,
+    _alias_spec: AliasSpec | None = None,
+    _glove_registry_bytes: bytes | None = None,
+    _legacy_registry: tuple[SourceRegistry, str] | None = None,
+) -> tuple[Path, str, int]:
     """Return (bundle path, identity, count) after complete offline verification."""
     if selector not in ("current", CURRENT_RELEASE, LEGACY_RELEASE):
         _fail("unknown_release")

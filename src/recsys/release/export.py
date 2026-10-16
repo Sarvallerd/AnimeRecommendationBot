@@ -9,6 +9,7 @@ import stat
 import tempfile
 from collections import Counter
 from pathlib import Path
+from typing import cast
 
 from recsys import __version__
 from recsys.content.glove import (
@@ -17,13 +18,16 @@ from recsys.content.glove import (
     FIELDS,
     SCORE_BLOCK_BUDGET,
     TOKEN_PATTERN,
+    GloveInfo,
     _effective_rows,
     _report,
     _sources,
     _tokens,
 )
 from recsys.contracts.bundle import (
+    Catalog,
     ContractError,
+    Neighbors,
     canonical_bytes,
     check_bundle,
     check_bundle_bytes,
@@ -35,7 +39,7 @@ from recsys.contracts.bundle import (
     require,
 )
 from recsys.contracts.provenance import SOURCE_LAYOUT, source_fingerprints
-from recsys.data.sources import load_registry, validate_registry
+from recsys.data.sources import SourceRegistry, load_registry, validate_registry
 
 EXPORTER_VERSION = "arb010-v1"
 REPORT_FIELDS = {
@@ -76,36 +80,47 @@ ALGORITHM = {
 BUNDLE_FILES = ("catalog.json", "neighbors.json", "manifest.json")
 
 
-def _sha(raw):
+def _sha(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def _strict_equal(actual, expected):
+def _strict_equal(actual: object, expected: object) -> bool:
     if type(actual) is not type(expected):
         return False
     if isinstance(expected, dict):
-        return actual.keys() == expected.keys() and all(
-            _strict_equal(actual[key], value) for key, value in expected.items()
+        actual_map = cast("dict[str, object]", actual)
+        expected_map = cast("dict[str, object]", expected)
+        return actual_map.keys() == expected_map.keys() and all(
+            _strict_equal(actual_map[key], value) for key, value in expected_map.items()
         )
     if isinstance(expected, list):
-        return len(actual) == len(expected) and all(
-            _strict_equal(left, right) for left, right in zip(actual, expected)
+        actual_list = cast("list[object]", actual)
+        expected_list = cast("list[object]", expected)
+        return len(actual_list) == len(expected_list) and all(
+            _strict_equal(left, right) for left, right in zip(actual_list, expected_list)
         )
     return actual == expected
 
 
-def _same(actual, expected, location):
+def _same(actual: object, expected: object, location: str) -> None:
     require(_strict_equal(actual, expected), location, "does not match pinned producer or input")
 
 
-def _code_sha(name):
+def _code_sha(name: str) -> str:
     return source_fingerprints()[name]
 
 
 def _validate_report(
-    report, catalog, neighbors, raw, registry, registry_sha, normalization, normalization_raw
-):
-    exact_fields(report, REPORT_FIELDS, "build-report.json")
+    report: object,
+    catalog: Catalog,
+    neighbors: Neighbors,
+    raw: dict[str, bytes],
+    registry: SourceRegistry,
+    registry_sha: str,
+    normalization: object,
+    normalization_raw: bytes,
+) -> None:
+    report = exact_fields(report, REPORT_FIELDS, "build-report.json")
     integer(report["schema_version"], "build-report.json.schema_version", 2, 2)
     _same(report["builder_version"], BUILDER_VERSION, "build-report.json.builder_version")
     _same(report["algorithm"], ALGORITHM, "build-report.json.algorithm")
@@ -126,7 +141,7 @@ def _validate_report(
     )
     descriptors = {item["id"]: item for item in registry["sources"]}
     glove = descriptors["glove_300d"]
-    glove_info = {"sha256": glove["sha256"], "size": glove["size"]}
+    glove_info: GloveInfo = {"sha256": glove["sha256"], "size": glove["size"]}
     _same(
         report["inputs"],
         {
@@ -141,9 +156,8 @@ def _validate_report(
         _sources(registry, registry_sha, catalog_sha, normalization_sha, glove_info),
         "build-report.json.sources",
     )
-    producer = report["producer"]
-    exact_fields(
-        producer,
+    producer = exact_fields(
+        report["producer"],
         {"package_version", "python_version", "numpy_version", "code_files", "source_layout"},
         "build-report.json.producer",
     )
@@ -160,17 +174,19 @@ def _validate_report(
     _validate_diagnostics(report, catalog, neighbors)
 
 
-def _validate_diagnostics(report, catalog, neighbors):
+def _validate_diagnostics(
+    report: dict[str, object], catalog: Catalog, neighbors: Neighbors
+) -> None:
     """Check the math diagnostics shared by the two strict report contracts."""
     count = len(catalog["anime"])
-    execution = report["execution"]
-    exact_fields(
-        execution,
+    execution = exact_fields(
+        report["execution"],
         {"requested_block_rows", "effective_block_rows", "similarity_block_budget_bytes"},
         "build-report.json.execution",
     )
     requested = execution["requested_block_rows"]
     integer(requested, "build-report.json.execution.requested_block_rows", 1, 256)
+    requested = cast("int", requested)  # Exact integer range checked above.
     _same(
         execution,
         {
@@ -187,16 +203,18 @@ def _validate_diagnostics(report, catalog, neighbors):
         "build-report.json.anime",
         "MAL_ID keys must exactly match catalog",
     )
-    statuses = Counter()
-    histogram = Counter()
-    vocabulary = set()
+    details = cast("dict[str, object]", details)  # Exact catalog key set checked above.
+    statuses: Counter[str] = Counter()
+    histogram: Counter[int] = Counter()
+    vocabulary: set[str] = set()
     occurrences = matched_occurrences = 0
-    nonready = []
+    nonready: list[int] = []
     for key, entry in catalog["anime"].items():
         loc = f"build-report.json.anime.{key}"
-        detail = details[key]
-        exact_fields(
-            detail, {"token_count", "matched_token_count", "vector_status", "neighbor_count"}, loc
+        detail = exact_fields(
+            details[key],
+            {"token_count", "matched_token_count", "vector_status", "neighbor_count"},
+            loc,
         )
         tokens = list(_tokens(entry))
         vocabulary.update(tokens)
@@ -204,6 +222,7 @@ def _validate_diagnostics(report, catalog, neighbors):
         matched = detail["matched_token_count"]
         integer(detail["token_count"], f"{loc}.token_count", 0)
         integer(matched, f"{loc}.matched_token_count", 0, token_count)
+        matched = cast("int", matched)  # Bounded integer checked above.
         _same(detail["token_count"], token_count, f"{loc}.token_count")
         status = detail["vector_status"]
         require(
@@ -211,6 +230,7 @@ def _validate_diagnostics(report, catalog, neighbors):
             f"{loc}.vector_status",
             "unknown status",
         )
+        status = cast("str", status)  # Finite allowed status set checked above.
         require(
             (status == "no_tokens" and token_count == 0 and matched == 0)
             or (status == "oov_only" and token_count > 0 and matched == 0)
@@ -236,9 +256,8 @@ def _validate_diagnostics(report, catalog, neighbors):
                 f"neighbors.json.neighbors.{key}",
                 "non-ready target",
             )
-    coverage = report["coverage"]
-    exact_fields(
-        coverage,
+    coverage = exact_fields(
+        report["coverage"],
         {
             "catalog_count",
             "vocabulary_count",
@@ -258,6 +277,7 @@ def _validate_diagnostics(report, catalog, neighbors):
         1 if matched_occurrences else 0,
         min(len(vocabulary), matched_occurrences),
     )
+    matched_vocab = cast("int", matched_vocab)  # Bounded integer checked above.
     expected = {
         "catalog_count": count,
         "vocabulary_count": len(vocabulary),
@@ -273,7 +293,7 @@ def _validate_diagnostics(report, catalog, neighbors):
     _same(coverage, expected, "build-report.json.coverage")
 
 
-def _verify_existing(target, files, identity, count):
+def _verify_existing(target: Path, files: dict[str, bytes], identity: str, count: int) -> None:
     require(not target.is_symlink() and target.is_dir(), str(target), "unsafe published target")
     try:
         entries = list(target.iterdir())
@@ -292,7 +312,7 @@ def _verify_existing(target, files, identity, count):
         _same((target / name).read_bytes(), content, str(target / name))
 
 
-def _publish(store, files, identity, count):
+def _publish(store: Path, files: dict[str, bytes], identity: str, count: int) -> Path:
     require(os.name == "posix", str(store), "POSIX publication required")
     require(
         not store.is_symlink() and (not store.exists() or store.is_dir()),
@@ -339,14 +359,14 @@ def _publish(store, files, identity, count):
 
 
 def export_bundle(
-    catalog_path,
-    neighbors_path,
-    build_report_path,
-    normalization_report_path,
-    output_dir,
+    catalog_path: str | Path,
+    neighbors_path: str | Path,
+    build_report_path: str | Path,
+    normalization_report_path: str | Path,
+    output_dir: str | Path,
     *,
-    registry=None,
-    registry_sha256=None,
+    registry: SourceRegistry | None = None,
+    registry_sha256: str | None = None,
 ) -> Path:
     """Validate retained bytes, then publish or reuse their immutable bundle."""
     if registry is None:
@@ -363,18 +383,30 @@ def export_bundle(
     normalization, normalization_raw = read_canonical(Path(normalization_report_path))
     keys = check_catalog(catalog)
     check_neighbors(neighbors, keys)
+    catalog_typed = cast("Catalog", catalog)  # Full wire validation above.
+    neighbors_typed = cast("Neighbors", neighbors)  # Full neighbor validation above.
     raw = {"catalog.json": catalog_raw, "neighbors.json": neighbors_raw}
     _validate_report(
-        report, catalog, neighbors, raw, registry, registry_sha256, normalization, normalization_raw
+        report,
+        catalog_typed,
+        neighbors_typed,
+        raw,
+        registry,
+        registry_sha256,
+        normalization,
+        normalization_raw,
     )
-    sources = list(report["sources"])
+    report_typed = cast("dict[str, object]", report)  # Complete report validation above.
+    sources: list[dict[str, object]] = list(
+        cast("list[dict[str, object]]", report_typed["sources"])
+    )
     sources.extend(
         [
             {
                 "name": "build_report",
                 "version": BUILDER_VERSION,
                 "sha256": _sha(report_raw),
-                "metadata": {"filename": "build-report.json", "producer": report["producer"]},
+                "metadata": {"filename": "build-report.json", "producer": report_typed["producer"]},
             },
             {
                 "name": "bundle_exporter",
@@ -389,13 +421,13 @@ def export_bundle(
             },
         ]
     )
-    sources.sort(key=lambda item: (item["name"], item["version"]))
+    sources.sort(key=lambda item: (cast("str", item["name"]), cast("str", item["version"])))
     manifest_raw = canonical_bytes(
         {
             "schema_version": 1,
-            "algorithm": report["algorithm"],
+            "algorithm": report_typed["algorithm"],
             "sources": sources,
-            "files": report["files"],
+            "files": report_typed["files"],
         }
     )
     identity, count = check_bundle_bytes(catalog_raw, neighbors_raw, manifest_raw)

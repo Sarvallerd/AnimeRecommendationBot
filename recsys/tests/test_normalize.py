@@ -8,12 +8,114 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Sequence, TypedDict, cast
 
-from recsys.data.mal2020 import BOILERPLATES, normalize
-from recsys.data.sources import SourceError
+from recsys.contracts.bundle import AnimeRecord, check_catalog
+from recsys.data.mal2020 import (
+    BOILERPLATES,
+    DurationRecord,
+    normalize,
+)
+from recsys.data.sources import SourceError, SourceRegistry
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from contracts.check_bundle import check_catalog, read_canonical  # noqa: E402
+from contracts.check_bundle import read_canonical  # noqa: E402
+
+
+class _ReportCounts(TypedDict):
+    reasons: dict[str, int]
+    missing: dict[str, int]
+    unknown_synopsis: int
+    blank_synopsis: int
+    excluded: int
+    matched_synopsis: int
+
+
+class _Reason(TypedDict):
+    reason: str
+
+
+class _Report(TypedDict):
+    files: dict[str, dict[str, str]]
+    duplicate_titles: list[dict[str, object]]
+    orphan_synopsis_ids: list[int]
+    unmatched_catalog_ids: list[int]
+    exceptions: list[_Reason]
+    exclusions: list[_Reason]
+    counts: _ReportCounts
+
+
+def _object(value: object) -> dict[str, object]:
+    if not isinstance(value, dict) or any(not isinstance(key, str) for key in value):
+        raise AssertionError("expected JSON object")
+    return value
+
+
+def _items(value: object) -> list[object]:
+    if not isinstance(value, list):
+        raise AssertionError("expected JSON array")
+    return value
+
+
+def _integer(value: object) -> int:
+    if type(value) is not int:
+        raise AssertionError("expected JSON integer")
+    return value
+
+
+def _text(value: object) -> str:
+    if not isinstance(value, str):
+        raise AssertionError("expected JSON string")
+    return value
+
+
+def _int_map(value: object) -> dict[str, int]:
+    return {key: _integer(item) for key, item in _object(value).items()}
+
+
+def _durations(value: object) -> dict[str, DurationRecord]:
+    anime = _object(_object(value)["anime"])
+    result: dict[str, DurationRecord] = {}
+    for key, raw in anime.items():
+        record = _object(raw)
+        seconds = record["duration_seconds"]
+        scope = record["scope"]
+        result[key] = {
+            "duration_seconds": None if seconds is None else _integer(seconds),
+            "scope": None if scope is None else _text(scope),
+        }
+    return result
+
+
+def _report(value: object) -> _Report:
+    document = _object(value)
+    counts = _object(document["counts"])
+    return {
+        "files": {
+            key: {"sha256": _text(_object(entry)["sha256"])}
+            for key, entry in _object(document["files"]).items()
+        },
+        "duplicate_titles": [_object(item) for item in _items(document["duplicate_titles"])],
+        "orphan_synopsis_ids": [_integer(item) for item in _items(document["orphan_synopsis_ids"])],
+        "unmatched_catalog_ids": [
+            _integer(item) for item in _items(document["unmatched_catalog_ids"])
+        ],
+        "exceptions": [
+            {"reason": _text(_object(item)["reason"])} for item in _items(document["exceptions"])
+        ],
+        "exclusions": [
+            {"reason": _text(_object(item)["reason"])} for item in _items(document["exclusions"])
+        ],
+        "counts": {
+            "reasons": _int_map(counts["reasons"]),
+            "missing": _int_map(counts["missing"]),
+            "unknown_synopsis": _integer(counts["unknown_synopsis"]),
+            "blank_synopsis": _integer(counts["blank_synopsis"]),
+            "excluded": _integer(counts["excluded"]),
+            "matched_synopsis": _integer(counts["matched_synopsis"]),
+        },
+    }
+
 
 ANIME_HEADER = [
     "MAL_ID",
@@ -31,7 +133,7 @@ ANIME_HEADER = [
 SYNOPSIS_HEADER = ["MAL_ID", "sypnopsis"]
 
 
-def csv_bytes(header, rows):
+def csv_bytes(header: Sequence[str], rows: Sequence[Sequence[str]]) -> bytes:
     output = io.StringIO(newline="")
     writer = csv.writer(output, lineterminator="\n")
     writer.writerow(header)
@@ -40,18 +142,18 @@ def csv_bytes(header, rows):
 
 
 def anime(
-    mal_id="1",
-    name="Título, один",
-    english="English, Title",
-    japanese="日本語",
-    genres="Action, Drama",
-    score="8.5",
-    episodes="12",
-    aired="Apr 3, 1998 to Apr 4, 1999",
-    premiered="Spring 1998",
-    type_="TV",
-    duration="1 hr. 2 min. 3 sec. per ep.",
-):
+    mal_id: str = "1",
+    name: str = "Título, один",
+    english: str = "English, Title",
+    japanese: str = "日本語",
+    genres: str = "Action, Drama",
+    score: str = "8.5",
+    episodes: str = "12",
+    aired: str = "Apr 3, 1998 to Apr 4, 1999",
+    premiered: str = "Spring 1998",
+    type_: str = "TV",
+    duration: str = "1 hr. 2 min. 3 sec. per ep.",
+) -> list[str]:
     return [
         mal_id,
         name,
@@ -68,28 +170,34 @@ def anime(
 
 
 class NormalizeTests(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
 
     def run_fixture(
         self,
-        anime_rows,
-        synopsis_rows,
+        anime_rows: Sequence[Sequence[str]],
+        synopsis_rows: Sequence[Sequence[str]],
         *,
-        anime_header=ANIME_HEADER,
-        synopsis_header=SYNOPSIS_HEADER,
-        output="out",
-        raw_anime=None,
-    ):
+        anime_header: Sequence[str] = ANIME_HEADER,
+        synopsis_header: Sequence[str] = SYNOPSIS_HEADER,
+        output: str = "out",
+        raw_anime: bytes | None = None,
+    ) -> tuple[
+        dict[str, AnimeRecord],
+        dict[str, DurationRecord],
+        _Report,
+        tuple[bytes, bytes, bytes],
+        SourceRegistry,
+    ]:
         a = csv_bytes(anime_header, anime_rows) if raw_anime is None else raw_anime
         s = csv_bytes(synopsis_header, synopsis_rows)
         anime_path = self.root / "anime.csv"
         synopsis_path = self.root / "synopsis.csv"
         anime_path.write_bytes(a)
         synopsis_path.write_bytes(s)
-        registry = {
+        registry: SourceRegistry = {
             "schema_version": 1,
             "provenance": {"fixture": "local"},
             "sources": [
@@ -111,10 +219,12 @@ class NormalizeTests(unittest.TestCase):
         }
         path = normalize(anime_path, synopsis_path, self.root / output, registry=registry)
         catalog, catalog_raw = read_canonical(path.parent / "catalog.json")
-        durations, durations_raw = read_canonical(path.parent / "durations.json")
-        report, report_raw = read_canonical(path)
+        durations_document, durations_raw = read_canonical(path.parent / "durations.json")
+        report_document, report_raw = read_canonical(path)
         check_catalog(catalog)
-        self.assertEqual(set(catalog["anime"]), set(durations["anime"]))
+        durations = _durations(durations_document)
+        report = _report(report_document)
+        self.assertEqual(set(catalog["anime"]), set(durations))
         self.assertEqual(
             hashlib.sha256(catalog_raw).hexdigest(), report["files"]["catalog.json"]["sha256"]
         )
@@ -122,14 +232,14 @@ class NormalizeTests(unittest.TestCase):
             hashlib.sha256(durations_raw).hexdigest(), report["files"]["durations.json"]["sha256"]
         )
         return (
-            catalog["anime"],
-            durations["anime"],
+            cast("dict[str, AnimeRecord]", catalog["anime"]),
+            durations,
             report,
             (catalog_raw, durations_raw, report_raw),
             registry,
         )
 
-    def test_join_titles_aliases_dates_duration_and_order(self):
+    def test_join_titles_aliases_dates_duration_and_order(self) -> None:
         rows = [
             anime(),
             anime(
@@ -185,7 +295,7 @@ class NormalizeTests(unittest.TestCase):
         self.assertEqual(entries, reordered[0])
         self.assertEqual(durations, reordered[1])
 
-    def test_missing_invalid_and_disagreement(self):
+    def test_missing_invalid_and_disagreement(self) -> None:
         rows = [
             anime(
                 " 01 ",
@@ -244,7 +354,7 @@ class NormalizeTests(unittest.TestCase):
         self.assertEqual(invalid_date[0]["1"]["year"], 2021)
         self.assertIn("invalid_year", [e["reason"] for e in invalid_date[2]["exceptions"]])
 
-    def test_boilerplates_blank_and_similar_genuine_text(self):
+    def test_boilerplates_blank_and_similar_genuine_text(self) -> None:
         rows = [anime(str(i), name=f"Title {i}") for i in range(1, 7)]
         synopses = [[str(i), text] for i, text in enumerate(sorted(BOILERPLATES), 1)]
         synopses += [
@@ -258,12 +368,12 @@ class NormalizeTests(unittest.TestCase):
         self.assertEqual(report["counts"]["blank_synopsis"], 1)
         self.assertEqual(report["unmatched_catalog_ids"], [6])
 
-    def test_unknown_synopsis_is_missing(self):
+    def test_unknown_synopsis_is_missing(self) -> None:
         entries, _, report, _, _ = self.run_fixture([anime()], [["1", "Unknown"]])
         self.assertIsNone(entries["1"]["synopsis"])
         self.assertEqual(report["counts"]["unknown_synopsis"], 1)
 
-    def test_invalid_ids_titles_and_bad_source_files(self):
+    def test_invalid_ids_titles_and_bad_source_files(self) -> None:
         rows = [
             anime("0"),
             anime("oops"),
@@ -296,13 +406,13 @@ class NormalizeTests(unittest.TestCase):
                 [], [], raw_anime=csv_bytes(ANIME_HEADER, []) + b'"1,broken\n', output="csv"
             )
 
-    def test_hash_mismatch_and_empty_result(self):
+    def test_hash_mismatch_and_empty_result(self) -> None:
         a = csv_bytes(ANIME_HEADER, [anime()])
         s = csv_bytes(SYNOPSIS_HEADER, [])
         a_path, s_path = self.root / "a.csv", self.root / "s.csv"
         a_path.write_bytes(a)
         s_path.write_bytes(s)
-        registry = {
+        registry: SourceRegistry = {
             "schema_version": 1,
             "provenance": {},
             "sources": [

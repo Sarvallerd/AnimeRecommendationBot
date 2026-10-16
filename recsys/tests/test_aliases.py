@@ -7,14 +7,16 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Callable, Sequence, cast
 
 from test_dataset import Fixture as DatasetFixture
 
-from recsys.contracts.bundle import canonical_bytes
+from recsys.contracts.bundle import AnimeRecord, canonical_bytes, check_catalog
 from recsys.data.aliases import (
     CSV_COLUMNS,
     AliasError,
     AliasSpec,
+    AliasSummary,
     _derive,
     _rows,
     normalize_aliases,
@@ -22,8 +24,22 @@ from recsys.data.aliases import (
 )
 from recsys.data.dataset import validate_dataset
 
+type CsvRow = tuple[str, str, str, str, str]
 
-def csv_bytes(rows):
+
+def _object(value: object) -> dict[str, object]:
+    if not isinstance(value, dict) or any(not isinstance(key, str) for key in value):
+        raise AssertionError("expected JSON object")
+    return value
+
+
+def _items(value: object) -> list[object]:
+    if not isinstance(value, list):
+        raise AssertionError("expected JSON array")
+    return value
+
+
+def csv_bytes(rows: Sequence[CsvRow]) -> bytes:
     stream = io.StringIO(newline="")
     writer = csv.writer(stream)
     writer.writerow(CSV_COLUMNS)
@@ -36,28 +52,37 @@ def csv_bytes(rows):
     return stream.getvalue().encode("utf-8")
 
 
-def record(mal_id, main, english="", *, url=None, synonyms=""):
+def record(
+    mal_id: str,
+    main: str,
+    english: str = "",
+    *,
+    url: str | None = None,
+    synonyms: str = "",
+) -> CsvRow:
     if url is None:
         url = f"https://myanimelist.net/anime/{mal_id}/slug"
     return (mal_id, main, english, url, synonyms)
 
 
 class Fixture:
-    def __init__(self, root):
+    def __init__(self, root: str | Path) -> None:
         self.root = Path(root)
         self.base_fixture = DatasetFixture(self.root)
         self.base = self.base_fixture.run("base")
         self.base_identity = validate_dataset(self.base, _spec=self.base_fixture.spec).identity
-        self.base_catalog = json.loads((self.base / "catalog.json").read_bytes())["anime"]
+        base_catalog = json.loads((self.base / "catalog.json").read_bytes())
+        check_catalog(base_catalog)
+        self.base_catalog = cast("dict[str, AnimeRecord]", base_catalog["anime"])
         self.cache = self.root / "alias-cache"
         self.cache.mkdir()
-        self.rows = [
+        self.rows: Sequence[CsvRow] = [
             record("1", "Alternate One", "One", synonyms="Ignored"),
             record("2", "Two", "Two JP"),
         ]
         self.update()
 
-    def update(self, rows=None):
+    def update(self, rows: Sequence[CsvRow] | None = None) -> None:
         if rows is not None:
             self.rows = rows
         raw = csv_bytes(self.rows)
@@ -98,7 +123,7 @@ class Fixture:
             canonical_bytes(expected),
         )
 
-    def run(self, name="aliases"):
+    def run(self, name: str = "aliases") -> Path:
         output = self.root / name
         normalize_aliases(
             self.cache,
@@ -111,7 +136,7 @@ class Fixture:
         )
         return output
 
-    def validate(self, output, expected_identity=None):
+    def validate(self, output: Path, expected_identity: str | None = None) -> AliasSummary:
         return validate_aliases(
             output,
             data_dir=self.cache,
@@ -124,12 +149,12 @@ class Fixture:
 
 
 class AliasTests(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.fixture = Fixture(self.tmp.name)
 
-    def test_deterministic_fixture_and_preferred_english_even_when_equal_to_base(self):
+    def test_deterministic_fixture_and_preferred_english_even_when_equal_to_base(self) -> None:
         a = self.fixture.run("a")
         b = self.fixture.run("b")
         self.assertEqual(
@@ -186,7 +211,7 @@ class AliasTests(unittest.TestCase):
             self.fixture.base_catalog,
         )
 
-    def test_duplicate_ids_quarantine_all_copies_and_foreign_ids_do_not_emit(self):
+    def test_duplicate_ids_quarantine_all_copies_and_foreign_ids_do_not_emit(self) -> None:
         rows = [
             record("1", "First", "English One"),
             record("1", "Second", "Other"),
@@ -209,7 +234,7 @@ class AliasTests(unittest.TestCase):
         )
         self.assertEqual(qa["ignored_nonempty_synonyms_source"], 0)
 
-    def test_canonical_ids_and_exact_url_reject_only_affected_rows(self):
+    def test_canonical_ids_and_exact_url_reject_only_affected_rows(self) -> None:
         rows = [
             record("1", "One Alternative", "EN", url="http://myanimelist.net/anime/1"),
             record("2", "Two Alternative", "EN2", url="https://myanimelist.net:443/anime/2"),
@@ -233,7 +258,7 @@ class AliasTests(unittest.TestCase):
                 )
                 self.assertEqual(qa["counts"]["invalid_id_rows"], 1)
 
-    def test_field_quarantine_nfc_and_no_transliteration(self):
+    def test_field_quarantine_nfc_and_no_transliteration(self) -> None:
         rows = [
             record("1", "Cafe\u0301", "Unknown"),
             record("2", "Two\u200b", "Γάμμα", synonyms="Novel|English"),
@@ -257,7 +282,7 @@ class AliasTests(unittest.TestCase):
             self.assertNotIn("1", aliases["aliases"])
             self.assertEqual(qa["fields"]["eligible_overlap"]["title_english"]["accepted"], 0)
 
-    def test_bad_csv_header_width_and_utf8(self):
+    def test_bad_csv_header_width_and_utf8(self) -> None:
         raw = csv_bytes(self.fixture.rows)
         for changed in (
             raw.replace(b"mal_id", b"other_", 1),
@@ -271,7 +296,7 @@ class AliasTests(unittest.TestCase):
             ):
                 _rows(changed)
 
-    def test_mismatched_fixture_expectations_and_source_manifest(self):
+    def test_mismatched_fixture_expectations_and_source_manifest(self) -> None:
         expectations = json.loads(self.fixture.spec.expectations_bytes)
         expectations["counts"]["emitted_items"] += 1
         altered = AliasSpec(
@@ -296,7 +321,7 @@ class AliasTests(unittest.TestCase):
         with self.assertRaisesRegex(AliasError, "input_hash_mismatch"):
             self.fixture.run()
 
-    def test_source_provenance_and_base_catalog_tampering(self):
+    def test_source_provenance_and_base_catalog_tampering(self) -> None:
         cache_manifest = self.fixture.cache / "source-manifest.json"
         original = cache_manifest.read_bytes()
         cache_manifest.write_bytes(
@@ -316,7 +341,7 @@ class AliasTests(unittest.TestCase):
         with self.assertRaisesRegex(AliasError, "base_integrity_error"):
             self.fixture.run()
 
-    def test_rehashed_output_tampering_and_historical_producer_fingerprint(self):
+    def test_rehashed_output_tampering_and_historical_producer_fingerprint(self) -> None:
         output = self.fixture.run()
         original = self.fixture.validate(output).identity
         alias_path = output / "aliases.json"
@@ -346,12 +371,12 @@ class AliasTests(unittest.TestCase):
         with self.assertRaisesRegex(AliasError, "alias_integrity_error"):
             self.fixture.validate(output, expected_identity=original)
 
-    def test_manifest_immutable_json_blocks_reject_equal_python_numeric_values(self):
+    def test_manifest_immutable_json_blocks_reject_equal_python_numeric_values(self) -> None:
         output = self.fixture.run()
         path = output / "alias-manifest.json"
         original = json.loads(path.read_bytes())
 
-        def changed(mutator):
+        def changed(mutator: Callable[[dict[str, object]], object]) -> None:
             document = json.loads(canonical_bytes(original))
             mutator(document)
             path.write_bytes(canonical_bytes(document))
@@ -360,23 +385,31 @@ class AliasTests(unittest.TestCase):
 
         changed(lambda document: document.__setitem__("schema_version", True))
         changed(
-            lambda document: document["base"]["catalog"].__setitem__(
+            lambda document: _object(_object(document["base"])["catalog"]).__setitem__(
                 "bytes", float(original["base"]["catalog"]["bytes"])
             )
         )
         for bad_count in (True, 2.0, 3):
             with self.subTest(bad_count=bad_count):
-                changed(lambda document: document["base"].__setitem__("catalog_items", bad_count))
+                changed(
+                    lambda document: _object(document["base"]).__setitem__(
+                        "catalog_items", bad_count
+                    )
+                )
         changed(
-            lambda document: document["sources"][0].__setitem__(
+            lambda document: _object(_items(document["sources"])[0]).__setitem__(
                 "size", float(original["sources"][0]["size"])
             )
         )
-        changed(lambda document: document["provenance"]["dataset"].__setitem__("version", True))
+        changed(
+            lambda document: _object(_object(document["provenance"])["dataset"]).__setitem__(
+                "version", True
+            )
+        )
         path.write_bytes(canonical_bytes(original))
         self.assertEqual(self.fixture.validate(output).base_identity, self.fixture.base_identity)
 
-    def test_source_manifest_nested_equal_numeric_tampering_is_rejected(self):
+    def test_source_manifest_nested_equal_numeric_tampering_is_rejected(self) -> None:
         path = self.fixture.cache / "source-manifest.json"
         original = json.loads(path.read_bytes())
         for nested in ("verified", "provenance"):
@@ -393,7 +426,7 @@ class AliasTests(unittest.TestCase):
                 self.fixture.run()
         path.write_bytes(canonical_bytes(original))
 
-    def test_fixture_registry_version_requires_exact_integer_type(self):
+    def test_fixture_registry_version_requires_exact_integer_type(self) -> None:
         registry = json.loads(self.fixture.spec.registry_bytes)
         registry["provenance"]["dataset"]["version"] = True
         altered = AliasSpec(
@@ -414,7 +447,7 @@ class AliasTests(unittest.TestCase):
             )
         self.assertFalse((self.fixture.root / "invalid").exists())
 
-    def test_base_identity_collision_and_permissions(self):
+    def test_base_identity_collision_and_permissions(self) -> None:
         with self.assertRaisesRegex(AliasError, "base_integrity_error"):
             normalize_aliases(
                 self.fixture.cache,

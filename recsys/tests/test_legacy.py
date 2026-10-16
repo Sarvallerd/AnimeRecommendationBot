@@ -5,6 +5,7 @@ import unittest
 from recsys.historical.legacy_vectors import (
     LegacyDataset,
     LegacyError,
+    LegacyRecord,
     build_legacy_vectors,
     cluster_legacy,
     legacy_neighbors,
@@ -14,8 +15,8 @@ from recsys.historical.legacy_vectors import (
 
 
 class LegacyTests(unittest.TestCase):
-    def row(self, mal_id, **changes):
-        row = {
+    def row(self, mal_id: int, **changes: str) -> dict[str, str]:
+        row: dict[str, str] = {
             "MAL_ID": str(mal_id),
             "Name": f"Name {mal_id}",
             "Score": "8.78",
@@ -33,7 +34,7 @@ class LegacyTests(unittest.TestCase):
         row.update(changes)
         return row
 
-    def test_eligibility_and_notebook_scalars(self):
+    def test_eligibility_and_notebook_scalars(self) -> None:
         rows = [
             self.row(3, Score="Unknown"),
             self.row(1, **{"English name": "English One"}),
@@ -65,7 +66,7 @@ class LegacyTests(unittest.TestCase):
         self.assertIn("action", tokens)
         self.assertIn("comedy", tokens)
 
-    def test_duplicate_id_rejected_and_order_independent(self):
+    def test_duplicate_id_rejected_and_order_independent(self) -> None:
         rows = [self.row(1), self.row(2)]
         syn = [{"MAL_ID": str(i), "sypnopsis": "Story"} for i in (1, 2)]
         self.assertEqual(
@@ -75,7 +76,7 @@ class LegacyTests(unittest.TestCase):
         with self.assertRaisesRegex(LegacyError, "duplicate MAL_ID"):
             prepare_legacy_rows(rows + [self.row(1)], syn)
 
-    def test_real_kmeans_is_deterministic(self):
+    def test_real_kmeans_is_deterministic(self) -> None:
         from recsys.historical.legacy_vectors import FEATURES
 
         rows = [self.row(i, Genres=FEATURES[i - 1]) for i in range(1, 22)]
@@ -84,9 +85,11 @@ class LegacyTests(unittest.TestCase):
         first, diagnostics = cluster_legacy(dataset)
         second, _ = cluster_legacy(dataset)
         self.assertEqual(first, second)
-        self.assertEqual(len(diagnostics["feature_order"]), 41)
+        feature_order = diagnostics["feature_order"]
+        assert isinstance(feature_order, list)
+        self.assertEqual(len(feature_order), 41)
 
-    def test_occurrence_sum_oov_and_canceling_zero(self):
+    def test_occurrence_sum_oov_and_canceling_zero(self) -> None:
         import numpy as np
 
         dataset = prepare_legacy_rows(
@@ -109,10 +112,10 @@ class LegacyTests(unittest.TestCase):
         self.assertEqual(info["status_counts"]["ready"], 1)
         self.assertEqual(float(vectors[0, 0]), 1.0)
 
-    def test_top99_before_cluster_and_score_year_ties(self):
+    def test_top99_before_cluster_and_score_year_ties(self) -> None:
         import numpy as np
 
-        records = {i: {"Score": 8.0, "year": 2000} for i in range(1, 103)}
+        records: dict[int, LegacyRecord] = {i: {"Score": 8.0, "year": 2000} for i in range(1, 103)}
         dataset = LegacyDataset(records, {}, {}, {})
         ids = list(records)
         vectors = np.zeros((102, 300), dtype=np.float64)

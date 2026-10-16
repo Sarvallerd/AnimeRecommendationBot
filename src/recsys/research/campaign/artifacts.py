@@ -7,22 +7,41 @@ been acquired and checked. All expensive scientific work runs in workers.
 from __future__ import annotations
 
 import hashlib
+from pathlib import Path
+from typing import Literal, TypedDict, cast
 
 from recsys.research.campaign.common import AUX_PHASE, VARIANTS, _digest, _fail, _read_private
+from recsys.research.campaign.journal import CampaignEvent, PhaseKey
+from recsys.research.campaign.plan import CampaignPlan
 
 
-def _phase_directory(root, variant, phase, attempt):
+class WorkerReceipt(TypedDict):
+    schema_version: int
+    kind: str
+    phase: str
+    variant: str
+    attempt: int
+    generation: str
+    status: str
+    manifest_sha256: str
+
+
+def _phase_directory(root: Path, variant: str, phase: str, attempt: int) -> Path:
     return root / "variants" / variant / "attempts" / phase / str(attempt)
 
 
-def _phase_path(root, successes, variant, phase):
+def _phase_path(
+    root: Path, successes: dict[PhaseKey, CampaignEvent], variant: str, phase: str
+) -> Path | None:
     event = successes.get((variant, phase))
     if event is None:
         return None
     return _phase_directory(root, variant, phase, event["attempt"]) / "artifact"
 
 
-def _read_receipt(attempt_dir, variant, phase, attempt, generation):
+def _read_receipt(
+    attempt_dir: Path, variant: str, phase: str, attempt: int, generation: str
+) -> WorkerReceipt:
     result, _ = _read_private(attempt_dir / "result.json", limit=4096)
     common = {
         "schema_version": 1,
@@ -40,12 +59,22 @@ def _read_receipt(attempt_dir, variant, phase, attempt, generation):
         or type(result["manifest_sha256"]) is not str
     ):
         _fail("research_campaign_receipt_invalid")
-    return result
+    return cast("WorkerReceipt", result)
 
 
-def _verify_phase(root, plan, successes, variant, phase, attempt, generation, prepared_dir):
+def _verify_phase(
+    root: Path,
+    plan: CampaignPlan,
+    successes: dict[PhaseKey, CampaignEvent],
+    variant: str,
+    phase: str,
+    attempt: int,
+    generation: str,
+    prepared_dir: Path,
+) -> tuple[str, str]:
     """Validate one artifact and its chain after every active process has stopped."""
     from recsys.research.artifacts import file_descriptor, read_json, safe_path
+    from recsys.research.models.manifest import ModelManifest
     from recsys.research.models.package import load_model, read_scoring_inputs
 
     attempt_dir = _phase_directory(root, variant, phase, attempt)
@@ -58,13 +87,14 @@ def _verify_phase(root, plan, successes, variant, phase, attempt, generation, pr
         "evaluate": "evaluation-manifest.json",
         "replay": "evaluation-manifest.json",
     }[phase]
-    manifest, raw = read_json(artifact / manifest_name)
+    manifest_value, raw = read_json(artifact / manifest_name)
     manifest_identity = _digest(raw)
     if receipt["manifest_sha256"] != manifest_identity:
         _fail("research_campaign_receipt_invalid")
     backend = "cpu" if phase == AUX_PHASE else plan["variants"][VARIANTS.index(variant)]["backend"]
     inputs = read_scoring_inputs(prepared_dir, expected_prepared_identity=plan["prepared_identity"])
     if phase in ("fit", AUX_PHASE):
+        manifest = cast("ModelManifest", manifest_value)
         if (
             manifest["variant_id"] != variant
             or manifest["producer"]["code_revision"] != plan["code_revision"]
@@ -74,17 +104,20 @@ def _verify_phase(root, plan, successes, variant, phase, attempt, generation, pr
             from recsys.research.gpu import gpu_execution
 
             with gpu_execution():
-                _, scorer = load_model(artifact, inputs=inputs, backend=backend)
-                scorer.close()
+                _, gpu_scorer = load_model(
+                    artifact, inputs=inputs, backend=cast("Literal['gpu']", backend)
+                )
+                gpu_scorer.close()
         else:
-            _, scorer = load_model(artifact, inputs=inputs, backend=backend)
-            close = getattr(scorer, "close", None)
+            _, cpu_scorer = load_model(artifact, inputs=inputs, backend=backend)
+            close = getattr(cpu_scorer, "close", None)
             if callable(close):
                 close()
     elif phase == "predict":
-        from recsys.research.evaluation.evaluate import _predictions
+        from recsys.research.evaluation.evaluate import PreparationManifest, _predictions
 
-        prepared_manifest, _ = read_json(prepared_dir / "prepare-manifest.json")
+        prepared_value, _ = read_json(prepared_dir / "prepare-manifest.json")
+        prepared_manifest = cast("PreparationManifest", prepared_value)
         prediction, prediction_identity = _predictions(
             artifact,
             prepared_manifest,
@@ -105,11 +138,13 @@ def _verify_phase(root, plan, successes, variant, phase, attempt, generation, pr
         ):
             _fail("research_campaign_prediction_invalid")
         if backend == "gpu":
-            measured, _ = _read_private(attempt_dir / "resources" / "measurement.json")
+            measured_value, _ = _read_private(attempt_dir / "resources" / "measurement.json")
+            measured = cast("dict[str, object]", measured_value)
+            admission = cast("dict[str, object]", measured.get("gpu_admission", {}))
             if (
                 measured.get("status") != "published"
                 or measured.get("backend") != "gpu"
-                or measured.get("gpu_admission", {}).get("purpose") != "parity-only-gpu-admission"
+                or admission.get("purpose") != "parity-only-gpu-admission"
             ):
                 _fail("research_campaign_admission_invalid")
         return manifest_identity, prediction_identity

@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TypedDict, cast
 
+from recsys.contracts.bundle import JSONValue, canonical_bytes
 from recsys.contracts.resources import resource_bytes
-
-if TYPE_CHECKING:
-    pass
-
-from recsys.contracts.bundle import canonical_bytes
 from recsys.research.protocol import exact, fail, sha
 
 CAMPAIGN = "research_campaign_v1.json"
+
+
+class CampaignSpec(TypedDict):
+    schema_version: int
+    kind: str
+    score_encoding: dict[str, str]
+    variants: dict[str, dict[str, JSONValue]]
 
 
 GPU_DEPENDENCIES = (
@@ -64,12 +67,13 @@ VARIANT_DEPENDENCIES = {
 }
 
 
-def campaign():
+def campaign() -> tuple[CampaignSpec, str]:
     raw = resource_bytes("campaigns", CAMPAIGN)
     from recsys.contracts.bundle import parse_canonical
 
-    spec = parse_canonical(raw, CAMPAIGN)
-    exact(spec, {"schema_version", "kind", "score_encoding", "variants"})
+    value = parse_canonical(raw, CAMPAIGN)
+    exact(value, {"schema_version", "kind", "score_encoding", "variants"})
+    spec = cast("CampaignSpec", value)
     if (
         type(spec["schema_version"]) is not int
         or spec["schema_version"] != 1
@@ -86,7 +90,7 @@ def campaign():
     return spec, sha(raw)
 
 
-def _model_backend(variant_id, requested):
+def _model_backend(variant_id: str, requested: str) -> None:
     if requested not in ("cpu", "gpu") or type(requested) is not str:
         fail("research_backend_unsupported")
     if requested == "gpu" and variant_id not in GPU_VARIANTS:

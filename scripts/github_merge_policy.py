@@ -11,6 +11,7 @@ import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import NoReturn, Protocol
 from urllib.parse import urlencode
 
 REPOSITORY = "Sarvallerd/AnimeRecommendationBot"
@@ -39,8 +40,14 @@ class ApiStatus(PolicyError):
         super().__init__(f"GitHub API returned HTTP {status}")
 
 
-def _pairs(items: list[tuple[str, object]]) -> dict:
-    result = {}
+class GetOnlyApi(Protocol):
+    def get_json(self, endpoint: str) -> object: ...
+
+    def get_pages(self, endpoint: str, *, item_key: str | None = None) -> list[object]: ...
+
+
+def _pairs(items: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
     for key, value in items:
         if key in result:
             raise PolicyError("duplicate JSON key")
@@ -48,7 +55,7 @@ def _pairs(items: list[tuple[str, object]]) -> dict:
     return result
 
 
-def _constant(value: str) -> None:
+def _constant(value: str) -> NoReturn:
     raise PolicyError(f"invalid JSON constant: {value}")
 
 
@@ -59,10 +66,10 @@ def _json(raw: str) -> object:
         raise PolicyError("malformed JSON") from exc
 
 
-def _keys(obj: object, expected: set[str], label: str) -> dict:
+def _keys(obj: object, expected: set[str], label: str) -> dict[str, object]:
     if type(obj) is not dict or set(obj) != expected:
         raise PolicyError(f"invalid {label} fields")
-    return obj
+    return {key: obj[key] for key in expected}
 
 
 def _same(actual: object, expected: object, label: str) -> None:
@@ -70,15 +77,15 @@ def _same(actual: object, expected: object, label: str) -> None:
         raise PolicyError(f"invalid {label}")
 
 
-def _rules(raw: object, *, server: bool = False) -> dict[str, dict]:
+def _rules(raw: object, *, server: bool = False) -> dict[str, dict[str, object]]:
     if type(raw) is not list or len(raw) != 5:
         raise PolicyError("expected five rules")
-    result = {}
+    result: dict[str, dict[str, object]] = {}
     simple = {"deletion", "non_fast_forward", "required_linear_history"}
     for item in raw:
         if type(item) is not dict or type(item.get("type")) is not str:
             raise PolicyError("invalid rule")
-        rule = dict(item)
+        rule: dict[str, object] = dict(item)
         if server:
             for key in (
                 "id",
@@ -101,7 +108,9 @@ def _rules(raw: object, *, server: bool = False) -> dict[str, dict]:
             _keys(rule, {"type"}, kind)
         elif kind == "pull_request":
             _keys(rule, {"type", "parameters"}, kind)
-            params = dict(rule["parameters"]) if type(rule["parameters"]) is dict else {}
+            params: dict[str, object] = (
+                dict(rule["parameters"]) if type(rule["parameters"]) is dict else {}
+            )
             if server:
                 if "require_extra_approval_for_unattributed_changes" in params:
                     if params.pop("require_extra_approval_for_unattributed_changes") is not True:
@@ -160,16 +169,16 @@ def _rules(raw: object, *, server: bool = False) -> dict[str, dict]:
             checks = params["required_status_checks"]
             if type(checks) is not list or len(checks) != 5:
                 raise PolicyError("expected five required checks")
-            normalized = []
+            normalized: list[dict[str, object]] = []
             for check in checks:
                 _keys(check, {"context", "integration_id"}, "required check")
                 if type(check["context"]) is not str or type(check["integration_id"]) is not int:
                     raise PolicyError("invalid required check")
-                normalized.append(check)
+                normalized.append(_keys(check, {"context", "integration_id"}, "required check"))
             if len({x["context"] for x in normalized}) != len(normalized):
                 raise PolicyError("duplicate required check")
             rule["parameters"] = dict(
-                params, required_status_checks=sorted(normalized, key=lambda x: x["context"])
+                params, required_status_checks=sorted(normalized, key=lambda x: str(x["context"]))
             )
         else:
             raise PolicyError("unknown rule type")
@@ -179,14 +188,16 @@ def _rules(raw: object, *, server: bool = False) -> dict[str, dict]:
     return result
 
 
-def load_policy(path: Path = POLICY) -> dict:
+def load_policy(path: Path = POLICY) -> dict[str, object]:
     try:
         raw = path.read_bytes()
-        policy = _json(raw.decode("utf-8"))
+        raw_policy = _json(raw.decode("utf-8"))
     except (OSError, UnicodeError) as exc:
         raise PolicyError("cannot read policy") from exc
-    _keys(
-        policy, {"name", "target", "enforcement", "bypass_actors", "conditions", "rules"}, "policy"
+    policy = _keys(
+        raw_policy,
+        {"name", "target", "enforcement", "bypass_actors", "conditions", "rules"},
+        "policy",
     )
     for key, value in (
         ("name", "arb-master-merge-policy-v1"),
@@ -195,10 +206,10 @@ def load_policy(path: Path = POLICY) -> dict:
         ("bypass_actors", []),
     ):
         _same(policy[key], value, key)
-    _keys(policy["conditions"], {"ref_name"}, "conditions")
-    _keys(policy["conditions"]["ref_name"], {"include", "exclude"}, "ref condition")
-    _same(policy["conditions"]["ref_name"]["include"], ["refs/heads/master"], "included refs")
-    _same(policy["conditions"]["ref_name"]["exclude"], [], "excluded refs")
+    conditions = _keys(policy["conditions"], {"ref_name"}, "conditions")
+    ref_name = _keys(conditions["ref_name"], {"include", "exclude"}, "ref condition")
+    _same(ref_name["include"], ["refs/heads/master"], "included refs")
+    _same(ref_name["exclude"], [], "excluded refs")
     rules = _rules(policy["rules"])
     expected_pr = {
         "allowed_merge_methods": ["squash"],
@@ -209,15 +220,32 @@ def load_policy(path: Path = POLICY) -> dict:
         "required_review_thread_resolution": True,
     }
     _same(rules["pull_request"]["parameters"], expected_pr, "pull request rule")
-    status = rules["required_status_checks"]["parameters"]
+    status = _keys(
+        rules["required_status_checks"]["parameters"],
+        {
+            "strict_required_status_checks_policy",
+            "do_not_enforce_on_create",
+            "required_status_checks",
+        },
+        "required_status_checks",
+    )
     _same(status["strict_required_status_checks_policy"], True, "strict status checks")
     _same(status["do_not_enforce_on_create"], False, "status checks on create")
+    status_checks = status["required_status_checks"]
+    if type(status_checks) is not list:
+        raise PolicyError("invalid required status checks")
     _same(
-        {x["context"] for x in status["required_status_checks"]},
+        {
+            _keys(x, {"context", "integration_id"}, "required check")["context"]
+            for x in status_checks
+        },
         set(CHECKS),
         "required check names",
     )
-    if any(x["integration_id"] != APP_ID for x in status["required_status_checks"]):
+    if any(
+        _keys(x, {"context", "integration_id"}, "required check")["integration_id"] != APP_ID
+        for x in status_checks
+    ):
         raise PolicyError("wrong required check app")
     return policy
 
@@ -262,28 +290,30 @@ class GhApi:
             raise ApiStatus(status)
         return _json(body)
 
-    def get_pages(self, endpoint: str, *, item_key: str | None = None) -> list:
-        all_items = []
+    def get_pages(self, endpoint: str, *, item_key: str | None = None) -> list[object]:
+        all_items: list[object] = []
         for page in range(1, 21):
             sep = "&" if "?" in endpoint else "?"
             obj = self.get_json(f"{endpoint}{sep}{urlencode({'per_page': 100, 'page': page})}")
+            total_count: int | None = None
             if item_key is None:
                 items = obj
             else:
                 if type(obj) is not dict or type(obj.get("total_count")) is not int:
                     raise PolicyError("incomplete paginated response")
+                total_count = obj["total_count"]
                 items = obj.get(item_key)
             if type(items) is not list or len(items) > 100:
                 raise PolicyError("invalid paginated response")
             all_items.extend(items)
             if len(items) < 100:
-                if item_key is not None and len(all_items) != obj["total_count"]:
+                if total_count is not None and len(all_items) != total_count:
                     raise PolicyError("incomplete paginated response")
                 return all_items
         raise PolicyError("pagination limit exceeded")
 
 
-def collect_snapshot(api: GhApi, expected_sha: str) -> dict:
+def collect_snapshot(api: GetOnlyApi, expected_sha: str) -> dict[str, object]:
     if SHA.fullmatch(expected_sha) is None:
         raise PolicyError("expected master SHA must be 40 lowercase hex characters")
     repo = api.get_json(API)
@@ -298,7 +328,7 @@ def collect_snapshot(api: GhApi, expected_sha: str) -> dict:
     summaries = api.get_pages(f"{API}/rulesets?includes_parents=true")
     if any(type(x) is not dict or type(x.get("id")) is not int for x in summaries):
         raise PolicyError("invalid ruleset summary")
-    ids = [x["id"] for x in summaries]
+    ids = [x["id"] for x in summaries if type(x) is dict]
     if len(ids) != len(set(ids)):
         raise PolicyError("duplicate ruleset summary")
     details = [api.get_json(f"{API}/rulesets/{identifier}") for identifier in ids]
@@ -396,7 +426,7 @@ def _validate_repo(repo: object) -> None:
         raise PolicyMismatch("repository admin permission is unavailable")
 
 
-def _validate_applied(policy: dict, detail: object, effective: object) -> int:
+def _validate_applied(policy: dict[str, object], detail: object, effective: object) -> int:
     if type(detail) is not dict or type(detail.get("id")) is not int:
         raise PolicyError("invalid ruleset detail")
     required_keys = set(policy) | {"id", "source_type", "source"}
@@ -405,7 +435,7 @@ def _validate_applied(policy: dict, detail: object, effective: object) -> int:
         raise PolicyMismatch("ruleset detail fields differ")
     if "current_user_can_bypass" in detail and detail["current_user_can_bypass"] != "never":
         raise PolicyMismatch("ruleset current user bypass differs")
-    identifier = detail["id"]
+    identifier = int(detail["id"])
     expected_top = {
         key: policy[key] for key in ("name", "target", "enforcement", "bypass_actors", "conditions")
     }
@@ -435,8 +465,12 @@ def _validate_applied(policy: dict, detail: object, effective: object) -> int:
 
 
 def validate_snapshot(
-    policy: dict, snapshot: dict, mode: str, *, now: datetime | None = None
-) -> dict:
+    policy: dict[str, object],
+    snapshot: dict[str, object],
+    mode: str,
+    *,
+    now: datetime | None = None,
+) -> dict[str, str | int | None]:
     if type(snapshot) is not dict:
         raise PolicyError("invalid snapshot")
     expected_sha = snapshot.get("expected_master_sha")
@@ -498,7 +532,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         policy = load_policy()
         digest = hashlib.sha256(POLICY.read_bytes()).hexdigest()
-        result = {
+        result: dict[str, object] = {
             "schema_version": 1,
             "mode": args.command,
             "repository": REPOSITORY,

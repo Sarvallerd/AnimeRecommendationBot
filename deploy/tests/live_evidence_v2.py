@@ -8,26 +8,106 @@ import contextlib
 import importlib.util
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
+from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
+from types import ModuleType
+from typing import TYPE_CHECKING, cast
+
+if TYPE_CHECKING:
+    from deploy.tests.acceptance_types import (
+        AcceptanceProfile,
+        BaselineCaptureView,
+        BundleSummaryView,
+        CatalogEntryView,
+        CurrentAcceptanceProfile,
+        JsonObject,
+        LiveCaptureRecord,
+        LiveGuardRecord,
+        LiveVerifierModule,
+        PollerInventoryRecord,
+        PostgresIdentityRecord,
+        ProfileExpectations,
+        SettingsGuardRecord,
+        UiProbesView,
+    )
+    from deploy.tests.live_verifier_v2 import (
+        BundlePlan,
+        CaseInputs,
+        CaseReceipt,
+        LiveContext,
+        LivePlan,
+        OperationInputs,
+        OperationReceipt,
+    )
 
 
-def _load(name, filename):
+def _load(name: str, filename: str) -> ModuleType:
     spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name(filename))
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot load acceptance module {filename}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
 
-v = _load("arb034_verifier", "live_verifier_v2.py")
-e, p, r = v.e, v.p, v.r
+v_module = _load("arb034_verifier", "live_verifier_v2.py")
+if any(getattr(v_module, name, None) is None for name in ("e", "p", "r")) or any(
+    not callable(getattr(v_module, name, None))
+    for name in (
+        "digest",
+        "validate_plan",
+        "_valid_capture",
+        "verify_operation",
+        "bind_context",
+        "verify_case",
+        "summarize_evidence",
+    )
+):
+    raise ImportError("Live verifier dependencies unavailable")
+v = cast("LiveVerifierModule", v_module)
+loaded_e = v.e
+if (
+    not isinstance(getattr(loaded_e, "PROJECT", None), re.Pattern)
+    or not isinstance(getattr(loaded_e, "SQL", None), Path)
+    or not isinstance(getattr(loaded_e, "ROOT", None), Path)
+    or not isinstance(getattr(loaded_e, "EvidenceError", None), type)
+    or not issubclass(loaded_e.EvidenceError, Exception)
+    or any(
+        not callable(getattr(loaded_e, name, None))
+        for name in (
+            "require",
+            "sha",
+            "canonical",
+            "read_settings",
+            "container",
+            "snapshot",
+            "read_json",
+            "write_new",
+            "private_parent",
+            "compose",
+            "docker",
+        )
+    )
+):
+    raise ImportError("Live evidence dependency unavailable")
+e = loaded_e
+p, r = v.p, v.r
 need, Error = e.require, e.EvidenceError
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def command(argv, *, timeout=90, input_text=None, both=False, env=None):
+def command(
+    argv: Sequence[str],
+    *,
+    timeout: int | float = 90,
+    input_text: str | None = None,
+    both: bool = False,
+    env: Mapping[str, str] | None = None,
+) -> str:
     try:
         result = subprocess.run(
             argv,
@@ -45,7 +125,7 @@ def command(argv, *, timeout=90, input_text=None, both=False, env=None):
     return result.stdout + result.stderr if both else result.stdout
 
 
-def _compose(project, settings, *args, input_text=None):
+def _compose(project: str, settings: Path, *args: str, input_text: str | None = None) -> str:
     need(e.PROJECT.fullmatch(project) is not None, "INVALID_PROJECT")
     clean = {
         key: value for key, value in os.environ.items() if not key.startswith(("ARB_", "COMPOSE_"))
@@ -67,12 +147,12 @@ def _compose(project, settings, *args, input_text=None):
     )
 
 
-def _docker(*args):
+def _docker(*args: str) -> str:
     return command(["docker", *args], both=bool(args and args[0] == "logs"))
 
 
 @contextlib.contextmanager
-def _bounded_transport():
+def _bounded_transport() -> Iterator[None]:
     old_compose, old_docker = e.compose, e.docker
     e.compose, e.docker = _compose, _docker
     try:
@@ -81,13 +161,13 @@ def _bounded_transport():
         e.compose, e.docker = old_compose, old_docker
 
 
-def _regular_sha(path):
+def _regular_sha(path: Path) -> str:
     need(path.is_absolute() and not path.is_symlink() and path.is_file(), "UNSAFE_PRIVATE_FILE")
     need(stat.S_IMODE(path.stat().st_mode) & 0o077 == 0, "UNSAFE_PRIVATE_FILE")
     return e.sha(path.read_bytes())
 
 
-def _settings_guard(path):
+def _settings_guard(path: Path) -> SettingsGuardRecord:
     values = e.read_settings(path)
     mode = path.stat()
     need(stat.S_IMODE(mode.st_mode) & 0o077 == 0, "UNSAFE_SETTINGS")
@@ -105,7 +185,7 @@ def _settings_guard(path):
     }
 
 
-def _token(path):
+def _token(path: Path) -> str:
     raw = path.read_text()
     matches = [
         line.split("=", 1)[1] for line in raw.splitlines() if line.startswith("TELOXIDE_TOKEN=")
@@ -114,7 +194,7 @@ def _token(path):
     return matches[0]
 
 
-def _inventory(token):
+def _inventory(token: str) -> PollerInventoryRecord:
     identifiers = _docker("ps", "-q").split()
     matches = []
     docker_pids = set()
@@ -162,32 +242,38 @@ def _inventory(token):
     }
 
 
-def _guards(project, settings):
+def _guards(project: str, settings: Path) -> LiveGuardRecord:
     values = e.read_settings(settings)
-    result = _settings_guard(settings)
-    result["daemon_id"] = _docker("info", "--format", "{{.ID}}").strip()
-    need(bool(result["daemon_id"]), "DAEMON_UNAVAILABLE")
-    result["pollers"] = _inventory(_token(Path(values["ARB_BOT_ENV"])))
+    settings_guard = _settings_guard(settings)
+    daemon_id = _docker("info", "--format", "{{.ID}}").strip()
+    need(bool(daemon_id), "DAEMON_UNAVAILABLE")
+    pollers = _inventory(_token(Path(values["ARB_BOT_ENV"])))
     pg = e.container(project, settings, "postgres")
-    result["postgres_identity"] = (
-        None
-        if pg is None
-        else {
+    postgres_identity: PostgresIdentityRecord | None
+    if pg is None:
+        postgres_identity = None
+    else:
+        postgres_identity = {
             "id": pg["id"],
             "image_id": pg["image_id"],
             "database_volume": pg["database_volume"],
             "started_at": pg["started_at"],
         }
-    )
-    result["postgres_health"] = (
+    postgres_health = (
         "absent"
         if pg is None
         else _docker("inspect", "--format", "{{.State.Health.Status}}", pg["id"]).strip()
     )
-    return result
+    return {
+        **settings_guard,
+        "daemon_id": daemon_id,
+        "pollers": pollers,
+        "postgres_identity": postgres_identity,
+        "postgres_health": postgres_health,
+    }
 
 
-def capture(project, settings, *, runtime_only=False):
+def capture(project: str, settings: Path, *, runtime_only: bool = False) -> LiveCaptureRecord:
     need(settings.is_absolute() and settings.is_file(), "UNSAFE_SETTINGS")
     with _bounded_transport():
         before = _guards(project, settings)
@@ -198,19 +284,19 @@ def capture(project, settings, *, runtime_only=False):
     return {"schema_version": 2, "kind": "arb-live-capture", "state": state, "guards": after}
 
 
-def _read(path):
+def _read(path: Path) -> JsonObject:
     need(path.is_absolute(), "ABSOLUTE_PATH_REQUIRED")
     e.private_parent(path)
     need(stat.S_IMODE(path.stat().st_mode) & 0o077 == 0, "UNSAFE_PRIVATE_FILE")
     return e.read_json(path)
 
 
-def _save(path, value):
+def _save(path: Path, value: object) -> str:
     need(path.is_absolute(), "ABSOLUTE_PATH_REQUIRED")
     return e.write_new(path, value)
 
 
-def _bytes_new(path, raw, original):
+def _bytes_new(path: Path, raw: bytes, original: Path) -> None:
     e.private_parent(path)
     need(not path.exists() and not path.is_symlink(), "OUTPUT_EXISTS")
     fd = os.open(
@@ -225,13 +311,108 @@ def _bytes_new(path, raw, original):
     os.chown(path, original.stat().st_uid, original.stat().st_gid)
 
 
-def _catalog(path):
-    return p.canonical((path / "catalog.json").read_bytes())["anime"]
+def _catalog(path: Path) -> dict[str, CatalogEntryView]:
+    raw = p.canonical((path / "catalog.json").read_bytes())
+    anime = raw.get("anime") if isinstance(raw, dict) else None
+    need(
+        isinstance(anime, dict)
+        and all(
+            isinstance(mal_id, str)
+            and isinstance(entry, dict)
+            and ("title" not in entry or isinstance(entry["title"], str))
+            and ("synopsis" not in entry or isinstance(entry["synopsis"], str))
+            and (
+                "aliases" not in entry
+                or isinstance(entry["aliases"], list)
+                and all(isinstance(alias, str) for alias in entry["aliases"])
+            )
+            for mal_id, entry in anime.items()
+        ),
+        "INVALID_UI_PROBES",
+    )
+    return cast("dict[str, CatalogEntryView]", anime)
+
+
+def _checked_baseline(raw: JsonObject) -> BaselineCaptureView:
+    state = raw.get("state")
+    if raw.get("kind") != "arb-live-capture" or not isinstance(state, dict):
+        raise Error("BASELINE_MISMATCH")
+    runtime = state.get("runtime")
+    guards = raw.get("guards")
+    if state.get("kind") != "full" or not isinstance(runtime, dict) or not isinstance(guards, dict):
+        raise Error("BASELINE_MISMATCH")
+    bot, postgres = runtime.get("bot"), runtime.get("postgres")
+    pollers = guards.get("pollers")
+    if (
+        not isinstance(state.get("source_commit"), str)
+        or not isinstance(bot, dict)
+        or not isinstance(postgres, dict)
+        or not isinstance(pollers, dict)
+    ):
+        raise Error("BASELINE_MISMATCH")
+    mount = bot.get("artifact_mount")
+    matching_ids = pollers.get("matching_container_ids_sha256")
+    if not (
+        isinstance(bot.get("id"), str)
+        and isinstance(bot.get("image_id"), str)
+        and (bot.get("bundle_id") is None or isinstance(bot.get("bundle_id"), str))
+        and (bot.get("bundle_count") is None or type(bot.get("bundle_count")) is int)
+        and (
+            mount is None
+            or isinstance(mount, dict)
+            and isinstance(mount.get("source"), str)
+            and type(mount.get("rw")) is bool
+        )
+        and isinstance(postgres.get("id"), str)
+        and isinstance(postgres.get("image_id"), str)
+        and type(postgres.get("running")) is bool
+        and (
+            postgres.get("database_volume") is None
+            or isinstance(postgres.get("database_volume"), str)
+        )
+        and isinstance(guards.get("daemon_id"), str)
+        and isinstance(guards.get("postgres_health"), str)
+        and type(pollers.get("matching")) is int
+        and type(pollers.get("scope_complete")) is bool
+        and isinstance(matching_ids, list)
+        and all(isinstance(value, str) for value in matching_ids)
+    ):
+        raise Error("BASELINE_MISMATCH")
+    return cast("BaselineCaptureView", raw)
+
+
+def _checked_ui_probes(raw: JsonObject) -> UiProbesView:
+    if not (
+        raw.get("schema_version") == 1
+        and raw.get("kind") == "arb-live-ui-probes"
+        and set(raw) == {"schema_version", "kind", "alias_search", "description_edit"}
+    ):
+        raise Error("INVALID_UI_PROBES")
+    alias, description = raw["alias_search"], raw["description_edit"]
+    if not (
+        isinstance(alias, dict)
+        and set(alias) == {"mal_id", "query"}
+        and type(alias.get("mal_id")) is int
+        and isinstance(alias.get("query"), str)
+        and isinstance(description, dict)
+        and set(description) == {"seed_mal_id", "query", "neighbor_mal_id"}
+        and type(description.get("seed_mal_id")) is int
+        and isinstance(description.get("query"), str)
+        and type(description.get("neighbor_mal_id")) is int
+    ):
+        raise Error("INVALID_UI_PROBES")
+    return cast("UiProbesView", raw)
 
 
 def make_plan(
-    project, settings, offline_evidence, baseline_path, target_bundle, ui_probes_path, output
-):
+    project: str,
+    settings: Path,
+    offline_evidence: Path,
+    baseline_path: Path,
+    target_bundle: Path,
+    ui_probes_path: Path,
+    output: Path,
+) -> LivePlan:
     need(
         all(
             path.is_absolute()
@@ -248,14 +429,11 @@ def make_plan(
     )
     report = r.verify_record(offline_evidence)
     report_sha = _regular_sha(offline_evidence / "preparation-report.json")
-    baseline = _read(baseline_path)
-    need(
-        baseline.get("kind") == "arb-live-capture" and baseline["state"]["kind"] == "full",
-        "BASELINE_MISMATCH",
-    )
+    baseline = _checked_baseline(_read(baseline_path))
     original_settings = e.read_settings(settings)
     original_path = Path(original_settings["ARB_BUNDLE_DIR"])
-    old_profile, target_profile = p.load_profile(p.LEGACY_RELEASE), p.load_profile(p.NEW_RELEASE)
+    old_profile = p.load_profile(p.LEGACY_RELEASE)
+    target_profile = cast("CurrentAcceptanceProfile", p.load_profile(p.NEW_RELEASE))
     old = p.check_profile_bundle(
         original_path, old_profile, expected_identity=report["original"]["bundle_identity"]
     )
@@ -269,13 +447,7 @@ def make_plan(
         and project != report["runtime"]["project"],
         "OFFLINE_MISMATCH",
     )
-    probes = _read(ui_probes_path)
-    need(
-        probes.get("schema_version") == 1
-        and probes.get("kind") == "arb-live-ui-probes"
-        and set(probes) == {"schema_version", "kind", "alias_search", "description_edit"},
-        "INVALID_UI_PROBES",
-    )
+    probes = _checked_ui_probes(_read(ui_probes_path))
     catalog = _catalog(target_bundle)
     alias = probes["alias_search"]
     description = probes["description_edit"]
@@ -289,11 +461,14 @@ def make_plan(
         and bool(catalog[str(description["neighbor_mal_id"])].get("synopsis")),
         "INVALID_UI_PROBES",
     )
+    verifier_path = getattr(v_module, "__file__", None)
+    if not isinstance(verifier_path, str):
+        raise Error("VERIFIER_CHANGED")
     source = {
         "commit": baseline["state"]["source_commit"],
         "compose_sha256": e.sha((ROOT / "compose.yaml").read_bytes()),
         "snapshot_sql_sha256": e.sha(e.SQL.read_bytes()),
-        "verifier_sha256": e.sha(Path(v.__file__).read_bytes()),
+        "verifier_sha256": e.sha(Path(verifier_path).read_bytes()),
         "helper_sha256": e.sha(Path(__file__).read_bytes()),
         "dispatch_sha256": e.sha(Path(__file__).with_name("acceptance-evidence.py").read_bytes()),
     }
@@ -314,12 +489,21 @@ def make_plan(
         and selected["artifact_mount"] == {"source": str(original_path), "rw": False},
         "BASELINE_MISMATCH",
     )
+    if selected is None or pg is None:
+        raise Error("BASELINE_MISMATCH")
     target_raw = r.change_selection(settings.read_bytes(), target_bundle)
+    need(isinstance(target_raw, bytes), "OFFLINE_MISMATCH")
     old_copy = output.parent / "original-settings.env"
     target_copy = output.parent / "target-settings.env"
     need(all(not path.exists() for path in (old_copy, target_copy, output)), "OUTPUT_EXISTS")
 
-    def bundle(role, summary, profile, path, image):
+    def bundle(
+        role: str,
+        summary: BundleSummaryView,
+        profile: AcceptanceProfile | CurrentAcceptanceProfile,
+        path: Path,
+        image: str,
+    ) -> BundlePlan:
         return {
             "role": role,
             "identity": summary.identity,
@@ -328,7 +512,7 @@ def make_plan(
             "file_sha256": summary.hashes,
             "count": summary.count,
             "histogram": summary.histogram,
-            "expectations": profile.expectations,
+            "expectations": cast("ProfileExpectations", profile.expectations),
             "image_id": image,
         }
 
@@ -377,22 +561,27 @@ def make_plan(
     }
     _bytes_new(old_copy, settings.read_bytes(), settings)
     _bytes_new(target_copy, target_raw, settings)
-    v.validate_plan(plan, verify_offline=False)
+    checked_plan = v.validate_plan(plan, verify_offline=False)
     _save(output, plan)
-    return plan
+    return checked_plan
 
 
-def _cache(directory, value):
-    path = directory / (v.digest(value) + ".json")
+def _cache(directory: Path, value: object) -> str:
+    digest = v.digest(value)
+    if not isinstance(digest, str):
+        raise Error("INPUT_HASH_MISMATCH")
+    path = directory / (digest + ".json")
     if path.exists():
         need(not path.is_symlink() and _read(path) == value, "INPUT_HASH_MISMATCH")
     else:
         _save(path, value)
-    return v.digest(value)
+    return digest
 
 
-def _cached(directory, digest):
-    need(type(digest) is str and e.HEX.fullmatch(digest) is not None, "INPUT_HASH_MISMATCH")
+def _cached(directory: Path, digest: object) -> JsonObject:
+    if type(digest) is not str:
+        raise Error("INPUT_HASH_MISMATCH")
+    need(e.HEX.fullmatch(digest) is not None, "INPUT_HASH_MISMATCH")
     item = _read(directory / (digest + ".json"))
     need(v.digest(item) == digest, "INPUT_HASH_MISMATCH")
     return item
@@ -410,11 +599,17 @@ FAILURES = (
 )
 
 
-def _code(exc):
-    return exc.code if hasattr(exc, "code") else "INVALID_EVIDENCE"
+def _code(exc: BaseException) -> str:
+    code = getattr(exc, "code", None)
+    return code if isinstance(code, str) else "INVALID_EVIDENCE"
 
 
-def _failed_operation(plan, operation, inputs, code):
+def _failed_operation(
+    plan: LivePlan,
+    operation: str,
+    inputs: Mapping[str, LiveCaptureRecord],
+    code: str,
+) -> OperationReceipt:
     source, target = ("target", "original") if operation == "rollback" else ("original", "target")
     return {
         "schema_version": 2,
@@ -431,7 +626,14 @@ def _failed_operation(plan, operation, inputs, code):
     }
 
 
-def _failed_case(plan, context, case, inputs, operation, code):
+def _failed_case(
+    plan: LivePlan,
+    context: LiveContext,
+    case: str,
+    inputs: Mapping[str, LiveCaptureRecord],
+    operation: OperationReceipt | None,
+    code: str,
+) -> CaseReceipt:
     role = "original" if case == "rollback" else "target"
     return {
         "schema_version": 2,
@@ -449,41 +651,55 @@ def _failed_case(plan, context, case, inputs, operation, code):
     }
 
 
-def _verify_saved_operation(plan, item, directory):
+def _verify_saved_operation(plan: LivePlan, item: JsonObject, directory: Path) -> OperationInputs:
     need(
         item.get("kind") == "arb-live-operation" and item.get("plan_sha256") == v.digest(plan),
         "INVALID_OPERATION",
     )
-    inputs = {key: _cached(directory, value) for key, value in item["input_sha256"].items()}
+    receipt = cast("OperationReceipt", item)
+    inputs = {
+        key: cast("LiveCaptureRecord", _cached(directory, value))
+        for key, value in receipt["input_sha256"].items()
+    }
     need(set(inputs) == {"before", "stopped", "prepared", "started"}, "INVALID_OPERATION")
     if item.get("status") == "FAIL":
         try:
-            v.verify_operation(plan, item["operation"], **inputs)
+            v.verify_operation(plan, receipt["operation"], **inputs)
         except FAILURES as exc:
             need(
-                item == _failed_operation(plan, item["operation"], inputs, _code(exc)),
+                item == _failed_operation(plan, receipt["operation"], inputs, _code(exc)),
                 "FORGED_OPERATION",
             )
         else:
             need(False, "FORGED_OPERATION")
     else:
-        need(v.verify_operation(plan, item["operation"], **inputs) == item, "FORGED_OPERATION")
-    return inputs
+        need(v.verify_operation(plan, receipt["operation"], **inputs) == item, "FORGED_OPERATION")
+    return cast("OperationInputs", inputs)
 
 
-def _verify_saved_case(plan, context, item, directory, operations):
+def _verify_saved_case(
+    plan: LivePlan,
+    context: LiveContext,
+    item: JsonObject,
+    directory: Path,
+    operations: Mapping[str, OperationReceipt],
+) -> CaseInputs:
     need(
         item.get("kind") == "arb-live-case" and item.get("context_sha256") == v.digest(context),
         "INVALID_CASE",
     )
-    inputs = {key: _cached(directory, value) for key, value in item["input_sha256"].items()}
-    op = operations.get("final-update" if item["case"] == "catalog-stale" else item["case"])
+    receipt = cast("CaseReceipt", item)
+    inputs = {
+        key: cast("LiveCaptureRecord", _cached(directory, value))
+        for key, value in receipt["input_sha256"].items()
+    }
+    op = operations.get("final-update" if receipt["case"] == "catalog-stale" else receipt["case"])
     if item.get("status") == "FAIL":
         try:
             v.verify_case(
                 plan,
                 context,
-                item["case"],
+                receipt["case"],
                 inputs["before"],
                 inputs["after"],
                 during=inputs.get("during"),
@@ -491,7 +707,7 @@ def _verify_saved_case(plan, context, item, directory, operations):
             )
         except FAILURES as exc:
             need(
-                item == _failed_case(plan, context, item["case"], inputs, op, _code(exc)),
+                item == _failed_case(plan, context, receipt["case"], inputs, op, _code(exc)),
                 "FORGED_CASE",
             )
         else:
@@ -500,17 +716,17 @@ def _verify_saved_case(plan, context, item, directory, operations):
         expected = v.verify_case(
             plan,
             context,
-            item["case"],
+            receipt["case"],
             inputs["before"],
             inputs["after"],
             during=inputs.get("during"),
             operation=op,
         )
         need(expected == item, "FORGED_CASE")
-    return inputs
+    return cast("CaseInputs", inputs)
 
 
-def parser():
+def parser() -> argparse.ArgumentParser:
     top = argparse.ArgumentParser(description=__doc__)
     commands = top.add_subparsers(dest="command", required=True)
     cap = commands.add_parser("capture")
@@ -550,7 +766,7 @@ def parser():
     return top
 
 
-def main(argv=None):
+def main(argv: Sequence[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
         if args.command == "capture":
@@ -573,8 +789,8 @@ def main(argv=None):
             )
         elif args.command == "verify-operation":
             plan = v.validate_plan(_read(args.plan), verify_offline=False)
-            values = {
-                key: _read(getattr(args, key))
+            values: dict[str, LiveCaptureRecord] = {
+                key: cast("LiveCaptureRecord", _read(getattr(args, key)))
                 for key in ("before", "stopped", "prepared", "started")
             }
             try:
@@ -583,107 +799,130 @@ def main(argv=None):
                 result = _failed_operation(plan, args.operation, values, _code(exc))
             directory = args.output.parent / "inputs"
             need(directory.is_dir(), "PRIVATE_DIRECTORY_REQUIRED")
-            for value in values.values():
-                _cache(directory, value)
+            for capture_value in values.values():
+                _cache(directory, capture_value)
             _save(args.output, result)
             if result["status"] == "FAIL":
                 print("FAIL " + result["reason"], file=sys.stderr)
                 return 1
         elif args.command == "bind-actor":
             plan = v.validate_plan(_read(args.plan), verify_offline=False)
-            operation = _read(args.initial_operation)
+            operation_raw = _read(args.initial_operation)
             directory = args.initial_operation.parent / "inputs"
-            inputs = _verify_saved_operation(plan, operation, directory)
-            after = _read(args.after)
-            context = v.bind_context(plan, operation, inputs["started"], after)
-            context["plan_path"] = str(args.plan)
+            bound_inputs = _verify_saved_operation(plan, operation_raw, directory)
+            initial_operation = cast("OperationReceipt", operation_raw)
+            after = cast("LiveCaptureRecord", _read(args.after))
+            bound_context = v.bind_context(plan, initial_operation, bound_inputs["started"], after)
+            cast("dict[str, object]", bound_context)["plan_path"] = str(args.plan)
             context_inputs = args.output.parent / "inputs"
             need(context_inputs.is_dir(), "PRIVATE_DIRECTORY_REQUIRED")
-            _cache(context_inputs, inputs["started"])
+            _cache(context_inputs, bound_inputs["started"])
             _cache(context_inputs, after)
-            _save(args.output, context)
+            _save(args.output, bound_context)
         elif args.command == "verify":
-            context = _read(args.context)
-            plan_path = Path(context["plan_path"])
+            context_raw = _read(args.context)
+            context_path = context_raw.get("plan_path")
+            if not isinstance(context_path, str):
+                raise TypeError("plan_path must be a string")
+            plan_path = Path(context_path)
             plan = v.validate_plan(_read(plan_path), verify_offline=False)
-            inputs = {"before": _read(args.before), "after": _read(args.after)}
+            case_context = cast("LiveContext", context_raw)
+            case_inputs_for_verify: dict[str, LiveCaptureRecord] = {
+                "before": cast("LiveCaptureRecord", _read(args.before)),
+                "after": cast("LiveCaptureRecord", _read(args.after)),
+            }
             if args.during:
-                inputs["during"] = _read(args.during)
-            operation = _read(args.operation) if args.operation else None
-            if operation:
-                _verify_saved_operation(plan, operation, args.operation.parent / "inputs")
+                case_inputs_for_verify["during"] = cast("LiveCaptureRecord", _read(args.during))
+            case_operation_raw = _read(args.operation) if args.operation else None
+            if case_operation_raw:
+                _verify_saved_operation(plan, case_operation_raw, args.operation.parent / "inputs")
+            case_operation = cast("OperationReceipt | None", case_operation_raw)
             try:
-                result = v.verify_case(
+                case_result = v.verify_case(
                     plan,
-                    context,
+                    case_context,
                     args.case,
-                    inputs["before"],
-                    inputs["after"],
-                    during=inputs.get("during"),
-                    operation=operation,
+                    case_inputs_for_verify["before"],
+                    case_inputs_for_verify["after"],
+                    during=case_inputs_for_verify.get("during"),
+                    operation=case_operation,
                 )
             except FAILURES as exc:
-                result = _failed_case(plan, context, args.case, inputs, operation, _code(exc))
+                case_result = _failed_case(
+                    plan,
+                    case_context,
+                    args.case,
+                    case_inputs_for_verify,
+                    case_operation,
+                    _code(exc),
+                )
             directory = args.output.parent / "inputs"
             need(directory.is_dir(), "PRIVATE_DIRECTORY_REQUIRED")
-            for value in inputs.values():
-                _cache(directory, value)
-            _save(args.output, result)
-            if result["status"] == "FAIL":
-                print("FAIL " + result["reason"], file=sys.stderr)
+            for capture_value in case_inputs_for_verify.values():
+                _cache(directory, capture_value)
+            _save(args.output, case_result)
+            if case_result["status"] == "FAIL":
+                print("FAIL " + case_result["reason"], file=sys.stderr)
                 return 1
         elif args.command == "summarize":
             plan = v.validate_plan(_read(args.plan))
-            context = _read(args.context) if args.context else None
+            summary_context_raw = _read(args.context) if args.context else None
+            summary_context = cast("LiveContext | None", summary_context_raw)
             observations = _read(args.observations) if args.observations else None
-            operations = {}
-            operation_inputs = {}
+            operations: dict[str, OperationReceipt] = {}
+            operation_inputs: dict[str, OperationInputs] = {}
             for path in args.operations_dir.glob("*.json"):
                 item = _read(path)
                 need(item["operation"] not in operations, "DUPLICATE_OPERATION")
-                operation_inputs[item["operation"]] = _verify_saved_operation(
+                operation_key = cast("str", item["operation"])
+                operation_inputs[operation_key] = _verify_saved_operation(
                     plan, item, args.operations_dir / "inputs"
                 )
-                operations[item["operation"]] = item
-            if context is not None:
+                operations[operation_key] = cast("OperationReceipt", item)
+            if summary_context is not None:
+                assert summary_context_raw is not None
                 need(
-                    context.get("plan_path") == str(args.plan)
-                    and context.get("initial_operation_sha256")
+                    summary_context_raw.get("plan_path") == str(args.plan)
+                    and summary_context.get("initial_operation_sha256")
                     == v.digest(operations["initial-update"]),
                     "INVALID_CONTEXT",
                 )
                 anchors = {
-                    key: _cached(args.context.parent / "inputs", value)
-                    for key, value in context["anchor_input_sha256"].items()
+                    key: cast("LiveCaptureRecord", _cached(args.context.parent / "inputs", value))
+                    for key, value in summary_context["anchor_input_sha256"].items()
                 }
                 rebound = v.bind_context(
                     plan, operations["initial-update"], anchors["before"], anchors["after"]
                 )
-                rebound["plan_path"] = str(args.plan)
-                need(rebound == context, "FORGED_CONTEXT")
-            results = {}
-            case_inputs = {}
+                cast("dict[str, object]", rebound)["plan_path"] = str(args.plan)
+                need(rebound == summary_context, "FORGED_CONTEXT")
+            results: dict[str, CaseReceipt] = {}
+            case_inputs: dict[str, CaseInputs] = {}
             for path in args.results_dir.glob("*.json"):
                 item = _read(path)
-                need(item["case"] not in results and context is not None, "DUPLICATE_CASE")
-                case_inputs[item["case"]] = _verify_saved_case(
-                    plan, context, item, args.results_dir / "inputs", operations
+                need(item["case"] not in results and summary_context is not None, "DUPLICATE_CASE")
+                if summary_context is None:
+                    raise Error("DUPLICATE_CASE")
+                case_key = cast("str", item["case"])
+                case_inputs[case_key] = _verify_saved_case(
+                    plan, summary_context, item, args.results_dir / "inputs", operations
                 )
-                results[item["case"]] = item
-            final = _read(args.final)
-            value = v.summarize_evidence(
+                results[case_key] = cast("CaseReceipt", item)
+            final = cast("LiveCaptureRecord", _read(args.final))
+            summary_value = v.summarize_evidence(
                 plan,
                 operations,
                 results,
                 final,
-                context,
+                summary_context,
                 observations,
                 operation_inputs,
                 case_inputs,
             )
-            _save(args.output, value)
+            _save(args.output, summary_value)
+            summary_fields = cast("Mapping[str, object]", summary_value)
             public = {
-                key: value[key]
+                key: summary_fields[key]
                 for key in (
                     "schema_version",
                     "kind",
@@ -699,8 +938,8 @@ def main(argv=None):
                 )
             }
             _save(args.public_output, public)
-            print(value["live_acceptance"])
-            return 0 if value["live_acceptance"] == "PASS" else 1
+            print(summary_value["live_acceptance"])
+            return 0 if summary_value["live_acceptance"] == "PASS" else 1
         print("PASS")
         return 0
     except (

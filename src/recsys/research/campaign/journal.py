@@ -9,6 +9,9 @@ from __future__ import annotations
 import json
 import os
 import stat
+from datetime import datetime
+from pathlib import Path
+from typing import NotRequired, TypedDict, cast
 
 from recsys.research.campaign.common import (
     AUX_PHASE,
@@ -24,10 +27,35 @@ from recsys.research.campaign.common import (
 )
 
 
+class CampaignEvent(TypedDict):
+    seq: int
+    event: str
+    utc: str
+    variant: NotRequired[str]
+    phase: NotRequired[str]
+    attempt: NotRequired[int]
+    charged_seconds: NotRequired[float]
+    status: NotRequired[str]
+    generation: NotRequired[str]
+    output_identity: NotRequired[str | None]
+    resources: NotRequired[dict[str, object] | None]
+    code: NotRequired[str | None]
+
+
+type PhaseKey = tuple[str, str]
+type SuccessState = tuple[
+    dict[PhaseKey, CampaignEvent],
+    dict[PhaseKey, int],
+    dict[PhaseKey, float],
+    dict[PhaseKey, CampaignEvent],
+    set[PhaseKey],
+]
+
+
 class _Journal:
-    def __init__(self, path):
+    def __init__(self, path: Path) -> None:
         self.path = path
-        self.events = []
+        self.events: list[CampaignEvent] = []
         if path.exists():
             if path.is_symlink():
                 _fail()
@@ -48,10 +76,13 @@ class _Journal:
                     _fail()
                 if raw != _canonical(event) or event.get("seq") != len(self.events) + 1:
                     _fail()
-                self.events.append(event)
+                self.events.append(cast("CampaignEvent", event))
 
-    def append(self, name, **fields):
-        event = {"seq": len(self.events) + 1, "event": name, "utc": _iso(_now()), **fields}
+    def append(self, name: str, **fields: object) -> CampaignEvent:
+        event = cast(
+            "CampaignEvent",
+            {"seq": len(self.events) + 1, "event": name, "utc": _iso(_now()), **fields},
+        )
         if self.events and _parse_iso(event["utc"]) < _parse_iso(self.events[-1]["utc"]):
             _fail("research_campaign_clock_invalid")
         raw = _canonical(event)
@@ -70,14 +101,14 @@ class _Journal:
         return event
 
 
-def _successes(events):
+def _successes(events: list[CampaignEvent]) -> SuccessState:
     """Restore durable successes, charges, attempts and unresolved starts."""
-    successes = {}
-    attempts = {}
-    charged = {}
-    starts = {}
-    failed = set()
-    latest_utc = None
+    successes: dict[PhaseKey, CampaignEvent] = {}
+    attempts: dict[PhaseKey, int] = {}
+    charged: dict[PhaseKey, float] = {}
+    starts: dict[PhaseKey, CampaignEvent] = {}
+    failed: set[PhaseKey] = set()
+    latest_utc: datetime | None = None
     for event in events:
         timestamp = _parse_iso(event["utc"])
         if latest_utc is not None and timestamp < latest_utc:

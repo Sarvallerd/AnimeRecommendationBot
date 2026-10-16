@@ -2,12 +2,17 @@
 
 import heapq
 from collections import Counter
+from collections.abc import Iterable, Iterator
 from pathlib import Path
+from typing import TypedDict, cast
 
-from recsys.contracts.bundle import canonical_bytes, check_catalog
+from recsys.contracts.bundle import Catalog, canonical_bytes, check_catalog
 from recsys.data.dataset import HEADER, DatasetSpec, validate_dataset
-from recsys.release.lock import release_info
+from recsys.data.metadata import MetadataFact, MetadataFacts
+from recsys.release.lock import ReleaseLock, release_info
 from recsys.research.artifacts import (
+    FileDescriptor,
+    StreamDescriptor,
     StreamWriter,
     _stream_lines,
     check_identity,
@@ -25,6 +30,7 @@ from recsys.research.artifacts import (
     write_json,
 )
 from recsys.research.protocol import (
+    ProtocolSpec,
     exact,
     fail,
     load_protocol,
@@ -34,6 +40,62 @@ from recsys.research.protocol import (
     sha,
     split_user,
 )
+
+type InteractionRow = tuple[str, int, int, str, bytes]
+type Profile = list[InteractionRow]
+type HeapEntry = tuple[int, int, str]
+type Heaps = dict[tuple[str, str], list[HeapEntry]]
+type UserPayload = tuple[
+    str, tuple[str, ...], tuple[str, ...], tuple[str, ...], tuple[str, ...], tuple[str, ...]
+]
+
+
+class PreparationManifest(TypedDict):
+    schema_version: int
+    kind: str
+    protocol_identity: str
+    release_lock_sha256: str
+    release_id: str
+    dataset_identity: str
+    catalog_release_identity: str
+    catalog_sha256: str
+    producer: dict[str, object]
+    files: dict[str, FileDescriptor]
+    counts: dict[str, int]
+
+
+class PreparationLabel(TypedDict):
+    cohort: str
+    user_key: str
+    split: str
+    positive_ids: list[int]
+    target_ids: list[int]
+    history_ids: list[int]
+    completed_ids: list[int]
+    history_count: int
+    query_id: str
+    order: str
+    n: int
+    seed_mal_ids: list[int]
+    reserved_seed_ids: list[int]
+    recent_2024_seed_count: int
+    positive_ratings: list[list[int]]
+
+
+class PreparationTrainItem(TypedDict):
+    completed_users: int
+    positive_users: int
+    rating_sum: int
+    rating_count: int
+    band: str
+
+
+class PreparationTrainStats(TypedDict):
+    schema_version: int
+    train_users: int
+    train_completed_rows: int
+    items: dict[str, PreparationTrainItem]
+
 
 FILES = (
     "protocol.json",
@@ -48,51 +110,68 @@ FILES = (
 )
 
 
-def _release(release_dir, dataset_dir, *, _lock_bytes=None):
+def _release(
+    release_dir: str | Path,
+    dataset_dir: str | Path,
+    *,
+    _lock_bytes: bytes | None = None,
+) -> tuple[ReleaseLock, Catalog, dict[str, object], bytes]:
     lock = release_info(_lock_bytes=_lock_bytes)
     release_dir = safe_path(release_dir, directory=True)
     if {path.name for path in release_dir.iterdir()} != {"catalog.json", "release-manifest.json"}:
         fail()
-    manifest, raw = read_json(release_dir / "release-manifest.json")
-    catalog, catalog_raw = read_json(release_dir / "catalog.json")
-    base_manifest, base_raw = read_json(Path(dataset_dir) / "dataset-manifest.json")
+    manifest_value, raw = read_json(release_dir / "release-manifest.json")
+    catalog_value, catalog_raw = read_json(release_dir / "catalog.json")
+    _, base_raw = read_json(Path(dataset_dir) / "dataset-manifest.json")
+    if not isinstance(manifest_value, dict):
+        fail("research_release_mismatch")
+    manifest_inputs = manifest_value.get("inputs")
+    if not isinstance(manifest_inputs, dict):
+        fail("research_release_mismatch")
+    base_input = manifest_inputs.get("base")
+    alias_input = manifest_inputs.get("aliases")
+    if not isinstance(base_input, dict) or not isinstance(alias_input, dict):
+        fail("research_release_mismatch")
+    counts = manifest_value.get("counts")
+    if not isinstance(counts, dict):
+        fail("research_release_mismatch")
+    manifest = cast("dict[str, object]", manifest_value)
     locked = lock["inputs"]
     if (
         "sha256:" + sha(raw) != locked["catalog_release"]["identity"]
         or "sha256:" + sha(base_raw) != locked["base"]["identity"]
         or manifest.get("kind") != "arb-catalog-release"
         or manifest.get("policy") != "ordered-alias-overlay-v1"
-        or manifest.get("inputs", {}).get("base", {}).get("identity") != locked["base"]["identity"]
-        or manifest.get("inputs", {}).get("aliases", {}).get("identity")
-        != locked["aliases"]["identity"]
+        or base_input.get("identity") != locked["base"]["identity"]
+        or alias_input.get("identity") != locked["aliases"]["identity"]
         or manifest.get("files") != {"catalog.json": descriptor(catalog_raw)}
         or sha(catalog_raw) != locked["catalog_release"]["catalog_sha256"]
-        or manifest.get("counts", {}).get("catalog_count")
-        != locked["catalog_release"]["catalog_count"]
+        or counts.get("catalog_count") != locked["catalog_release"]["catalog_count"]
     ):
         fail("research_release_mismatch")
-    keys = check_catalog(catalog)
+    keys = check_catalog(catalog_value)
     if len(keys) != locked["catalog_release"]["catalog_count"]:
         fail("research_release_mismatch")
-    return lock, catalog, manifest, raw
+    return lock, cast("Catalog", catalog_value), manifest, raw
 
 
-def _rows(dataset_dir):
+def _rows(dataset_dir: str | Path) -> Iterator[InteractionRow]:
     path = safe_path(Path(dataset_dir) / "interactions.tsv.gz", directory=False)
     lines = iter(_stream_lines(path))
     if next(lines, None) != HEADER:
         fail()
-    last_key, last_id = None, 0
+    last_key: str | None = None
+    last_id = 0
     for raw in lines:
         fields = raw.rstrip(b"\n").split(b"\t")
         if len(fields) != 4:
             fail()
         try:
-            user, item, rating, status = fields
-            user = user.decode("ascii")
-            item = int(item)
-            rating = int(rating)
-            status = status.decode("ascii")
+            user_raw, item_raw, rating_raw, status_raw = fields
+            user = user_raw.decode("ascii")
+            item = int(item_raw)
+            rating = int(rating_raw)
+            status = status_raw.decode("ascii")
         except (ValueError, UnicodeError):
             fail()
         if user != last_key:
@@ -105,9 +184,9 @@ def _rows(dataset_dir):
         yield user, item, rating, status, raw
 
 
-def _profiles(rows):
-    user = None
-    current = []
+def _profiles(rows: Iterable[InteractionRow]) -> Iterator[tuple[str, Profile]]:
+    user: str | None = None
+    current: Profile = []
     for row in rows:
         if row[0] != user:
             if user is not None:
@@ -118,7 +197,7 @@ def _profiles(rows):
         yield user, current
 
 
-def _cohort(positives, protocol):
+def _cohort(positives: set[int] | dict[int, int] | list[int], protocol: ProtocolSpec) -> str | None:
     count = len(positives)
     if count >= protocol["cohorts"]["main_min_positives"]:
         return "main"
@@ -131,7 +210,7 @@ def _cohort(positives, protocol):
     return None
 
 
-def _select(heaps, split, cohort, user, protocol):
+def _select(heaps: Heaps, split: str, cohort: str, user: str, protocol: ProtocolSpec) -> None:
     limit = protocol["query"][
         "sample_main_per_split" if cohort == "main" else "sample_short_per_split"
     ]
@@ -146,7 +225,7 @@ def _select(heaps, split, cohort, user, protocol):
         heapq.heapreplace(heap, entry)
 
 
-def _query_id(user, cohort, order, n):
+def _query_id(user: str, cohort: str, order: str, n: int) -> str:
     raw = (
         b"arb-ml-query-v1\0"
         + user.encode()
@@ -160,7 +239,17 @@ def _query_id(user, cohort, order, n):
     return "q1_" + sha(raw)
 
 
-def _emit_user(user, profile, split, cohort, queries, labels, protocol, catalog_ids, facts):
+def _emit_user(
+    user: str,
+    profile: Profile,
+    split: str,
+    cohort: str,
+    queries: StreamWriter | None,
+    labels: StreamWriter,
+    protocol: ProtocolSpec,
+    catalog_ids: set[int],
+    facts: dict[str, MetadataFact],
+) -> None:
     positives = {
         item: rating
         for _, item, rating, status, _ in profile
@@ -193,7 +282,7 @@ def _emit_user(user, profile, split, cohort, queries, labels, protocol, catalog_
         "completed_ids": completed,
         "history_count": len(history),
     }
-    plans = [("popularity", [])]
+    plans: list[tuple[str, list[int]]] = [("popularity", [])]
     for name, seed in zip(protocol["query"]["orders"][:3], protocol["query"]["order_seeds"]):
         plans.append(
             (name, sorted(pool, key=lambda item: (order_hash(seed, user, item), item))[:nmax])
@@ -226,8 +315,8 @@ def _emit_user(user, profile, split, cohort, queries, labels, protocol, catalog_
             }
             recent = sum(
                 facts[str(item)]["airing_status"] in ("finished_airing", "currently_airing")
-                and facts[str(item)]["first_release_date"] is not None
-                and "2024-01-01" <= facts[str(item)]["first_release_date"] <= "2025-10-31"
+                and (first_date := facts[str(item)]["first_release_date"]) is not None
+                and "2024-01-01" <= first_date <= "2025-10-31"
                 for item in seeds
             )
             label = {
@@ -245,15 +334,15 @@ def _emit_user(user, profile, split, cohort, queries, labels, protocol, catalog_
 
 
 def prepare_research(
-    dataset_dir,
-    release_dir,
-    output_dir,
+    dataset_dir: str | Path,
+    release_dir: str | Path,
+    output_dir: str | Path,
     *,
-    code_revision,
+    code_revision: str,
     _dataset_spec: DatasetSpec | None = None,
-    _lock_bytes=None,
-    _protocol_bytes=None,
-):
+    _lock_bytes: bytes | None = None,
+    _protocol_bytes: bytes | None = None,
+) -> Path:
     """Validate source, then two streaming passes; publish only complete immutable output."""
     dataset_dir, release_dir, output_dir = map(Path, (dataset_dir, release_dir, output_dir))
     separate(dataset_dir, release_dir, output_dir)
@@ -265,13 +354,14 @@ def prepare_research(
     catalog_ids = {int(item) for item in catalog["anime"]}
     facts_doc, _ = read_json(dataset_dir / "item-facts.json")
     if (
-        set(facts_doc) != {"schema_version", "anime"}
+        not isinstance(facts_doc, dict)
+        or set(facts_doc) != {"schema_version", "anime"}
         or type(facts_doc["schema_version"]) is not int
         or facts_doc["schema_version"] != 1
         or set(facts_doc["anime"]) != set(catalog["anime"])
     ):
         fail()
-    facts = facts_doc["anime"]
+    facts = cast("MetadataFacts", facts_doc)["anime"]
     model_catalog = {
         **catalog,
         "anime": {key: {**item, "score": None} for key, item in catalog["anime"].items()},
@@ -280,24 +370,25 @@ def prepare_research(
     try:
         for sub in ("fit", "development", "evaluator"):
             (stage / sub).mkdir(mode=0o700)
-        files = {}
+        files: dict[str, FileDescriptor] = {}
         files["protocol.json"] = write_json(stage / "protocol.json", protocol)
         files["model-catalog.json"] = write_json(stage / "model-catalog.json", model_catalog)
         train = StreamWriter(stage / "fit/train-interactions.tsv.gz")
         splits = StreamWriter(stage / "evaluator/splits.tsv.gz")
         train.write(HEADER)
         splits.write(b"dataset_user_key\tsplit\tcohort\n")
-        stats = {
+        stats: dict[str, PreparationTrainItem] = {
             str(item): {
                 "completed_users": 0,
                 "positive_users": 0,
                 "rating_sum": 0,
                 "rating_count": 0,
+                "band": "cold",
             }
             for item in sorted(catalog_ids)
         }
-        counters = Counter()
-        heaps = {
+        counters: Counter[str] = Counter()
+        heaps: Heaps = {
             (split, cohort): [] for split in ("validation", "test") for cohort in ("main", "short")
         }
         for user, profile in _profiles(_rows(dataset_dir)):
@@ -353,7 +444,7 @@ def prepare_research(
         qwriter = StreamWriter(stage / "development/queries.jsonl.gz")
         val = StreamWriter(stage / "evaluator/validation-labels.jsonl.gz")
         test = StreamWriter(stage / "evaluator/test-labels.jsonl.gz")
-        seen = set()
+        seen: set[str] = set()
         for user, profile in _profiles(_rows(dataset_dir)):
             if user not in selected:
                 continue
@@ -413,16 +504,17 @@ def prepare_research(
         raise
 
 
-def _id_list(values, ids, *, ordered=False):
+def _id_list(values: object, ids: set[str], *, ordered: bool = False) -> None:
     if type(values) is not list or any(
         type(item) is not int or str(item) not in ids for item in values
     ):
         fail()
+    values = cast("list[int]", values)
     if len(values) != len(set(values)) or (ordered and values != sorted(values)):
         fail()
 
 
-def _check_label(label, protocol, ids):
+def _check_label(label: object, protocol: ProtocolSpec, ids: set[str]) -> PreparationLabel:
     exact(
         label,
         {
@@ -443,6 +535,7 @@ def _check_label(label, protocol, ids):
             "positive_ratings",
         },
     )
+    label = cast("PreparationLabel", label)
     if label["split"] != split_user(label["user_key"], protocol) or label["split"] == "train":
         fail()
     for key in (
@@ -470,7 +563,7 @@ def _check_label(label, protocol, ids):
         )
     ):
         fail()
-    ratings = dict(rated)
+    ratings = {pair[0]: pair[1] for pair in rated}
     if (
         label["cohort"] != _cohort(positives, protocol)
         or not set(positives) <= set(label["completed_ids"]) <= set(label["history_ids"])
@@ -535,9 +628,15 @@ def _check_label(label, protocol, ids):
             )[:nmax]
             if label["reserved_seed_ids"] != expected:
                 fail()
+    return label
 
 
-def _verify_semantics(prepared_dir, manifest, protocol, ids):
+def _verify_semantics(
+    prepared_dir: Path,
+    manifest: PreparationManifest,
+    protocol: ProtocolSpec,
+    ids: set[str],
+) -> None:
     files = manifest["files"]
     expected_paths = {"prepare-manifest.json", *FILES}
     observed = list(prepared_dir.rglob("*"))
@@ -547,12 +646,15 @@ def _verify_semantics(prepared_dir, manifest, protocol, ids):
     actual_dirs = {str(path.relative_to(prepared_dir)) for path in observed if path.is_dir()}
     if actual_paths != expected_paths or actual_dirs != {"fit", "development", "evaluator"}:
         fail()
-    heaps = {
+    heaps: Heaps = {
         (split, cohort): [] for split in ("validation", "test") for cohort in ("main", "short")
     }
-    split_count = Counter()
+    split_count: Counter[str] = Counter()
     last_user = None
-    splits = stream_tsv(prepared_dir / "evaluator/splits.tsv.gz", files["evaluator/splits.tsv.gz"])
+    splits = stream_tsv(
+        prepared_dir / "evaluator/splits.tsv.gz",
+        cast("StreamDescriptor", files["evaluator/splits.tsv.gz"]),
+    )
     if next(splits, None) != b"dataset_user_key\tsplit\tcohort\n":
         fail()
     for line in splits:
@@ -574,16 +676,24 @@ def _verify_semantics(prepared_dir, manifest, protocol, ids):
             if split != "train":
                 _select(heaps, split, cohort, user, protocol)
     selected = {item[2] for heap in heaps.values() for item in heap}
-    stat_doc, _ = read_json(prepared_dir / "fit/train-stats.json", files["fit/train-stats.json"])
-    exact(stat_doc, {"schema_version", "train_users", "train_completed_rows", "items"})
+    stat_value, _ = read_json(prepared_dir / "fit/train-stats.json", files["fit/train-stats.json"])
+    exact(stat_value, {"schema_version", "train_users", "train_completed_rows", "items"})
+    stat_doc = cast("PreparationTrainStats", stat_value)
     if set(stat_doc["items"]) != ids:
         fail()
-    calculated = {
-        key: {"completed_users": 0, "positive_users": 0, "rating_sum": 0, "rating_count": 0}
+    calculated: dict[str, PreparationTrainItem] = {
+        key: {
+            "completed_users": 0,
+            "positive_users": 0,
+            "rating_sum": 0,
+            "rating_count": 0,
+            "band": "cold",
+        }
         for key in ids
     }
     train = stream_tsv(
-        prepared_dir / "fit/train-interactions.tsv.gz", files["fit/train-interactions.tsv.gz"]
+        prepared_dir / "fit/train-interactions.tsv.gz",
+        cast("StreamDescriptor", files["fit/train-interactions.tsv.gz"]),
     )
     if next(train, None) != HEADER:
         fail()
@@ -631,21 +741,22 @@ def _verify_semantics(prepared_dir, manifest, protocol, ids):
         or stat_doc["train_completed_rows"] != train_count
     ):
         fail()
-    seen = set()
-    user_queries = {}
-    user_payload = {}
+    seen: set[str] = set()
+    user_queries: dict[tuple[str, str], list[tuple[str, int]]] = {}
+    user_payload: dict[tuple[str, str], UserPayload] = {}
     val_queries = iter(
         stream_jsonl(
-            prepared_dir / "development/queries.jsonl.gz", files["development/queries.jsonl.gz"]
+            prepared_dir / "development/queries.jsonl.gz",
+            cast("StreamDescriptor", files["development/queries.jsonl.gz"]),
         )
     )
-    sampled = set()
+    sampled: set[str] = set()
     for split in ("validation", "test"):
-        for label in stream_jsonl(
+        for label_value in stream_jsonl(
             prepared_dir / f"evaluator/{split}-labels.jsonl.gz",
-            files[f"evaluator/{split}-labels.jsonl.gz"],
+            cast("StreamDescriptor", files[f"evaluator/{split}-labels.jsonl.gz"]),
         ):
-            _check_label(label, protocol, ids)
+            label = _check_label(label_value, protocol, ids)
             if (
                 label["split"] != split
                 or label["query_id"] in seen
@@ -654,22 +765,19 @@ def _verify_semantics(prepared_dir, manifest, protocol, ids):
                 fail()
             seen.add(label["query_id"])
             sampled.add(label["user_key"])
-            key = (split, label["user_key"])
-            payload = tuple(
-                label[name] if name == "cohort" else tuple(map(str, label[name]))
-                for name in (
-                    "cohort",
-                    "positive_ids",
-                    "positive_ratings",
-                    "target_ids",
-                    "history_ids",
-                    "completed_ids",
-                )
+            user_key = (split, label["user_key"])
+            payload: UserPayload = (
+                label["cohort"],
+                tuple(map(str, label["positive_ids"])),
+                tuple(map(str, label["positive_ratings"])),
+                tuple(map(str, label["target_ids"])),
+                tuple(map(str, label["history_ids"])),
+                tuple(map(str, label["completed_ids"])),
             )
-            if key in user_payload and user_payload[key] != payload:
+            if user_key in user_payload and user_payload[user_key] != payload:
                 fail()
-            user_payload[key] = payload
-            user_queries.setdefault(key, []).append((label["order"], label["n"]))
+            user_payload[user_key] = payload
+            user_queries.setdefault(user_key, []).append((label["order"], label["n"]))
             if split == "validation":
                 query = next(val_queries, None)
                 if query is None or query != {
@@ -681,9 +789,9 @@ def _verify_semantics(prepared_dir, manifest, protocol, ids):
                     "seed_mal_ids": label["seed_mal_ids"],
                 }:
                     fail()
-    for key, arms in user_queries.items():
-        count = len(user_payload[key][1])
-        targets = 5 if user_payload[key][0] == "main" else min(5, max(1, count // 3))
+    for user_key, arms in user_queries.items():
+        count = len(user_payload[user_key][1])
+        targets = 5 if user_payload[user_key][0] == "main" else min(5, max(1, count // 3))
         nmax = min(10, count - targets)
         expected_arms = [("popularity", 0)] + [
             (order, n) for order in protocol["query"]["orders"] for n in range(1, nmax + 1)
@@ -706,15 +814,17 @@ def _verify_semantics(prepared_dir, manifest, protocol, ids):
         fail()
 
 
-def validate_preparation(prepared_dir, *, expected_identity):
+def validate_preparation(
+    prepared_dir: str | Path, *, expected_identity: str
+) -> PreparationManifest:
     """Full self-contained validation, including both private label files."""
     prepared_dir = safe_path(prepared_dir, directory=True)
     check_identity(expected_identity)
-    manifest, raw = read_json(prepared_dir / "prepare-manifest.json")
+    manifest_value, raw = read_json(prepared_dir / "prepare-manifest.json")
     if "sha256:" + sha(raw) != expected_identity:
         fail()
     exact(
-        manifest,
+        manifest_value,
         {
             "schema_version",
             "kind",
@@ -729,25 +839,28 @@ def validate_preparation(prepared_dir, *, expected_identity):
             "counts",
         },
     )
-    validate_preparation_producer(manifest)
+    validate_preparation_producer(manifest_value)
+    manifest = cast("PreparationManifest", manifest_value)
     if manifest["kind"] != "arb-ml-preparation" or set(manifest["files"]) != set(FILES):
         fail()
     files = manifest["files"]
     for name, desc in files.items():
         path = prepared_dir / name
         if name.endswith(".jsonl.gz"):
-            for _ in stream_jsonl(path, desc):
+            for _ in stream_jsonl(path, cast("StreamDescriptor", desc)):
                 pass
         elif name.endswith(".tsv.gz"):
-            for _ in stream_tsv(path, desc):
+            for _ in stream_tsv(path, cast("StreamDescriptor", desc)):
                 pass
         else:
             read_json(path, desc)
-    protocol, _ = read_json(prepared_dir / "protocol.json", files["protocol.json"])
-    if "sha256:" + sha(canonical_bytes(protocol)) != manifest["protocol_identity"]:
+    protocol_value, _ = read_json(prepared_dir / "protocol.json", files["protocol.json"])
+    if "sha256:" + sha(canonical_bytes(protocol_value)) != manifest["protocol_identity"]:
         fail()
-    catalog, _ = read_json(prepared_dir / "model-catalog.json", files["model-catalog.json"])
-    ids = check_catalog(catalog)
+    protocol = cast("ProtocolSpec", protocol_value)
+    catalog_value, _ = read_json(prepared_dir / "model-catalog.json", files["model-catalog.json"])
+    ids = check_catalog(catalog_value)
+    catalog = cast("Catalog", catalog_value)
     if any(entry["score"] is not None for entry in catalog["anime"].values()):
         fail()
     fit, _ = read_json(prepared_dir / "fit/manifest.json", files["fit/manifest.json"])

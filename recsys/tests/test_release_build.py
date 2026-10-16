@@ -7,18 +7,31 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from typing import TypedDict
 from unittest.mock import patch
 
 from test_aliases import Fixture
 
 from recsys.contracts.bundle import canonical_bytes, check_bundle
 from recsys.contracts.provenance import source_fingerprints
+from recsys.data.aliases import AliasSpec
+from recsys.data.dataset import DatasetSpec
 from recsys.release.build import ReleaseBuildError, build_release, export_release_bundle
 from recsys.release.catalog import compose_release
 
 
+class _BuildOptions(TypedDict):
+    expected_release_identity: str
+    base_dir: Path
+    aliases_dir: Path
+    alias_data_dir: Path
+    _base_spec: DatasetSpec
+    _alias_spec: AliasSpec
+    _glove_registry_bytes: bytes
+
+
 class ReleaseBuildTests(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.fixture = Fixture(self.tmp.name)
@@ -69,7 +82,7 @@ class ReleaseBuildTests(unittest.TestCase):
         }
         self.registry = canonical_bytes(registry)
 
-    def common(self):
+    def common(self) -> _BuildOptions:
         return dict(
             expected_release_identity=self.identity,
             base_dir=self.fixture.base,
@@ -80,12 +93,12 @@ class ReleaseBuildTests(unittest.TestCase):
             _glove_registry_bytes=self.registry,
         )
 
-    def build(self, name, block=256):
+    def build(self, name: str, block: int = 256) -> Path:
         return build_release(
             self.release, self.glove, self.fixture.root / name, block_size=block, **self.common()
         )
 
-    def export(self, report, name="bundles"):
+    def export(self, report: Path, name: str = "bundles") -> Path:
         return export_release_bundle(
             self.release,
             report.parent / "neighbors.json",
@@ -94,7 +107,7 @@ class ReleaseBuildTests(unittest.TestCase):
             **self.common(),
         )
 
-    def test_build_export_determinism_and_contract(self):
+    def test_build_export_determinism_and_contract(self) -> None:
         a = self.build("a", 256)
         b = self.build("b", 1)
         report_a = json.loads(a.read_bytes())
@@ -143,27 +156,35 @@ class ReleaseBuildTests(unittest.TestCase):
         )
         self.assertEqual(self.export(a), first)
 
-    def test_corrupt_glove_and_strict_report(self):
+    def test_corrupt_glove_and_strict_report(self) -> None:
         with self.assertRaisesRegex(ReleaseBuildError, "release_build_integrity_error"):
             build_release(
                 self.release,
                 self.glove,
                 self.fixture.root / "bad",
                 _glove_registry_bytes=b"{}",
-                **{k: v for k, v in self.common().items() if k != "_glove_registry_bytes"},
+                expected_release_identity=self.identity,
+                base_dir=self.fixture.base,
+                aliases_dir=self.aliases,
+                alias_data_dir=self.fixture.cache,
+                _base_spec=self.fixture.base_fixture.spec,
+                _alias_spec=self.fixture.spec,
             )
         report = self.build("good")
         original = json.loads(report.read_bytes())
-        for change in (
-            lambda x: x["algorithm"]["parameters"].update(token_weight=True),
-            lambda x: x["execution"].update(requested_block_rows=1.0),
-            lambda x: x["coverage"].update(catalog_count=2.0),
-            lambda x: x["producer"]["code_files"].update(**{"build.py": "0" * 64}),
-            lambda x: x["sources"][0].update(version="forged"),
-            lambda x: x["inputs"]["catalog.json"].update(bytes=1),
+        for path, replacement in (
+            (("algorithm", "parameters", "token_weight"), True),
+            (("execution", "requested_block_rows"), 1.0),
+            (("coverage", "catalog_count"), 2.0),
+            (("producer", "code_files", "build.py"), "0" * 64),
+            (("sources", 0, "version"), "forged"),
+            (("inputs", "catalog.json", "bytes"), 1),
         ):
             changed = json.loads(canonical_bytes(original))
-            change(changed)
+            target = changed
+            for key in path[:-1]:
+                target = target[key]
+            target[path[-1]] = replacement
             report.write_bytes(canonical_bytes(changed))
             with self.assertRaisesRegex(ReleaseBuildError, "release_build_integrity_error"):
                 self.export(report)
@@ -171,7 +192,7 @@ class ReleaseBuildTests(unittest.TestCase):
         report.write_bytes(canonical_bytes(original))
         self.assertEqual(check_bundle(self.export(report))[1], 2)
 
-    def test_each_operation_uses_one_upstream_validation(self):
+    def test_each_operation_uses_one_upstream_validation(self) -> None:
         import recsys.release.catalog as release
 
         real = release.validate_aliases
@@ -182,7 +203,7 @@ class ReleaseBuildTests(unittest.TestCase):
             self.export(report)
             self.assertEqual(call.call_count, 1)
 
-    def test_export_store_separation_precedes_validation_and_writes(self):
+    def test_export_store_separation_precedes_validation_and_writes(self) -> None:
         report = self.build("build")
         neighbor_dir = self.fixture.root / "other-neighbors"
         neighbor_dir.mkdir()
@@ -257,7 +278,7 @@ class ReleaseBuildTests(unittest.TestCase):
             outside_neighbor = neighbor_dir / "neighbors.json"
             shutil.copyfile(report, outside_report)
             shutil.copyfile(neighbor_path, outside_neighbor)
-            before = {entry.name for entry in outside.iterdir()}
+            outside_before = {entry.name for entry in outside.iterdir()}
             with patch(
                 "recsys.release.build._verified",
                 side_effect=AssertionError("build-parent ancestor reached full validation"),
@@ -266,7 +287,7 @@ class ReleaseBuildTests(unittest.TestCase):
                     export_release_bundle(
                         self.release, outside_neighbor, outside_report, outside, **self.common()
                     )
-            self.assertEqual({entry.name for entry in outside.iterdir()}, before)
+            self.assertEqual({entry.name for entry in outside.iterdir()}, outside_before)
             self.assertFalse((outside / ".publication.lock").exists())
 
         separate = self.fixture.root / "separate-store"

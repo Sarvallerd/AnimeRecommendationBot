@@ -12,7 +12,7 @@ from recsys.research.protocol import ResearchError, load_protocol
 
 
 class CompareTests(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.fixture = ResearchFixture(self.tmp.name)
@@ -28,7 +28,7 @@ class CompareTests(unittest.TestCase):
             expected_prepared_identity=self.prepared_identity,
         )
 
-    def test_policy_equal_and_inconclusive(self):
+    def test_policy_equal_and_inconclusive(self) -> None:
         protocol = load_protocol()
         equal = _policy(np.ones((10, 10)), protocol)
         self.assertEqual((equal["status"], equal["chosen_n"]), ("selected", 1))
@@ -41,14 +41,19 @@ class CompareTests(unittest.TestCase):
         self.assertEqual(uncertain["status"], "inconclusive")
         self.assertIsNone(uncertain["chosen_n"])
 
-    def test_comparison_receipt_and_duplicate_rejection(self):
+    def test_comparison_receipt_and_duplicate_rejection(self) -> None:
         output = Path(self.tmp.name) / "comparison"
         compare_evaluations(
             [self.evaluation], output, expected_prepared_identity=self.prepared_identity
         )
         report, _ = read_json(output / "comparison.json")
+        assert isinstance(report, dict)
         self.assertEqual(report["users"], 8)
-        self.assertEqual(report["models"][0]["n_policy"]["chosen_n"], 1)
+        models = report["models"]
+        assert isinstance(models, list) and isinstance(models[0], dict)
+        policy = models[0]["n_policy"]
+        assert isinstance(policy, dict)
+        self.assertEqual(policy["chosen_n"], 1)
         with self.assertRaises(ResearchError):
             compare_evaluations(
                 [self.evaluation, self.evaluation],

@@ -4,23 +4,38 @@ import hashlib
 import json
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from test_aliases import Fixture, record
 
 from recsys.contracts.bundle import canonical_bytes
-from recsys.release.catalog import ReleaseError, compose_release, validate_release
+from recsys.data.aliases import AliasSpec, AliasSummary
+from recsys.data.dataset import DatasetSpec
+from recsys.release.catalog import (
+    ReleaseError,
+    ReleaseSummary,
+    _valid_descriptor,
+    compose_release,
+    validate_release,
+)
 
 
 class ReleaseTests(unittest.TestCase):
-    def setUp(self):
+    def test_descriptor_validator_returns_a_real_bool(self) -> None:
+        raw = b"catalog\n"
+        good = {"bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+        self.assertIs(_valid_descriptor(good, raw), True)
+        self.assertIs(_valid_descriptor({**good, "sha256": "x" * 64}, raw), False)
+
+    def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.fixture = Fixture(self.tmp.name)
         self.aliases = self.fixture.run()
         self.alias_identity = self.fixture.validate(self.aliases).identity
 
-    def compose(self, name="release"):
+    def compose(self, name: str = "release") -> Path:
         return compose_release(
             self.fixture.base,
             self.aliases,
@@ -32,7 +47,7 @@ class ReleaseTests(unittest.TestCase):
             _alias_spec=self.fixture.spec,
         )
 
-    def validate(self, directory, identity=None):
+    def validate(self, directory: Path, identity: str | None = None) -> ReleaseSummary:
         if identity is None:
             identity = (
                 "sha256:"
@@ -48,7 +63,7 @@ class ReleaseTests(unittest.TestCase):
             _alias_spec=self.fixture.spec,
         )
 
-    def test_composition_order_fields_determinism_and_manifest(self):
+    def test_composition_order_fields_determinism_and_manifest(self) -> None:
         first = self.compose("first").parent
         second = self.compose("second").parent
         self.assertEqual(
@@ -96,7 +111,7 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(first.stat().st_mode & 0o777, 0o700)
         self.assertTrue(all(p.stat().st_mode & 0o777 == 0o600 for p in first.iterdir()))
 
-    def test_wrong_identity_rehashed_overlay_and_typed_binding(self):
+    def test_wrong_identity_rehashed_overlay_and_typed_binding(self) -> None:
         output = self.compose().parent
         original = self.validate(output).identity
         with self.assertRaisesRegex(ReleaseError, "release_integrity_error"):
@@ -127,17 +142,20 @@ class ReleaseTests(unittest.TestCase):
             "sha256:" + hashlib.sha256(manifest_path.read_bytes()).hexdigest(), original
         )
 
-    def test_policy_schema_and_historical_producer_fingerprint(self):
+    def test_policy_schema_and_historical_producer_fingerprint(self) -> None:
         output = self.compose().parent
         manifest_path = output / "release-manifest.json"
         original = json.loads(manifest_path.read_bytes())
-        for mutate in (
-            lambda x: x.update(schema_version=True),
-            lambda x: x.update(policy="forged"),
-            lambda x: x["normalizer"].update(version=1),
+        for path, replacement in (
+            (("schema_version",), True),
+            (("policy",), "forged"),
+            (("normalizer", "version"), 1),
         ):
             changed = json.loads(canonical_bytes(original))
-            mutate(changed)
+            target = changed
+            for key in path[:-1]:
+                target = target[key]
+            target[path[-1]] = replacement
             manifest_path.write_bytes(canonical_bytes(changed))
             with self.assertRaisesRegex(ReleaseError, "release_integrity_error"):
                 self.validate(output)
@@ -147,15 +165,32 @@ class ReleaseTests(unittest.TestCase):
         manifest_path.write_bytes(canonical_bytes(historical))
         self.assertEqual(self.validate(output).catalog_count, 2)
 
-    def test_one_upstream_call_and_consumed_mutation(self):
+    def test_one_upstream_call_and_consumed_mutation(self) -> None:
         import recsys.release.catalog as release
 
         real = release.validate_aliases
-        calls = []
+        calls: list[int] = []
 
-        def validating(*args, **kwargs):
+        def validating(
+            aliases_dir: Path,
+            *,
+            data_dir: Path,
+            base_dir: Path,
+            expected_base_identity: str,
+            expected_identity: str | None = None,
+            _spec: AliasSpec | None = None,
+            _base_spec: DatasetSpec | None = None,
+        ) -> AliasSummary:
             calls.append(1)
-            result = real(*args, **kwargs)
+            result = real(
+                aliases_dir,
+                data_dir=data_dir,
+                base_dir=base_dir,
+                expected_base_identity=expected_base_identity,
+                expected_identity=expected_identity,
+                _spec=_spec,
+                _base_spec=_base_spec,
+            )
             if len(calls) == 1:
                 (self.fixture.base / "catalog.json").write_bytes(b"{}\n")
             return result
@@ -166,7 +201,7 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertFalse((self.fixture.root / "release").exists())
 
-    def test_publication_safety(self):
+    def test_publication_safety(self) -> None:
         self.compose()
         with self.assertRaisesRegex(ReleaseError, "release_integrity_error"):
             self.compose()
@@ -184,7 +219,7 @@ class ReleaseTests(unittest.TestCase):
                 _alias_spec=self.fixture.spec,
             )
 
-    def test_unenriched_item_keeps_exact_base_entry(self):
+    def test_unenriched_item_keeps_exact_base_entry(self) -> None:
         self.fixture.update([record("1", "Alternate One", "One")])
         aliases = self.fixture.run("one-alias")
         identity = self.fixture.validate(aliases).identity

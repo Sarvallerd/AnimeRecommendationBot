@@ -13,6 +13,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
+from typing import NotRequired, TypedDict, cast
 
 from recsys.research.campaign.artifacts import _phase_directory, _phase_path, _verify_phase
 from recsys.research.campaign.common import (
@@ -34,8 +35,9 @@ from recsys.research.campaign.common import (
     _sync_dir,
     _touch_lock,
 )
-from recsys.research.campaign.journal import _Journal, _successes
+from recsys.research.campaign.journal import CampaignEvent, PhaseKey, _Journal, _successes
 from recsys.research.campaign.plan import (
+    CampaignPlan,
     _component_phase,
     _expected_nodes,
     _plan,
@@ -43,9 +45,21 @@ from recsys.research.campaign.plan import (
 )
 from recsys.research.campaign.report import _public_projection
 from recsys.research.campaign.worker import _worker_request
+from recsys.research.resources import JobHandle, ProcessResult
 
 
-def _worker_env():
+class ActivePhase(TypedDict):
+    variant: str
+    phase: str
+    lane: str
+    attempt: int
+    generation: str
+    observed_elapsed: float
+    warned: bool
+    result: NotRequired[ProcessResult]
+
+
+def _worker_env() -> dict[str, str]:
     environment = dict(os.environ)
     for name in (
         "OMP_NUM_THREADS",
@@ -58,7 +72,7 @@ def _worker_env():
     return environment
 
 
-def _process_fields(result):
+def _process_fields(result: ProcessResult) -> dict[str, object]:
     return {
         "outcome": result.outcome,
         "returncode": result.returncode,
@@ -72,7 +86,15 @@ def _process_fields(result):
     }
 
 
-def _next_ready(successes, failed, active_keys, plan, cpu_used, gpu_used, cpu_workers):
+def _next_ready(
+    successes: dict[PhaseKey, CampaignEvent],
+    failed: set[PhaseKey],
+    active_keys: set[PhaseKey],
+    plan: CampaignPlan,
+    cpu_used: int,
+    gpu_used: int,
+    cpu_workers: int,
+) -> tuple[str, str, str] | None:
     for variant in VARIANTS:
         for phase in (*PHASES, AUX_PHASE):
             key = (variant, phase)
@@ -107,7 +129,7 @@ def _next_ready(successes, failed, active_keys, plan, cpu_used, gpu_used, cpu_wo
     return None
 
 
-def _phase_budget_remaining(charged, variant, phase):
+def _phase_budget_remaining(charged: dict[PhaseKey, float], variant: str, phase: str) -> float:
     budget = FIT_SECONDS if phase in ("fit", AUX_PHASE) else EVALUATION_SECONDS
     used = sum(
         charged.get((variant, step), 0.0)
@@ -116,14 +138,25 @@ def _phase_budget_remaining(charged, variant, phase):
     return budget - used
 
 
-def _remaining(plan, charged, variant, phase):
+def _remaining(
+    plan: CampaignPlan, charged: dict[PhaseKey, float], variant: str, phase: str
+) -> float:
     until = (_parse_iso(plan["deadline_utc"]) - _now()).total_seconds()
     return min(_phase_budget_remaining(charged, variant, phase), until)
 
 
 def _prepare_attempt(
-    root, plan, plan_identity, generation, successes, attempts, variant, phase, prepared_dir, glove
-):
+    root: Path,
+    plan: CampaignPlan,
+    plan_identity: str,
+    generation: str,
+    successes: dict[PhaseKey, CampaignEvent],
+    attempts: dict[PhaseKey, int],
+    variant: str,
+    phase: str,
+    prepared_dir: Path,
+    glove: Path,
+) -> tuple[Path, int]:
     number = attempts.get((variant, phase), 0) + 1
     directory = _phase_directory(root, variant, phase, number)
     _ensure_private(directory)
@@ -151,17 +184,17 @@ def _prepare_attempt(
 
 
 def run_campaign(
-    prepared_dir,
-    output_dir,
+    prepared_dir: str | Path,
+    output_dir: str | Path,
     *,
-    expected_prepared_identity,
-    code_revision,
+    expected_prepared_identity: str,
+    code_revision: str,
     glove: Path,
-    backend="cpu",
-    cpu_workers=2,
-    resume=False,
-    expected_campaign_identity=None,
-):
+    backend: str = "cpu",
+    cpu_workers: int = 2,
+    resume: bool = False,
+    expected_campaign_identity: str | None = None,
+) -> Path:
     """Run exactly seven fixed validation variants with durable, bounded workers."""
     from recsys.research.artifacts import safe_path, separate
     from recsys.research.resources import ResourceSupervisor
@@ -194,8 +227,9 @@ def run_campaign(
         except BlockingIOError:
             _fail("research_campaign_busy")
         if resume:
-            prior, raw = _read_private(root / "campaign-plan.json")
-            _validate_plan_structure(prior)
+            prior_value, raw = _read_private(root / "campaign-plan.json")
+            _validate_plan_structure(prior_value)
+            prior = cast("CampaignPlan", prior_value)
             created = _parse_iso(prior["created_utc"])
             planned = _plan(
                 prepared_dir,
@@ -259,12 +293,12 @@ def run_campaign(
         journal.append(
             "run_started", generation=generation, plan_identity=plan_identity, resumed=resume
         )
-        active = {}
-        pending = []
+        active: dict[JobHandle, ActivePhase] = {}
+        pending: list[ActivePhase] = []
         frozen = bool(failed)
         failure_code = "research_campaign_previous_failure" if failed else None
         supervisor = ResourceSupervisor(rss_limit_bytes=RSS_LIMIT_BYTES)
-        original_error = None
+        original_error: BaseException | None = None
         try:
             supervisor.__enter__()
             while True:
@@ -426,11 +460,13 @@ def run_campaign(
                 # An interim cleanup failure has no completed event. Inspect every
                 # unfinished handle after every poll, keep slots, and freeze work.
                 for handle, item in tuple(active.items()):
-                    result = supervisor.result(handle)
-                    if result is None:
+                    polled_result = supervisor.result(handle)
+                    if polled_result is None:
                         continue
-                    item["observed_elapsed"] = max(item["observed_elapsed"], result.elapsed_seconds)
-                    if not result.cleanup_complete:
+                    item["observed_elapsed"] = max(
+                        item["observed_elapsed"], polled_result.elapsed_seconds
+                    )
+                    if not polled_result.cleanup_complete:
                         if not item["warned"]:
                             item["warned"] = True
                             journal.append(
@@ -448,7 +484,7 @@ def run_campaign(
                         continue
                     if handle not in snapshot.completed:
                         _fail("research_campaign_supervisor_invalid")
-                    item["result"] = result
+                    item["result"] = polled_result
                     pending.append(item)
                     del active[handle]
                 if frozen and active:
@@ -473,8 +509,8 @@ def run_campaign(
                 # Only a confirmed clean supervisor result permits a future
                 # retry; orphan or failed cleanup keeps its started record open.
                 for handle, item in active.items():
-                    result = supervisor.result(handle)
-                    if result is None or not result.cleanup_complete:
+                    final_result = supervisor.result(handle)
+                    if final_result is None or not final_result.cleanup_complete:
                         continue
                     try:
                         journal.append(
@@ -483,8 +519,10 @@ def run_campaign(
                             variant=item["variant"],
                             phase=item["phase"],
                             attempt=item["attempt"],
-                            charged_seconds=max(item["observed_elapsed"], result.elapsed_seconds),
-                            resources=_process_fields(result),
+                            charged_seconds=max(
+                                item["observed_elapsed"], final_result.elapsed_seconds
+                            ),
+                            resources=_process_fields(final_result),
                         )
                     except BaseException:
                         pass

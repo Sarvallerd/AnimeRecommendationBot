@@ -9,7 +9,20 @@ import json
 import os
 import re
 import stat
+from collections.abc import Iterable
 from pathlib import Path
+from typing import TYPE_CHECKING, Never, cast
+
+if TYPE_CHECKING:
+    from deploy.tests.acceptance_types import (
+        BundleBytesContract,
+        JsonObject,
+        JsonValue,
+        ProfileExpectations,
+        ProfileReference,
+    )
+
+    from recsys.contracts.bundle import Catalog, Neighbor, Neighbors
 
 ROOT = Path(__file__).resolve().parents[2]
 PROFILE_DIR = Path(__file__).with_name("acceptance_profiles")
@@ -25,7 +38,7 @@ IDENTITY = re.compile(r"sha256:[0-9a-f]{64}\Z")
 
 
 class ProfileError(ValueError):
-    def __init__(self, code: str):
+    def __init__(self, code: str) -> None:
         super().__init__(code)
         self.code = code
 
@@ -39,19 +52,19 @@ def digest(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def _unique(pairs):
-    value = {}
+def _unique(pairs: list[tuple[str, JsonValue]]) -> JsonObject:
+    value: JsonObject = {}
     for key, item in pairs:
         need(key not in value, "DUPLICATE_JSON_KEY")
         value[key] = item
     return value
 
 
-def _constant(_):
+def _constant(_: str) -> Never:
     raise ProfileError("INVALID_JSON")
 
 
-def canonical(raw: bytes) -> dict:
+def canonical(raw: bytes) -> JsonObject:
     try:
         value = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique, parse_constant=_constant)
         encoded = (
@@ -65,7 +78,7 @@ def canonical(raw: bytes) -> dict:
     except (UnicodeError, ValueError, OverflowError) as exc:
         raise ProfileError("INVALID_JSON") from exc
     need(raw == encoded and type(value) is dict, "NONCANONICAL_JSON")
-    return value
+    return cast("JsonObject", value)
 
 
 def regular_bytes(path: Path) -> bytes:
@@ -78,26 +91,30 @@ def regular_bytes(path: Path) -> bytes:
         raise ProfileError("UNSAFE_INPUT") from exc
 
 
-def fields(value, names, code="INVALID_PROFILE"):
+def fields(value: object, names: Iterable[str], code: str = "INVALID_PROFILE") -> JsonObject:
     need(type(value) is dict and set(value) == set(names), code)
+    return cast("JsonObject", value)
 
 
-def _expectations(value: dict) -> None:
-    fields(
+def object_fields(value: object, code: str) -> JsonObject:
+    need(type(value) is dict, code)
+    return cast("JsonObject", value)
+
+
+def _expectations(value: object) -> ProfileExpectations:
+    value = fields(
         value,
         ("catalog_count", "neighbor_count_histogram", "smoke_seed", "empty_seed"),
         "INVALID_EXPECTATIONS",
     )
     count = value["catalog_count"]
     need(type(count) is int and count > 0, "INVALID_EXPECTATIONS")
-    hist = value["neighbor_count_histogram"]
-    fields(hist, (str(i) for i in range(6)), "INVALID_EXPECTATIONS")
-    need(
-        all(type(n) is int and n >= 0 for n in hist.values()) and sum(hist.values()) == count,
-        "INVALID_EXPECTATIONS",
+    hist = fields(
+        value["neighbor_count_histogram"], (str(i) for i in range(6)), "INVALID_EXPECTATIONS"
     )
-    fields(value["smoke_seed"], ("mal_id", "query", "neighbor_ids"), "INVALID_EXPECTATIONS")
-    smoke = value["smoke_seed"]
+    need(all(type(n) is int and n >= 0 for n in hist.values()), "INVALID_EXPECTATIONS")
+    need(sum(cast("dict[str, int]", hist).values()) == count, "INVALID_EXPECTATIONS")
+    smoke = fields(value["smoke_seed"], ("mal_id", "query", "neighbor_ids"), "INVALID_EXPECTATIONS")
     need(
         type(smoke["mal_id"]) is int
         and smoke["mal_id"] > 0
@@ -121,21 +138,27 @@ def _expectations(value: dict) -> None:
         ),
         "INVALID_EXPECTATIONS",
     )
+    return cast("ProfileExpectations", value)
 
 
 class AcceptanceProfile:
-    def __init__(self, value: dict, raw: bytes, lock: dict | None, lock_raw: bytes | None):
-        self.id = value["profile_id"]
-        self.release_id = value["release_id"]
-        self.policy = value["policy"]
+    def __init__(
+        self,
+        value: JsonObject,
+        raw: bytes,
+        lock: JsonObject | None,
+        lock_raw: bytes | None,
+        expectations: ProfileExpectations,
+    ) -> None:
+        self.id = cast("str", value["profile_id"])
+        self.release_id = cast("str", value["release_id"])
+        self.policy = cast("str", value["policy"])
         self.sha256 = digest(raw)
         self.lock = lock
         self.lock_sha256 = digest(lock_raw) if lock_raw is not None else None
-        self.expectations = (
-            lock["semantic_expectations"] if lock is not None else value["expectations"]
-        )
-        self.reference = lock["reference"] if lock is not None else None
-        self.inputs = lock["inputs"] if lock is not None else None
+        self.expectations = expectations
+        self.reference = cast("ProfileReference", lock["reference"]) if lock is not None else None
+        self.inputs = cast("JsonObject", lock["inputs"]) if lock is not None else None
 
 
 def load_profile(
@@ -171,15 +194,14 @@ def load_profile(
             value["profile_id"] == "legacy-v1" and value["policy"] == "legacy-arb020-v1",
             "INVALID_PROFILE",
         )
-        _expectations(value["expectations"])
+        expectations = _expectations(value["expectations"])
         need(_lock_bytes is None, "INVALID_PROFILE")
-        return AcceptanceProfile(value, raw, None, None)
+        return AcceptanceProfile(value, raw, None, None, expectations)
     need(
         value["profile_id"] == release_id and value["policy"] == "release-lock-v1",
         "INVALID_PROFILE",
     )
-    fields(value["expectations"], ("release_lock_resource", "release_lock_sha256"))
-    expected = value["expectations"]
+    expected = fields(value["expectations"], ("release_lock_resource", "release_lock_sha256"))
     need(
         expected["release_lock_resource"] == LOCK_RESOURCE
         and type(expected["release_lock_sha256"]) is str
@@ -210,14 +232,26 @@ def load_profile(
         and type(lock["semantic_expectations"]) is dict,
         "INVALID_LOCK",
     )
+    semantic_raw = object_fields(lock["semantic_expectations"], "INVALID_LOCK")
     _expectations(
         {
-            k: lock["semantic_expectations"][k]
+            k: semantic_raw[k]
             for k in ("catalog_count", "neighbor_count_histogram", "smoke_seed", "empty_seed")
-            if k in lock["semantic_expectations"]
+            if k in semantic_raw
         }
     )
-    semantic = lock["semantic_expectations"]
+    semantic = fields(
+        semantic_raw,
+        (
+            "catalog_count",
+            "neighbor_count_histogram",
+            "smoke_seed",
+            "empty_seed",
+            "vector_status_counts",
+            "zero_vector_ids",
+        ),
+        "INVALID_LOCK",
+    )
     need(
         set(semantic)
         == {
@@ -234,7 +268,18 @@ def load_profile(
         and type(semantic["zero_vector_ids"]) is list,
         "INVALID_LOCK",
     )
-    ref = lock["reference"]
+    ref = fields(
+        lock["reference"],
+        (
+            "block_size",
+            "build_report_sha256",
+            "bundle_identity",
+            "catalog_sha256",
+            "neighbors_sha256",
+            "producer",
+        ),
+        "INVALID_LOCK",
+    )
     need(
         set(ref)
         == {
@@ -248,26 +293,38 @@ def load_profile(
         and ref["block_size"] == 256
         and type(ref["block_size"]) is int
         and all(
-            type(ref[key]) is str and HEX.fullmatch(ref[key])
+            type(ref[key]) is str and HEX.fullmatch(cast("str", ref[key])) is not None
             for key in ("build_report_sha256", "catalog_sha256", "neighbors_sha256")
         )
         and type(ref["bundle_identity"]) is str
-        and IDENTITY.fullmatch(ref["bundle_identity"]),
+        and IDENTITY.fullmatch(ref["bundle_identity"]) is not None,
         "INVALID_LOCK",
     )
-    return AcceptanceProfile(value, raw, lock, lock_raw)
+    return AcceptanceProfile(value, raw, lock, lock_raw, cast("ProfileExpectations", semantic))
 
 
-def _bundle_module():
+def _bundle_module() -> BundleBytesContract:
     path = ROOT / "src/recsys/contracts/bundle.py"
     spec = importlib.util.spec_from_file_location("arb_acceptance_bundle_contract", path)
+    if spec is None or spec.loader is None:
+        raise ProfileError("INVALID_BUNDLE")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module
+    for export in ("check_bundle_bytes", "parse_canonical"):
+        if not callable(getattr(module, export, None)):
+            raise ProfileError("INVALID_BUNDLE")
+    return cast("BundleBytesContract", module)
 
 
 class BundleSummary:
-    def __init__(self, identity, count, hashes, neighbors, histogram):
+    def __init__(
+        self,
+        identity: str,
+        count: int,
+        hashes: dict[str, str],
+        neighbors: dict[str, list[Neighbor]],
+        histogram: dict[str, int],
+    ) -> None:
         self.identity = identity
         self.count = count
         self.hashes = hashes
@@ -304,8 +361,12 @@ def check_profile_bundle(
         identity, count = contract.check_bundle_bytes(
             raw["catalog.json"], raw["neighbors.json"], raw["manifest.json"]
         )
-        catalog = contract.parse_canonical(raw["catalog.json"], "catalog.json")["anime"]
-        neighbors = contract.parse_canonical(raw["neighbors.json"], "neighbors.json")["neighbors"]
+        catalog = cast("Catalog", contract.parse_canonical(raw["catalog.json"], "catalog.json"))[
+            "anime"
+        ]
+        neighbors = cast(
+            "Neighbors", contract.parse_canonical(raw["neighbors.json"], "neighbors.json")
+        )["neighbors"]
     except (ValueError, KeyError, TypeError) as exc:
         raise ProfileError("INVALID_BUNDLE") from exc
     need(identity == expected_identity, "BUNDLE_IDENTITY_MISMATCH")
@@ -317,16 +378,21 @@ def check_profile_bundle(
     )
     smoke = expected["smoke_seed"]
     sid = str(smoke["mal_id"])
+    record = catalog.get(sid)
     need(
-        catalog.get(sid, {}).get("title") == smoke["query"]
+        record is not None
+        and record["title"] == smoke["query"]
         and [item["mal_id"] for item in neighbors.get(sid, [])] == smoke["neighbor_ids"],
         "BUNDLE_SMOKE_MISMATCH",
     )
     empty = expected["empty_seed"]
     if empty is not None:
         eid = str(empty["mal_id"])
+        empty_record = catalog.get(eid)
         need(
-            catalog.get(eid, {}).get("title") == empty["query"] and neighbors.get(eid) == [],
+            empty_record is not None
+            and empty_record["title"] == empty["query"]
+            and neighbors.get(eid) == [],
             "BUNDLE_EMPTY_MISMATCH",
         )
     return BundleSummary(

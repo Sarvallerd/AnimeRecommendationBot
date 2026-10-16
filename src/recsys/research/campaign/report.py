@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 from recsys.research.campaign.artifacts import _phase_path, _verify_phase
 from recsys.research.campaign.common import (
@@ -22,22 +23,44 @@ from recsys.research.campaign.common import (
     _fail,
     _read_private,
 )
-from recsys.research.campaign.journal import _Journal, _successes
+from recsys.research.campaign.journal import CampaignEvent, PhaseKey, _Journal, _successes
 from recsys.research.campaign.plan import (
+    CampaignPlan,
     _component_phase,
     _expected_nodes,
     _source_receipt,
     _validate_plan_structure,
 )
 
+if TYPE_CHECKING:
+    import numpy as np
+    from numpy.typing import NDArray
 
-def _public_projection(root, plan, successes, prepared_dir):
+    from recsys.research.evaluation.compare import EvaluationRows
+
+
+def _required_phase_path(
+    root: Path, successes: dict[PhaseKey, CampaignEvent], variant: str, phase: str
+) -> Path:
+    path = _phase_path(root, successes, variant, phase)
+    if path is None:
+        _fail("research_campaign_incomplete")
+    return path
+
+
+def _public_projection(
+    root: Path,
+    plan: CampaignPlan,
+    successes: dict[PhaseKey, CampaignEvent],
+    prepared_dir: Path,
+) -> dict[str, object]:
     """Build only anonymous validation aggregates from strictly paired rows."""
     import numpy as np
 
     from recsys.research.artifacts import file_descriptor, read_json
     from recsys.research.evaluation.compare import _bootstrap, _evaluation, _primary, _quantile
-    from recsys.research.evaluation.evaluate import _aggregate, _prepared
+    from recsys.research.evaluation.evaluate import PredictionManifest, _aggregate, _prepared
+    from recsys.research.models.manifest import ModelManifest
     from recsys.research.protocol import load_protocol
 
     prepared, protocol, catalog, fit, fit_identity, stats = _prepared(
@@ -45,25 +68,29 @@ def _public_projection(root, plan, successes, prepared_dir):
     )
     if fit_identity != plan["fit_identity"] or protocol != load_protocol():
         _fail("research_campaign_input_invalid")
-    all_rows = {}
-    variants = []
-    auxiliaries = []
+    all_rows: dict[str, EvaluationRows] = {}
+    variants: list[dict[str, object]] = []
+    auxiliaries: list[dict[str, object]] = []
     journal_events = _Journal(root / "journal.jsonl").events
     _, attempts, charged, _, _ = _successes(journal_events)
     reference_metadata = None
     reference_n0 = None
     for variant in VARIANTS:
-        paths = {phase: _phase_path(root, successes, variant, phase) for phase in PHASES}
-        if any(value is None for value in paths.values()):
+        maybe_paths = {phase: _phase_path(root, successes, variant, phase) for phase in PHASES}
+        if any(value is None for value in maybe_paths.values()):
             _fail("research_campaign_incomplete")
-        model, model_raw = read_json(paths["fit"] / "model-manifest.json")
-        prediction, prediction_raw = read_json(paths["predict"] / "prediction-manifest.json")
+        paths = cast("dict[str, Path]", maybe_paths)
+        model_value, model_raw = read_json(paths["fit"] / "model-manifest.json")
+        model = cast("ModelManifest", model_value)
+        prediction_value, prediction_raw = read_json(paths["predict"] / "prediction-manifest.json")
+        prediction = cast("PredictionManifest", prediction_value)
         evaluation, evaluation_identity, rows = _evaluation(
             paths["evaluate"], plan["prepared_identity"]
         )
-        initial_report, _ = read_json(
+        initial_report_value, _ = read_json(
             paths["evaluate"] / "report.json", evaluation["files"]["report.json"]
         )
+        initial_report = cast("dict[str, object]", initial_report_value)
         recomputed = _aggregate(rows.values(), catalog, stats)
         expected_report = {
             "schema_version": 1,
@@ -113,7 +140,7 @@ def _public_projection(root, plan, successes, prepared_dir):
         elif metadata != reference_metadata or n0 != reference_n0:
             _fail("research_campaign_unpaired")
         all_rows[variant] = rows
-        phase_resources = {}
+        phase_resources: dict[str, dict[str, object]] = {}
         for phase in PHASES:
             event = successes[(variant, phase)]
             evidence = event["resources"]
@@ -136,7 +163,10 @@ def _public_projection(root, plan, successes, prepared_dir):
             }
         measurement = None
         if plan["variants"][VARIANTS.index(variant)]["backend"] == "gpu":
-            measured, _ = _read_private(paths["predict"].parent / "resources" / "measurement.json")
+            measured_value, _ = _read_private(
+                paths["predict"].parent / "resources" / "measurement.json"
+            )
+            measured = cast("dict[str, object]", measured_value)
             pool = measured.get("dedicated_pool_session_including_admission")
             if (
                 measured.get("status") != "published"
@@ -193,13 +223,16 @@ def _public_projection(root, plan, successes, prepared_dir):
         path = _phase_path(root, successes, variant, AUX_PHASE)
         if path is None:
             _fail("research_campaign_incomplete")
-        manifest, raw = read_json(path / "model-manifest.json")
+        manifest_value, raw = read_json(path / "model-manifest.json")
+        manifest = cast("ModelManifest", manifest_value)
         if (
             manifest["variant_id"] != variant
             or manifest["producer"]["execution"]["backend"] != "cpu"
         ):
             _fail("research_campaign_component_invalid")
         evidence = successes[(variant, AUX_PHASE)]["resources"]
+        if evidence is None:
+            _fail("research_campaign_resource_invalid")
         if evidence.get("outcome") != "ok" or evidence.get("cleanup_complete") is not True:
             _fail("research_campaign_resource_invalid")
         auxiliaries.append(
@@ -224,14 +257,17 @@ def _public_projection(root, plan, successes, prepared_dir):
                 },
             }
         )
-    hybrid_path = _phase_path(root, successes, "hybrid", "fit")
-    hybrid_manifest, _ = read_json(hybrid_path / "model-manifest.json")
+    hybrid_path = _required_phase_path(root, successes, "hybrid", "fit")
+    hybrid_value, _ = read_json(hybrid_path / "model-manifest.json")
+    hybrid_manifest = cast("ModelManifest", hybrid_value)
     if hybrid_manifest["producer"]["execution"]["backend"] != "cpu":
         _fail("research_campaign_component_invalid")
     for part, variant in (("content", "content-mean"), ("svd", "puresvd")):
-        origin = _phase_path(root, successes, variant, _component_phase(plan))
-        source, raw = read_json(origin / "model-manifest.json")
-        if hybrid_manifest["metadata"]["components"][part]["identity"] != _digest(raw):
+        origin = _required_phase_path(root, successes, variant, _component_phase(plan))
+        source_value, raw = read_json(origin / "model-manifest.json")
+        source = cast("ModelManifest", source_value)
+        components = cast("dict[str, dict[str, str]]", hybrid_manifest["metadata"]["components"])
+        if components[part]["identity"] != _digest(raw):
             _fail("research_campaign_component_invalid")
         if not _bytes_equal(
             origin / "model-manifest.json", hybrid_path / (part + "_manifest.json")
@@ -253,7 +289,7 @@ def _public_projection(root, plan, successes, prepared_dir):
             _fail("research_campaign_unpaired")
     primary = paired = None
     if main_users >= 20:
-        matrices = {}
+        matrices: dict[str, NDArray[np.float64]] = {}
         for variant in VARIANTS:
             _, cells = _primary(all_rows[variant])
             matrices[variant] = np.asarray(
@@ -278,6 +314,8 @@ def _public_projection(root, plan, successes, prepared_dir):
         for variant in VARIANTS[1:]:
             delta = matrices[variant] - matrices["popularity"]
             sample = _bootstrap(delta, comparison["seed"], comparison["bootstrap_replicates"])
+            if sample is None:
+                _fail("research_campaign_unpaired")
             paired[variant] = {
                 "users": main_users,
                 "mean_difference_by_n": [float(x) for x in delta.mean(axis=0)],
@@ -312,8 +350,12 @@ def _public_projection(root, plan, successes, prepared_dir):
 
 
 def validate_campaign(
-    prepared_dir, campaign_dir, *, expected_prepared_identity, expected_campaign_identity
-):
+    prepared_dir: str | Path,
+    campaign_dir: str | Path,
+    *,
+    expected_prepared_identity: str,
+    expected_campaign_identity: str,
+) -> dict[str, object]:
     """Revalidate retained artifacts and published anonymous aggregates."""
     from recsys.research.artifacts import safe_path, separate
 
@@ -322,8 +364,9 @@ def validate_campaign(
     separate(prepared_dir, root)
     safe_path(prepared_dir, directory=True)
     safe_path(root, directory=True)
-    plan, raw = _read_private(root / "campaign-plan.json")
-    configured = _validate_plan_structure(plan)
+    plan_value, raw = _read_private(root / "campaign-plan.json")
+    configured = _validate_plan_structure(plan_value)
+    plan = cast("CampaignPlan", plan_value)
     if (
         _digest(raw) != expected_campaign_identity
         or plan["prepared_identity"] != expected_prepared_identity
@@ -349,7 +392,8 @@ def validate_campaign(
         if identity != event["output_identity"]:
             _fail("research_campaign_chain_invalid")
     projection = _public_projection(root, plan, successes, prepared_dir)
-    report, report_raw = _read_private(root / "campaign-report.json")
+    report_value, report_raw = _read_private(root / "campaign-report.json")
+    report = cast("dict[str, object]", report_value)
     manifest, _ = _read_private(root / "campaign-report-manifest.json")
     expected_fields = {
         "schema_version": 1,

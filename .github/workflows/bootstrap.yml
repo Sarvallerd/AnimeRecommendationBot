@@ -99,6 +99,12 @@ jobs:
         run: |
           uv run --locked --only-group lint ruff check .
           uv run --locked --only-group lint ruff format --check .
+      - name: Check Python types
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/arb-typing-venv
+        run: |
+          uv sync --locked --no-install-project --no-default-groups --group typing --extra quality
+          uv run --locked --no-sync python -m mypy
       - name: Install Rust toolchain and native build prerequisites
         run: |
           rustup toolchain install 1.95.0 --profile minimal

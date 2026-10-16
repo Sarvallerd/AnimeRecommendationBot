@@ -9,6 +9,7 @@ import hashlib
 import json
 import re
 from pathlib import Path
+from typing import TypedDict, cast
 
 IDENT = re.compile(r"^[A-Za-z_][A-Za-z_0-9]*$")
 FIELDS = {"schema_version", "subsystems", "exceptions", "existing_cycles", "dynamic_dispatch"}
@@ -37,6 +38,40 @@ class PolicyError(ValueError):
     pass
 
 
+class _Subsystem(TypedDict):
+    modules: list[str]
+    depends_on: list[str]
+
+
+class _Exception(TypedDict):
+    source: str
+    target: str
+    names: list[str]
+    reason: str
+
+
+class _Cycle(TypedDict):
+    members: list[str]
+    edges: list[list[str]]
+    reason: str
+
+
+class _Dispatch(TypedDict):
+    source: str
+    function: str
+    registry: str
+    source_sha256: str
+    reason: str
+
+
+class _BoundaryPolicy(TypedDict):
+    schema_version: int
+    subsystems: dict[str, _Subsystem]
+    exceptions: list[_Exception]
+    existing_cycles: list[_Cycle]
+    dynamic_dispatch: _Dispatch
+
+
 def _pairs(items: list[tuple[str, object]]) -> dict[str, object]:
     result: dict[str, object] = {}
     for key, value in items:
@@ -46,28 +81,30 @@ def _pairs(items: list[tuple[str, object]]) -> dict[str, object]:
     return result
 
 
-def _fields(value: object, expected: set[str], where: str) -> dict:
+def _fields(value: object, expected: set[str], where: str) -> dict[str, object]:
     if type(value) is not dict or set(value) != expected:
         raise PolicyError(f"{where}: expected fields {sorted(expected)}")
-    return value
+    return {key: value[key] for key in expected}
 
 
 def _identifier(value: object, where: str, *, module: bool = False) -> str:
-    parts = value.split(".") if type(value) is str and module else [value]
-    if not parts or any(type(p) is not str or not IDENT.fullmatch(p) for p in parts):
+    if type(value) is not str:
+        raise PolicyError(f"{where}: invalid identifier")
+    parts = value.split(".") if module else [value]
+    if not parts or any(not IDENT.fullmatch(p) for p in parts):
         raise PolicyError(f"{where}: invalid identifier")
     if module and parts[0] != "recsys":
         raise PolicyError(f"{where}: expected recsys module")
     return value
 
 
-def _list(value: object, where: str, *, nonempty: bool = False) -> list:
+def _list(value: object, where: str, *, nonempty: bool = False) -> list[object]:
     if type(value) is not list or (nonempty and not value):
         raise PolicyError(f"{where}: expected {'nonempty ' if nonempty else ''}list")
     return value
 
 
-def _unique(items: list, where: str) -> None:
+def _unique(items: list[object], where: str) -> None:
     if len(items) != len(set(items)):
         raise PolicyError(f"{where}: duplicate value")
 
@@ -77,26 +114,28 @@ def _reason(value: object, where: str) -> None:
         raise PolicyError(f"{where}: empty reason")
 
 
-def _policy(path: Path) -> tuple[dict, dict[str, str]]:
+def _policy(path: Path) -> tuple[_BoundaryPolicy, dict[str, str]]:
     policy = _fields(
         json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_pairs), FIELDS, "policy"
     )
     if type(policy["schema_version"]) is not int or policy["schema_version"] != 1:
         raise PolicyError("schema_version must be 1")
-    subsystems = policy["subsystems"]
-    if type(subsystems) is not dict or not subsystems:
+    raw_subsystems = policy["subsystems"]
+    if type(raw_subsystems) is not dict or not raw_subsystems:
         raise PolicyError("subsystems must be a nonempty object")
+    subsystems: dict[str, dict[str, object]] = {}
     owners: dict[str, str] = {}
-    for group, raw in subsystems.items():
-        _identifier(group, "subsystem")
+    for raw_group, raw in raw_subsystems.items():
+        group = _identifier(raw_group, "subsystem")
         item = _fields(raw, SUBSYSTEM_FIELDS, group)
+        subsystems[group] = item
         modules = _list(item["modules"], f"{group}.modules", nonempty=True)
         deps = _list(item["depends_on"], f"{group}.depends_on")
         for name in modules:
-            _identifier(name, f"{group}.modules", module=True)
-            if name in owners:
-                raise PolicyError(f"duplicate module owner: {name}")
-            owners[name] = group
+            module_name = _identifier(name, f"{group}.modules", module=True)
+            if module_name in owners:
+                raise PolicyError(f"duplicate module owner: {module_name}")
+            owners[module_name] = group
         for dep in deps:
             _identifier(dep, f"{group}.depends_on")
         _unique(deps, f"{group}.depends_on")
@@ -115,7 +154,9 @@ def _policy(path: Path) -> tuple[dict, dict[str, str]]:
         _reason(item["reason"], "exception")
         if src not in owners or dst not in owners or src == dst:
             raise PolicyError("exception references unknown or identical modules")
-        if owners[src] == owners[dst] or owners[dst] in subsystems[owners[src]]["depends_on"]:
+        if owners[src] == owners[dst] or owners[dst] in _list(
+            subsystems[owners[src]]["depends_on"], f"{owners[src]}.depends_on"
+        ):
             raise PolicyError(f"redundant exception: {src} -> {dst}")
         if (src, dst) in seen_exceptions:
             raise PolicyError(f"duplicate exception: {src} -> {dst}")
@@ -137,7 +178,7 @@ def _policy(path: Path) -> tuple[dict, dict[str, str]]:
         for edge in edges:
             if type(edge) is not list or len(edge) != 2 or any(type(v) is not str for v in edge):
                 raise PolicyError("cycle.edge: expected source/target pair")
-            src, dst = edge
+            src, dst = str(edge[0]), str(edge[1])
             if src not in members or dst not in members or (src, dst) in edge_set:
                 raise PolicyError("cycle.edge: duplicate or external endpoint")
             edge_set.add((src, dst))
@@ -150,13 +191,13 @@ def _policy(path: Path) -> tuple[dict, dict[str, str]]:
     if type(digest) is not str or not re.fullmatch(r"[a-f0-9]{64}", digest):
         raise PolicyError("dynamic_dispatch.source_sha256 invalid")
     _reason(dispatch["reason"], "dynamic_dispatch")
-    return policy, owners
+    return cast("_BoundaryPolicy", policy), owners
 
 
 def _inventory(package: Path) -> dict[str, Path]:
     if package.is_symlink() or not package.is_dir():
         raise PolicyError("package root missing or symlink")
-    result = {}
+    result: dict[str, Path] = {}
     for path in sorted(package.rglob("*")):
         if path.is_symlink():
             raise PolicyError(f"symlink in package: {path.relative_to(package)}")
@@ -229,7 +270,7 @@ def _literal_loader(node: ast.Call, kind: str, package: str) -> str | None:
     return value
 
 
-def _dispatch_targets(tree: ast.Module, policy: dict, raw: bytes) -> set[str]:
+def _dispatch_targets(tree: ast.Module, policy: _BoundaryPolicy, raw: bytes) -> set[str]:
     cfg = policy["dynamic_dispatch"]
     if hashlib.sha256(raw).hexdigest() != cfg["source_sha256"]:
         raise PolicyError("dynamic_dispatch_changed: audited source SHA-256 changed")
@@ -252,7 +293,10 @@ def _dispatch_targets(tree: ast.Module, policy: dict, raw: bytes) -> set[str]:
         or not isinstance(assignments[0].value, ast.Dict)
     ):
         raise PolicyError("dynamic_dispatch_changed: registry or function shape changed")
-    registry = assignments[0].value
+    registry_node = assignments[0]
+    if not isinstance(registry_node.value, ast.Dict):
+        raise PolicyError("dynamic_dispatch_changed: registry or function shape changed")
+    registry = registry_node.value
     keys, values = [], []
     for key, value in zip(registry.keys, registry.values):
         if (
@@ -292,7 +336,12 @@ def _dispatch_targets(tree: ast.Module, policy: dict, raw: bytes) -> set[str]:
         for alias in node.names
         if alias.name == "importlib"
     }
-    if not isinstance(call.func.value, ast.Name) or call.func.value.id not in loader_aliases:
+    loader_call = call.func
+    if (
+        not isinstance(loader_call, ast.Attribute)
+        or not isinstance(loader_call.value, ast.Name)
+        or loader_call.value.id not in loader_aliases
+    ):
         raise PolicyError("dynamic_dispatch_changed: loader is not imported importlib")
     if (
         len(call.args) != 2
@@ -318,7 +367,7 @@ def _dispatch_targets(tree: ast.Module, policy: dict, raw: bytes) -> set[str]:
 
 
 def _scc(nodes: set[str], edges: set[tuple[str, str]]) -> list[set[str]]:
-    graph = {node: set() for node in nodes}
+    graph: dict[str, set[str]] = {node: set() for node in nodes}
     for src, dst in edges:
         graph[src].add(dst)
     index = 0
@@ -482,7 +531,9 @@ def check_repository(root: Path, stats: dict[str, int] | None = None) -> list[st
                 )
             )
 
-        def add(target: str, node: ast.AST, names: set[str] | None = None) -> None:
+        def add(
+            target: str, node: ast.Import | ast.ImportFrom | ast.Call, names: set[str] | None = None
+        ) -> None:
             if not target.startswith("recsys"):
                 return
             location = f"{rel}:{node.lineno} {source} -> {target}"
@@ -508,6 +559,10 @@ def check_repository(root: Path, stats: dict[str, int] | None = None) -> list[st
 
         for node in ast.walk(tree):
             if loader_reference(node):
+                if not isinstance(node, (ast.Name, ast.Attribute)):
+                    raise PolicyError(
+                        "unsupported_dynamic_import: loader node has no source location"
+                    )
                 parent = parents.get(node)
                 direct_call = isinstance(parent, ast.Call) and parent.func is node
                 direct_alias = (
@@ -575,14 +630,14 @@ def check_repository(root: Path, stats: dict[str, int] | None = None) -> list[st
                     kind = "module"
                 if kind is None:
                     continue
-                target = _literal_loader(node, kind, package)
-                if target is not None:
-                    if target == "":
+                dynamic_target = _literal_loader(node, kind, package)
+                if dynamic_target is not None:
+                    if dynamic_target == "":
                         errors.append(
                             f"unknown_import: {rel}:{node.lineno} {source}: relative dynamic import escapes recsys"
                         )
-                    elif target == "recsys" or target.startswith("recsys."):
-                        add(target, node)
+                    elif dynamic_target == "recsys" or dynamic_target.startswith("recsys."):
+                        add(dynamic_target, node)
                     continue
                 audited = (
                     source == cfg["source"]

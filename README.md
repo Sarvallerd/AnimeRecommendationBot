@@ -38,7 +38,14 @@ UV_PROJECT_ENVIRONMENT=.tools/lint-venv uv run --locked --only-group lint ruff c
 UV_PROJECT_ENVIRONMENT=.tools/lint-venv uv run --locked --only-group lint ruff format --check .
 ```
 
-Правила: Python 3.12, 100 колонок, четыре пробела, двойные кавычки, LF, базовые E4/E7/E9/F и порядок импортов I. Проверка охватывает весь основной Python-пакет `src/recsys/`; [запись о миграции layout](docs/migrations/arb054-recsys-layout-v2.json) фиксирует физические пути и исторические producer-хеши.
+Правила: Python 3.12, 100 колонок, четыре пробела, двойные кавычки, LF, базовые E4/E7/E9/F, порядок импортов I, аннотации аргументов ANN001–ANN003 и строковые типы в `typing.cast` (TC006). Проверка охватывает Python-код и локальные `.pyi`; [запись о миграции layout](docs/migrations/arb054-recsys-layout-v2.json) фиксирует физические пути и исторические producer-хеши. Для проверки фактических типов вызовов установите отдельную CPU-среду без приложения и запустите строгий mypy:
+
+```bash
+UV_PROJECT_ENVIRONMENT=.tools/typing-venv uv sync --locked --no-install-project --no-default-groups --group typing --extra quality
+UV_PROJECT_ENVIRONMENT=.tools/typing-venv uv run --locked --no-sync python -m mypy
+```
+
+Группа `typing` содержит только проверяющий mypy и его научные стабы; обычная установка и GPU-среда её не включают. Результаты проверок и `.tools/typing-venv` остаются локальными.
 
 Для сравнения качества добавьте `uv sync --locked --extra quality` и передавайте `--extra quality` в последующих `uv run`. Бот читает переменные окружения напрямую; для локального запуска подготовьте `TELOXIDE_TOKEN`, `DATABASE_URL` и `ARTIFACTS_DIR` в своём `.env` и явно передайте его: `uv run --locked --env-file .env bot --check-config`, затем `uv run --locked --env-file .env bot`. Проверка конфигурации не обращается к базе или Telegram. Подробности и поведение редактируемой установки — в [руководстве по единому окружению](dev/environment.md). Для полной сборки пакета и запуска без локального Rust/Python окружения используйте Docker ниже.
 

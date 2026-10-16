@@ -3,14 +3,45 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Iterable
+from pathlib import Path
+from typing import TYPE_CHECKING, Literal, TypedDict, cast, overload
 
+from recsys.contracts.bundle import JSONValue
 from recsys.research.models.inputs import iter_training_rows
-from recsys.research.models.types import ScoreVector
+from recsys.research.models.manifest import ModelManifest
+from recsys.research.models.types import Scorer, ScoreVector, ScoringInputs, TrainingInputs
 from recsys.research.protocol import exact, fail
 
+if TYPE_CHECKING:
+    import numpy as np
+    from numpy.typing import NDArray
+    from scipy.sparse import csr_matrix
+
+    from recsys.research.gpu import CupyDenseDots
+
+
+class KnnParameters(TypedDict):
+    positive_min_rating: int
+    shrinkage: int
+    source_block: int
+    top_k: int
+
+
+class SvdParameters(TypedDict):
+    flip_sign: bool
+    n_iter: int
+    n_oversamples: int
+    power_iteration_normalizer: Literal["auto", "QR", "LU", "none"]
+    rank: int
+    random_state: int
+    svd_lapack_driver: Literal["gesdd", "gesvd"]
+    transpose: bool
+
+
 _SOURCE = "fit/train-interactions.tsv.gz"
-_KNN = {"positive_min_rating": 8, "shrinkage": 10, "source_block": 128, "top_k": 200}
-_SVD = {
+_KNN: KnnParameters = {"positive_min_rating": 8, "shrinkage": 10, "source_block": 128, "top_k": 200}
+_SVD: SvdParameters = {
     "flip_sign": True,
     "n_iter": 4,
     "n_oversamples": 16,
@@ -32,9 +63,10 @@ _COMMON_METADATA = {
 }
 
 
-def _parameters(parameters):
+def _parameters(parameters: object) -> Literal["itemknn", "puresvd"]:
     if type(parameters) is not dict:
         fail("research_model_invalid")
+    parameters = cast("dict[str, object]", parameters)
     if set(parameters) == set(_KNN) and all(
         type(parameters[k]) is type(v) and parameters[k] == v for k, v in _KNN.items()
     ):
@@ -46,7 +78,7 @@ def _parameters(parameters):
     fail("research_model_invalid")
 
 
-def _save(path, array):
+def _save(path: Path, array: NDArray[np.float64] | NDArray[np.int32]) -> None:
     import numpy as np
 
     with open(path, "xb", opener=lambda name, flags: os.open(name, flags, 0o600)) as stream:
@@ -55,7 +87,9 @@ def _save(path, array):
         os.fsync(stream.fileno())
 
 
-def _training_matrix(inputs):
+def _training_matrix(
+    inputs: TrainingInputs,
+) -> tuple[csr_matrix[np.float64], int, NDArray[np.int64]]:
     """Build binary positive CSR without retaining users or raw interaction rows."""
     import numpy as np
     from scipy.sparse import csr_matrix
@@ -118,7 +152,9 @@ def _training_matrix(inputs):
     return matrix, matrix_users, positive
 
 
-def _metadata(kind, inputs, matrix_users, positive):
+def _metadata(
+    kind: str, inputs: TrainingInputs, matrix_users: int, positive: NDArray[np.int64]
+) -> dict[str, object]:
     return {
         "kind": kind,
         "source": _SOURCE,
@@ -131,7 +167,12 @@ def _metadata(kind, inputs, matrix_users, positive):
     }
 
 
-def _fit_knn(matrix, ids, positive, stage):
+def _fit_knn(
+    matrix: csr_matrix[np.float64],
+    ids: tuple[int, ...],
+    positive: NDArray[np.int64],
+    stage: Path,
+) -> int:
     import numpy as np
     from threadpoolctl import threadpool_limits
 
@@ -182,7 +223,7 @@ def _fit_knn(matrix, ids, positive, stage):
     return write
 
 
-def _fit_svd(matrix, positive, stage):
+def _fit_svd(matrix: csr_matrix[np.float64], positive: NDArray[np.int64], stage: Path) -> int:
     import numpy as np
     from sklearn.utils.extmath import randomized_svd
     from threadpoolctl import threadpool_limits
@@ -211,7 +252,12 @@ def _fit_svd(matrix, positive, stage):
     return rank
 
 
-def fit(inputs, parameters, assets, stage):
+def fit(
+    inputs: TrainingInputs,
+    parameters: dict[str, JSONValue],
+    assets: dict[str, Path],
+    stage: Path,
+) -> dict[str, object]:
     kind = _parameters(parameters)
     if assets != {}:
         fail("research_model_invalid")
@@ -224,7 +270,9 @@ def fit(inputs, parameters, assets, stage):
     return metadata
 
 
-def _validate_metadata(metadata, kind, inputs):
+def _validate_metadata(
+    metadata: dict[str, object], kind: str, inputs: ScoringInputs
+) -> NDArray[np.int64]:
     import numpy as np
 
     exact(metadata, _COMMON_METADATA | ({"edges"} if kind == "itemknn" else {"effective_rank"}))
@@ -259,7 +307,7 @@ def _validate_metadata(metadata, kind, inputs):
     if type(metric) is not int or metric < 0:
         fail("research_model_invalid")
     if kind == "puresvd" and metric != max(
-        0, min(_SVD["rank"], users - 1, expected["supported_items"] - 1)
+        0, min(_SVD["rank"], users - 1, cast("int", expected["supported_items"]) - 1)
     ):
         fail("research_model_invalid")
     if kind == "itemknn" and metric > len(inputs.mal_ids) * _KNN["top_k"]:
@@ -267,7 +315,19 @@ def _validate_metadata(metadata, kind, inputs):
     return positive
 
 
-def _array(path, dtype, shape):
+@overload
+def _array(path: Path, dtype: type[np.int32], shape: tuple[int, ...]) -> NDArray[np.int32]: ...
+
+
+@overload
+def _array(path: Path, dtype: type[np.float64], shape: tuple[int, ...]) -> NDArray[np.float64]: ...
+
+
+def _array(
+    path: Path,
+    dtype: type[np.int32] | type[np.float64],
+    shape: tuple[int, ...],
+) -> NDArray[np.int32] | NDArray[np.float64]:
     import numpy as np
 
     try:
@@ -276,10 +336,12 @@ def _array(path, dtype, shape):
         raise ValueError("research_model_invalid") from exc
     if value.dtype != np.dtype(dtype) or value.shape != shape:
         fail("research_model_invalid")
-    return value
+    if dtype is np.int32:
+        return cast("NDArray[np.int32]", value)
+    return cast("NDArray[np.float64]", value)
 
 
-def _seed_columns(seed_mal_ids, columns):
+def _seed_columns(seed_mal_ids: tuple[int, ...], columns: dict[int, int]) -> tuple[int, ...]:
     if (
         type(seed_mal_ids) is not tuple
         or len(seed_mal_ids) > 10
@@ -290,7 +352,14 @@ def _seed_columns(seed_mal_ids, columns):
     return tuple(sorted(columns[item] for item in seed_mal_ids))
 
 
-def load(model_dir, manifest, inputs, *, backend="cpu", payload_prefix=""):
+def load(
+    model_dir: Path,
+    manifest: ModelManifest,
+    inputs: ScoringInputs,
+    *,
+    backend: str = "cpu",
+    payload_prefix: str = "",
+) -> Scorer:
     import numpy as np
     from threadpoolctl import threadpool_limits
 
@@ -311,7 +380,7 @@ def load(model_dir, manifest, inputs, *, backend="cpu", payload_prefix=""):
     if kind == "itemknn":
         if set(manifest["files"]) != {"indptr.npy", "indices.npy", "weights.npy"}:
             fail("research_model_invalid")
-        edges = manifest["metadata"]["edges"]
+        edges = cast("int", manifest["metadata"]["edges"])
         pointers = _array(model_dir / (payload_prefix + "indptr.npy"), np.int32, (m + 1,))
         targets = _array(model_dir / (payload_prefix + "indices.npy"), np.int32, (edges,))
         weights = _array(model_dir / (payload_prefix + "weights.npy"), np.float64, (edges,))
@@ -340,7 +409,7 @@ def load(model_dir, manifest, inputs, *, backend="cpu", payload_prefix=""):
                 fail("research_model_invalid")
 
         class ItemKNNScorer:
-            def score(self, seed_mal_ids):
+            def score(self, seed_mal_ids: tuple[int, ...]) -> ScoreVector:
                 seeds = _seed_columns(seed_mal_ids, columns)
                 supported = sum(positive[col] > 0 for col in seeds)
                 if not seeds or not supported:
@@ -357,24 +426,24 @@ def load(model_dir, manifest, inputs, *, backend="cpu", payload_prefix=""):
 
     if set(manifest["files"]) != {"factors.npy"}:
         fail("research_model_invalid")
-    rank = manifest["metadata"]["effective_rank"]
+    rank = cast("int", manifest["metadata"]["effective_rank"])
     factors = _array(model_dir / (payload_prefix + "factors.npy"), np.float64, (m, rank))
     if not np.isfinite(factors).all() or np.any(factors[positive == 0] != 0):
         fail("research_model_invalid")
     supported_items = positive > 0
     supported_items.setflags(write=False)
-    dots = None
+    dots: CupyDenseDots | None = None
     if backend == "gpu" and rank:
         from recsys.research.gpu import CupyDenseDots
 
         dots = CupyDenseDots(np.ascontiguousarray(np.asarray(factors), dtype=np.float64))
 
     class PureSVDScorer:
-        def __init__(self):
+        def __init__(self) -> None:
             self.dots = dots
             self.closed = False
 
-        def close(self):
+        def close(self) -> None:
             if self.closed:
                 return
             self.closed = True
@@ -382,22 +451,24 @@ def load(model_dir, manifest, inputs, *, backend="cpu", payload_prefix=""):
                 owned, self.dots = self.dots, None
                 owned.close()
 
-        def score(self, seed_mal_ids):
+        def score(self, seed_mal_ids: tuple[int, ...]) -> ScoreVector:
             return self.score_many((seed_mal_ids,))[0]
 
-        def supported_seed_ids(self, seed_mal_ids):
+        def supported_seed_ids(self, seed_mal_ids: tuple[int, ...]) -> frozenset[int]:
             seeds = _seed_columns(seed_mal_ids, columns)
             return frozenset(
                 int(inputs.mal_ids[col]) for col in seeds if rank and positive[col] > 0
             )
 
-        def score_many(self, seed_sets):
+        def score_many(self, seed_sets: tuple[tuple[int, ...], ...]) -> tuple[ScoreVector, ...]:
             if backend == "gpu" and self.closed:
                 fail("research_gpu_closed")
             if type(seed_sets) is not tuple or len(seed_sets) > 128:
                 fail("research_model_invalid")
-            answer = [None] * len(seed_sets)
-            positions, profiles, supports = [], [], []
+            answer: list[ScoreVector | None] = [None] * len(seed_sets)
+            positions: list[int] = []
+            profiles: list[NDArray[np.float64]] = []
+            supports: list[int] = []
             for position, seed_mal_ids in enumerate(seed_sets):
                 seeds = _seed_columns(seed_mal_ids, columns)
                 supported = sum(positive[col] > 0 for col in seeds)
@@ -416,7 +487,7 @@ def load(model_dir, manifest, inputs, *, backend="cpu", payload_prefix=""):
                     if self.dots is None:
                         fail("research_gpu_closed")
                     block = np.ascontiguousarray(np.asarray(profiles), dtype=np.float64)
-                    rows = self.dots.dot(block)
+                    rows: Iterable[NDArray[np.float64]] = self.dots.dot(block)
                 else:
                     with threadpool_limits(limits=1, user_api="blas"):
                         rows = tuple(
@@ -426,6 +497,8 @@ def load(model_dir, manifest, inputs, *, backend="cpu", payload_prefix=""):
                     if not np.isfinite(values).all():
                         fail("research_model_invalid")
                     answer[position] = ScoreVector(values, supported_items, supported)
-            return tuple(answer)
+            if any(item is None for item in answer):
+                fail("research_model_invalid")
+            return cast("tuple[ScoreVector, ...]", tuple(answer))
 
     return PureSVDScorer()

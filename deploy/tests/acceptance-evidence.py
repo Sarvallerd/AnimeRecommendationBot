@@ -14,7 +14,150 @@ import re
 import stat
 import subprocess
 import sys
+from collections.abc import Iterable, Mapping
 from pathlib import Path
+from typing import TYPE_CHECKING, NotRequired, TypedDict, cast
+
+if TYPE_CHECKING:
+    from deploy.tests.acceptance_types import (
+        ContainerRecord,
+        DeploymentRecord,
+        JsonObject,
+        JsonValue,
+        LegacyBundle,
+        LiveEvidenceMain,
+        PathBundleContract,
+        SnapshotRecord,
+    )
+    from deploy.tests.live_verifier_v2 import (
+        AnimeEventRow,
+        CurrentRow,
+        DeliveredRow,
+        FeedbackRow,
+        MigrationRow,
+        RatingRow,
+        UserRow,
+    )
+
+    from recsys.contracts.bundle import Neighbors
+
+
+class HistoricalRequestRow(TypedDict):
+    id: int
+    tg_id: int
+    action_key: str
+    raw_query: str
+    created_at: str
+    seed_mal_id: int | None
+    bundle_id: str | None
+    resolved_at: str | None
+
+
+class HistoricalDatabaseRecord(TypedDict):
+    migrations: list[MigrationRow]
+    users: list[UserRow]
+    requests: list[HistoricalRequestRow]
+    delivered: list[DeliveredRow]
+    anime_events: list[AnimeEventRow]
+    anime_current: list[CurrentRow]
+    recommendation_ratings: list[RatingRow]
+    feedback: list[FeedbackRow]
+    legacy_users: list[dict[str, object]]
+    legacy_requests: list[dict[str, object]]
+    legacy_feedback: list[dict[str, object]]
+
+
+class HistoricalFullRuntime(TypedDict):
+    bot: ContainerRecord
+    prepare: ContainerRecord | None
+    postgres: ContainerRecord
+
+
+class HistoricalFullSnapshot(TypedDict):
+    schema_version: int
+    kind: str
+    snapshot_sql_sha256: str
+    source_commit: str
+    captured_at: str
+    deployment: DeploymentRecord
+    runtime: HistoricalFullRuntime
+    database: HistoricalDatabaseRecord
+
+
+class HistoricalDelta(TypedDict):
+    requests: list[HistoricalRequestRow]
+    delivered: list[DeliveredRow]
+    anime_events: list[AnimeEventRow]
+    anime_current: list[CurrentRow]
+    recommendation_ratings: list[RatingRow]
+    feedback: list[FeedbackRow]
+    users: list[UserRow]
+
+
+class HistoricalBundleReference(TypedDict):
+    identity: str
+    path: str
+
+
+class HistoricalBuildReport(TypedDict):
+    source_commit: str
+    project: str
+    compose_sha256: str
+    settings_sha256: str
+    database_volume: str | None
+    bundles: dict[str, HistoricalBundleReference]
+    schema_version: NotRequired[int]
+    kind: NotRequired[str]
+    profile: NotRequired[JsonObject]
+
+
+class HistoricalActor(TypedDict):
+    tg_id: int
+    chat_id: int
+    anchor_request_id: int
+
+
+class HistoricalAnchor(TypedDict):
+    before_sha256: str
+    after_sha256: str
+    build_report_sha256: str
+
+
+class HistoricalContext(TypedDict):
+    schema_version: int
+    project: str
+    database_volume: str | None
+    actor: HistoricalActor
+    bundles: dict[str, HistoricalBundleReference]
+    anchor: HistoricalAnchor
+
+
+class HistoricalTransitionResult(TypedDict):
+    schema_version: int
+    case: str
+    phase: str | None
+    status: str
+    reason: str
+    counts: dict[str, int]
+    bundle_id: str | None
+    context_sha256: NotRequired[str]
+    input_sha256: NotRequired[dict[str, str]]
+
+
+class HistoricalSummary(TypedDict):
+    schema_version: int
+    live_acceptance: str
+    machine: dict[str, int]
+    human: dict[str, int]
+    context_sha256: str
+
+
+class ObservedScenario(TypedDict):
+    id: str
+    status: str
+    observed_at: JsonValue
+    observation: str
+
 
 ROOT = Path(__file__).resolve().parents[2]
 SQL = Path(__file__).with_name("acceptance-snapshot.sql")
@@ -116,7 +259,7 @@ CANARIES = {name: f"ARB020 feedback/{name} v1\n{CANARY_COMMON}" for name in ("un
 class EvidenceError(ValueError):
     """A fixed-code failure whose private values must not reach the terminal."""
 
-    def __init__(self, code: str):
+    def __init__(self, code: str) -> None:
         super().__init__(code)
         self.code = code
 
@@ -139,11 +282,11 @@ def canonical(value: object) -> bytes:
     ).encode()
 
 
-def read_json(path: Path) -> dict:
+def read_json(path: Path) -> JsonObject:
     require(not path.is_symlink() and path.is_file(), "UNSAFE_INPUT")
     value = json.loads(path.read_bytes())
     require(isinstance(value, dict), "INVALID_JSON")
-    return value
+    return cast("JsonObject", value)
 
 
 def private_parent(path: Path) -> None:
@@ -181,7 +324,10 @@ def read_settings(path: Path) -> dict[str, str]:
         require("=" in line and not line.startswith("#"), "UNSAFE_SETTINGS")
         key, value = line.split("=", 1)
         require(
-            key in allowed and key not in settings and value and not re.search(r"\$|`|\\", value),
+            key in allowed
+            and key not in settings
+            and bool(value)
+            and not re.search(r"\$|`|\\", value),
             "UNSAFE_SETTINGS",
         )
         settings[key] = value
@@ -224,7 +370,7 @@ def docker(*args: str) -> str:
     return result.stdout + result.stderr if args and args[0] == "logs" else result.stdout
 
 
-def container(project: str, settings: Path, service: str) -> dict | None:
+def container(project: str, settings: Path, service: str) -> ContainerRecord | None:
     identifiers = compose(project, settings, "ps", "-a", "-q", service).split()
     require(len(identifiers) <= 1, "AMBIGUOUS_CONTAINER")
     if not identifiers:
@@ -276,7 +422,7 @@ def container(project: str, settings: Path, service: str) -> dict | None:
     }
 
 
-def snapshot(project: str, settings: Path, runtime_only: bool = False) -> dict:
+def snapshot(project: str, settings: Path, runtime_only: bool = False) -> SnapshotRecord:
     read_settings(settings)
     postgres = container(project, settings, "postgres")
     prepare = container(project, settings, "prepare")
@@ -346,9 +492,11 @@ def integer(value: object, low: int | None = None, high: int | None = None) -> b
     return type(value) is int and (low is None or value >= low) and (high is None or value <= high)
 
 
-def index_rows(rows: list[dict], fields: tuple[str, ...]) -> dict[tuple, dict]:
+def index_rows[T: Mapping[str, object]](
+    rows: list[T], fields: tuple[str, ...]
+) -> dict[tuple[object, ...], T]:
     require(isinstance(rows, list), "INVALID_ROWS")
-    result = {}
+    result: dict[tuple[object, ...], T] = {}
     for row in rows:
         require(isinstance(row, dict) and all(field in row for field in fields), "INVALID_ROWS")
         key = tuple(row[field] for field in fields)
@@ -357,19 +505,22 @@ def index_rows(rows: list[dict], fields: tuple[str, ...]) -> dict[tuple, dict]:
     return result
 
 
-def validate_database(db: dict, bundle: dict | None = None) -> None:
+def validate_database(db: object, bundle: LegacyBundle | None = None) -> None:
     require(isinstance(db, dict) and set(db) == set(TABLES), "INVALID_DATABASE_SNAPSHOT")
-    maps = {table: index_rows(db[table], fields) for table, fields in KEYS.items()}
+    row_tables = cast("dict[str, list[dict[str, object]]]", db)
+    maps = {table: index_rows(row_tables[table], fields) for table, fields in KEYS.items()}
+    db = cast("HistoricalDatabaseRecord", db)
     require(set(maps["migrations"]) == {(1,)}, "MIGRATION_MISMATCH")
     for table in LEGACY:
         require(
-            isinstance(db[table], list) and all(isinstance(row, dict) for row in db[table]),
+            isinstance(row_tables[table], list)
+            and all(isinstance(row, dict) for row in row_tables[table]),
             "INVALID_ROWS",
         )
-    users = maps["users"]
-    requests = maps["requests"]
-    delivered = maps["delivered"]
-    events = maps["anime_events"]
+    users = cast("dict[tuple[object, ...], UserRow]", maps["users"])
+    requests = cast("dict[tuple[object, ...], HistoricalRequestRow]", maps["requests"])
+    delivered = cast("dict[tuple[object, ...], DeliveredRow]", maps["delivered"])
+    events = cast("dict[tuple[object, ...], AnimeEventRow]", maps["anime_events"])
     positions = {(row["request_id"], row["rank"]) for row in db["delivered"]}
     require(len(positions) == len(delivered), "DUPLICATE_RANK")
     require(
@@ -380,99 +531,113 @@ def validate_database(db: dict, bundle: dict | None = None) -> None:
         len({(r["tg_id"], r["action_key"]) for r in db["feedback"]}) == len(db["feedback"]),
         "DUPLICATE_ACTION",
     )
-    for row in db["requests"]:
+    for request_row in db["requests"]:
         require(
-            integer(row["id"], 1)
-            and integer(row["tg_id"], 1)
-            and (row["tg_id"],) in users
-            and isinstance(row["action_key"], str)
-            and row["action_key"]
-            and isinstance(row["raw_query"], str),
+            integer(request_row["id"], 1)
+            and integer(request_row["tg_id"], 1)
+            and (request_row["tg_id"],) in users
+            and isinstance(request_row["action_key"], str)
+            and bool(request_row["action_key"])
+            and isinstance(request_row["raw_query"], str),
             "INVALID_REQUEST",
         )
-        selected = row["seed_mal_id"] is not None
+        selected = request_row["seed_mal_id"] is not None
         require(
-            (not selected and row["bundle_id"] is None and row["resolved_at"] is None)
+            (
+                not selected
+                and request_row["bundle_id"] is None
+                and request_row["resolved_at"] is None
+            )
             or (
                 selected
-                and integer(row["seed_mal_id"], 1)
-                and isinstance(row["bundle_id"], str)
-                and IDENTITY.fullmatch(row["bundle_id"])
-                and row["resolved_at"] is not None
+                and integer(request_row["seed_mal_id"], 1)
+                and isinstance(request_row["bundle_id"], str)
+                and IDENTITY.fullmatch(request_row["bundle_id"]) is not None
+                and request_row["resolved_at"] is not None
             ),
             "INVALID_REQUEST",
         )
-    for row in db["delivered"]:
-        request = requests.get((row["request_id"],))
+    for delivery_row in db["delivered"]:
+        request = requests.get((delivery_row["request_id"],))
         require(
             request is not None
-            and request["tg_id"] == row["tg_id"]
-            and integer(row["rank"], 1, 5)
-            and integer(row["mal_id"], 1)
-            and integer(row["chat_id"])
-            and row["chat_id"] != 0
-            and integer(row["message_id"], 1)
-            and row["mal_id"] != request["seed_mal_id"],
+            and request["tg_id"] == delivery_row["tg_id"]
+            and integer(delivery_row["rank"], 1, 5)
+            and integer(delivery_row["mal_id"], 1)
+            and integer(delivery_row["chat_id"])
+            and delivery_row["chat_id"] != 0
+            and integer(delivery_row["message_id"], 1)
+            and delivery_row["mal_id"] != request["seed_mal_id"],
             "INVALID_DELIVERY",
         )
+        if request is None:
+            raise EvidenceError("INVALID_DELIVERY")
         if bundle is not None and request["bundle_id"] == bundle["id"]:
             neighbors = bundle["neighbors"][str(request["seed_mal_id"])]
             require(
-                row["rank"] <= len(neighbors)
-                and neighbors[row["rank"] - 1]["mal_id"] == row["mal_id"],
+                delivery_row["rank"] <= len(neighbors)
+                and neighbors[delivery_row["rank"] - 1]["mal_id"] == delivery_row["mal_id"],
                 "DELIVERY_ORDER",
             )
-    for row in db["anime_events"]:
-        request = requests.get((row["request_id"],))
+    for event_row in db["anime_events"]:
+        request = requests.get((event_row["request_id"],))
         require(
             request is not None
-            and request["tg_id"] == row["tg_id"]
-            and request["seed_mal_id"] == row["mal_id"]
-            and integer(row["score"], 1, 10),
+            and request["tg_id"] == event_row["tg_id"]
+            and request["seed_mal_id"] == event_row["mal_id"]
+            and integer(event_row["score"], 1, 10),
             "INVALID_ANIME_EVENT",
         )
     require(
         len({r["request_id"] for r in db["anime_events"]}) == len(events), "DUPLICATE_ANIME_EVENT"
     )
-    for row in db["anime_current"]:
+    for current_row in db["anime_current"]:
         matching = [
             event
             for event in db["anime_events"]
-            if (event["tg_id"], event["mal_id"]) == (row["tg_id"], row["mal_id"])
+            if (event["tg_id"], event["mal_id"]) == (current_row["tg_id"], current_row["mal_id"])
         ]
         require(
-            matching and row["current_event_id"] == max(event["id"] for event in matching),
+            bool(matching)
+            and current_row["current_event_id"] == max(event["id"] for event in matching),
             "CURRENT_POINTER",
         )
     require(
         set(maps["anime_current"]) == {(r["tg_id"], r["mal_id"]) for r in db["anime_events"]},
         "CURRENT_POINTER",
     )
-    for row in db["recommendation_ratings"]:
-        position = delivered.get((row["position_id"],))
+    for rating_row in db["recommendation_ratings"]:
+        position = delivered.get((rating_row["position_id"],))
         require(
             position is not None
-            and position["tg_id"] == row["tg_id"]
-            and integer(row["score"], 0, 5),
+            and position["tg_id"] == rating_row["tg_id"]
+            and integer(rating_row["score"], 0, 5),
             "INVALID_RECOMMENDATION_SCORE",
         )
-    for row in db["feedback"]:
+    for feedback_row in db["feedback"]:
         require(
-            integer(row["tg_id"], 1)
-            and (row["tg_id"],) in users
-            and isinstance(row["body"], str)
-            and row["body"],
+            integer(feedback_row["tg_id"], 1)
+            and (feedback_row["tg_id"],) in users
+            and isinstance(feedback_row["body"], str)
+            and bool(feedback_row["body"]),
             "INVALID_FEEDBACK",
         )
 
 
-def load_bundle(path: Path) -> dict:
+def load_bundle(path: Path) -> LegacyBundle:
     module_path = ROOT / "contracts" / "check_bundle.py"
     spec = importlib.util.spec_from_file_location("arb020_bundle", module_path)
+    if spec is None or spec.loader is None:
+        raise EvidenceError("BUNDLE_CONTENT")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    identity, count = module.check_bundle(path)
-    neighbors = module.read_canonical(path / "neighbors.json")[0]["neighbors"]
+    if not callable(getattr(module, "check_bundle", None)) or not callable(
+        getattr(module, "read_canonical", None)
+    ):
+        raise EvidenceError("BUNDLE_CONTENT")
+    contract = cast("PathBundleContract", module)
+    identity, count = contract.check_bundle(path)
+    neighbors = cast("Neighbors", contract.read_canonical(path / "neighbors.json")[0])["neighbors"]
     require(count == 17562, "CATALOG_COUNT")
     require(
         [item["mal_id"] for item in neighbors["1"]] == [400, 709, 4088, 329, 1303]
@@ -488,8 +653,13 @@ def load_bundle(path: Path) -> dict:
 
 
 def context_from_anchor(
-    before: dict, after: dict, report: dict, before_hash: str, after_hash: str, report_hash: str
-) -> dict:
+    before: HistoricalFullSnapshot,
+    after: HistoricalFullSnapshot,
+    report: HistoricalBuildReport,
+    before_hash: str,
+    after_hash: str,
+    report_hash: str,
+) -> HistoricalContext:
     profile_block = report.get("profile")
     require(
         not (
@@ -583,12 +753,20 @@ def context_from_anchor(
     }
 
 
-def new_rows(before: dict, after: dict, table: str) -> list[dict]:
-    old = index_rows(before[table], KEYS[table])
-    return [row for row in after[table] if tuple(row[key] for key in KEYS[table]) not in old]
+def new_rows(
+    before: HistoricalDatabaseRecord, after: HistoricalDatabaseRecord, table: str
+) -> list[dict[str, object]]:
+    prior_tables = cast("dict[str, list[dict[str, object]]]", before)
+    current_tables = cast("dict[str, list[dict[str, object]]]", after)
+    old = index_rows(prior_tables[table], KEYS[table])
+    return [
+        row for row in current_tables[table] if tuple(row[key] for key in KEYS[table]) not in old
+    ]
 
 
-def require_bot_bundle(snapshot: dict, selected: dict) -> dict:
+def require_bot_bundle(
+    snapshot: HistoricalFullSnapshot, selected: HistoricalBundleReference
+) -> ContainerRecord:
     bot = snapshot["runtime"]["bot"]
     require(
         bot is not None
@@ -602,18 +780,20 @@ def require_bot_bundle(snapshot: dict, selected: dict) -> dict:
         and Path(bot["artifact_mount"]["source"]).resolve() == Path(selected["path"]).resolve(),
         "RUNTIME_BUNDLE",
     )
+    if bot is None:
+        raise EvidenceError("RUNTIME_BUNDLE")
     return bot
 
 
 def verify_transition(
     case: str,
-    context: dict,
-    before: dict,
-    after: dict,
-    bundle: dict,
-    during: dict | None = None,
+    context: HistoricalContext,
+    before: HistoricalFullSnapshot,
+    after: HistoricalFullSnapshot,
+    bundle: LegacyBundle,
+    during: SnapshotRecord | None = None,
     phase: str | None = None,
-) -> dict:
+) -> HistoricalTransitionResult:
     require(case in CASES and context.get("schema_version") == 1, "INVALID_CASE")
     require(before.get("kind") == after.get("kind") == "full", "FULL_SNAPSHOT_REQUIRED")
     require(
@@ -626,7 +806,7 @@ def verify_transition(
     require(utc(before["captured_at"]) < utc(after["captured_at"]), "TIME_ORDER")
     old_volume = before["runtime"]["postgres"]["database_volume"]
     require(
-        old_volume
+        bool(old_volume)
         and old_volume
         == after["runtime"]["postgres"]["database_volume"]
         == context["database_volume"],
@@ -643,44 +823,52 @@ def verify_transition(
     validate_database(before["database"], bundle)
     validate_database(after["database"], bundle)
     old, current = before["database"], after["database"]
+    old_tables = cast("dict[str, list[dict[str, object]]]", old)
+    current_tables = cast("dict[str, list[dict[str, object]]]", current)
     for table in IMMUTABLE:
-        existing = index_rows(current[table], KEYS[table])
-        for key, row in index_rows(old[table], KEYS[table]).items():
-            require(existing.get(key) == row, "OLD_HISTORY_CHANGED")
+        existing = index_rows(current_tables[table], KEYS[table])
+        for key, historical_row in index_rows(old_tables[table], KEYS[table]).items():
+            require(existing.get(key) == historical_row, "OLD_HISTORY_CHANGED")
     for table in LEGACY:
         require(
-            collections.Counter(canonical(row) for row in old[table])
-            == collections.Counter(canonical(row) for row in current[table]),
+            collections.Counter(canonical(row) for row in old_tables[table])
+            == collections.Counter(canonical(row) for row in current_tables[table]),
             "LEGACY_CHANGED",
         )
     previous_requests = index_rows(old["requests"], ("id",))
     pending = []
-    for row in current["requests"]:
-        earlier = previous_requests.get((row["id"],))
+    for current_request in current["requests"]:
+        earlier = previous_requests.get((current_request["id"],))
         if earlier is None:
             continue
         immutable = ("id", "tg_id", "action_key", "raw_query", "created_at")
-        require(all(row[field] == earlier[field] for field in immutable), "OLD_REQUEST_CHANGED")
-        if row != earlier:
+        row_fields = cast("Mapping[str, object]", current_request)
+        earlier_fields = cast("Mapping[str, object]", earlier)
+        require(
+            all(row_fields[field] == earlier_fields[field] for field in immutable),
+            "OLD_REQUEST_CHANGED",
+        )
+        if current_request != earlier:
             require(
-                earlier["seed_mal_id"] is None and row["seed_mal_id"] is not None,
+                earlier["seed_mal_id"] is None and current_request["seed_mal_id"] is not None,
                 "UNRELATED_RESOLUTION",
             )
-            pending.append(row)
-    for row in new_rows(old, current, "users"):
-        require(row["tg_id"] == actor, "UNRELATED_WRITE")
+            pending.append(current_request)
+    for new_user in cast("list[UserRow]", new_rows(old, current, "users")):
+        require(new_user["tg_id"] == actor, "UNRELATED_WRITE")
     old_users = index_rows(old["users"], ("tg_id",))
-    for row in current["users"]:
-        earlier = old_users.get((row["tg_id"],))
-        if earlier is not None:
+    for current_user in current["users"]:
+        old_user = old_users.get((current_user["tg_id"],))
+        if old_user is not None:
             require(
-                row["created_at"] == earlier["created_at"]
+                current_user["created_at"] == old_user["created_at"]
                 and (
-                    row == earlier
-                    or row["tg_id"] == actor
+                    current_user == old_user
+                    or current_user["tg_id"] == actor
                     and all(
-                        row[key] == earlier[key]
-                        for key in row
+                        cast("Mapping[str, object]", current_user)[key]
+                        == cast("Mapping[str, object]", old_user)[key]
+                        for key in current_user
                         if key
                         not in (
                             "language_code",
@@ -694,20 +882,28 @@ def verify_transition(
                 "USER_HISTORY_CHANGED",
             )
     old_pointers = index_rows(old["anime_current"], ("tg_id", "mal_id"))
-    new_events = new_rows(old, current, "anime_events")
+    new_events = cast("list[AnimeEventRow]", new_rows(old, current, "anime_events"))
     current_pointers = index_rows(current["anime_current"], ("tg_id", "mal_id"))
-    for key, row in old_pointers.items():
+    for key, old_pointer in old_pointers.items():
         later = current_pointers.get(key)
-        require(later is not None and later["created_at"] == row["created_at"], "CURRENT_POINTER")
+        require(
+            later is not None and later["created_at"] == old_pointer["created_at"],
+            "CURRENT_POINTER",
+        )
         if not any((e["tg_id"], e["mal_id"]) == key for e in new_events):
-            require(later == row, "CURRENT_POINTER")
+            require(later == old_pointer, "CURRENT_POINTER")
         else:
+            if later is None:
+                raise EvidenceError("CURRENT_POINTER")
             require(
-                later["current_event_id"] > row["current_event_id"]
-                and utc(later["updated_at"]) >= utc(row["updated_at"]),
+                later["current_event_id"] > old_pointer["current_event_id"]
+                and utc(later["updated_at"]) >= utc(old_pointer["updated_at"]),
                 "CURRENT_POINTER",
             )
-    delta = {table: new_rows(old, current, table) for table in KEYS if table != "migrations"}
+    delta = cast(
+        "HistoricalDelta",
+        {table: new_rows(old, current, table) for table in KEYS if table != "migrations"},
+    )
     require(
         all(
             row.get("tg_id") == actor
@@ -724,8 +920,8 @@ def verify_transition(
     )
     require(len(pending) <= 1, "UNRELATED_RESOLUTION")
     require(len(delta["requests"]) + len(pending) <= 1, "AMBIGUOUS_REQUEST")
-    for row in delta["requests"] + pending:
-        parts = row["action_key"].split(":")
+    for changed_request in delta["requests"] + pending:
+        parts = changed_request["action_key"].split(":")
         require(
             len(parts) == 3
             and parts[0] == "msg"
@@ -734,8 +930,8 @@ def verify_transition(
             and int(parts[2]) > 0,
             "INVALID_ACTION_KEY",
         )
-    for row in delta["feedback"]:
-        parts = row["action_key"].split(":")
+    for changed_feedback in delta["feedback"]:
+        parts = changed_feedback["action_key"].split(":")
         require(
             len(parts) == 3
             and parts[0] == "msg"
@@ -765,6 +961,8 @@ def verify_transition(
             and selected_request["tg_id"] == actor,
             "EXPECTED_REQUEST_MISSING",
         )
+        if selected_request is None:
+            raise EvidenceError("EXPECTED_REQUEST_MISSING")
         seed = 40089 if case == "empty" else 1
         query = "Pittanko!! Nekozakana" if case == "empty" else "Cowboy Bebop"
         require(
@@ -831,7 +1029,7 @@ def verify_transition(
     require(actual == allowed, "UNEXPECTED_EFFECTS")
     if case in NO_EFFECT:
         require(
-            all(old[table] == current[table] for table in TABLES if table != "users"),
+            all(old_tables[table] == current_tables[table] for table in TABLES if table != "users"),
             "UNEXPECTED_EFFECTS",
         )
     if case in ("restart", "db-outage", "feedback-retry", "feedback-retry-repeat"):
@@ -907,7 +1105,9 @@ def verify_transition(
     }
 
 
-def summarize(context: dict, results_dir: Path, observations: dict) -> dict:
+def summarize(
+    context: HistoricalContext, results_dir: Path, observations: JsonObject
+) -> HistoricalSummary:
     require(results_dir.is_dir() and not results_dir.is_symlink(), "RESULTS_DIR")
     context_hash = sha(canonical(context))
     result_keys = set()
@@ -922,7 +1122,7 @@ def summarize(context: dict, results_dir: Path, observations: dict) -> dict:
             and item.get("context_sha256") == context_hash,
             "INVALID_RESULT",
         )
-        key = item["case"]
+        key = cast("str", item["case"])
         require(key not in result_keys, "DUPLICATE_RESULT")
         result_keys.add(key)
         hashes = item.get("input_sha256", {})
@@ -931,9 +1131,13 @@ def summarize(context: dict, results_dir: Path, observations: dict) -> dict:
             and set(hashes) in ({"before", "after"}, {"before", "after", "during"}),
             "INVALID_RESULT",
         )
+        hashes = cast("JsonObject", hashes)
         cached_inputs = {}
         for name, source_hash in hashes.items():
-            require(isinstance(source_hash, str) and HEX.fullmatch(source_hash), "INVALID_RESULT")
+            require(
+                isinstance(source_hash, str) and HEX.fullmatch(source_hash) is not None,
+                "INVALID_RESULT",
+            )
             cached = results_dir / "inputs" / f"{source_hash}.json"
             require(
                 cached.is_file()
@@ -948,14 +1152,16 @@ def summarize(context: dict, results_dir: Path, observations: dict) -> dict:
                 bundle_cache[bundle_name] = load_bundle(
                     Path(context["bundles"][bundle_name]["path"])
                 )
+            phase = item.get("phase")
+            require(phase is None or isinstance(phase, str), "INVALID_RESULT")
             expected = verify_transition(
                 key,
                 context,
-                cached_inputs["before"],
-                cached_inputs["after"],
+                cast("HistoricalFullSnapshot", cached_inputs["before"]),
+                cast("HistoricalFullSnapshot", cached_inputs["after"]),
                 bundle_cache[bundle_name],
-                cached_inputs.get("during"),
-                item.get("phase"),
+                cast("SnapshotRecord | None", cached_inputs.get("during")),
+                cast("str | None", phase),
             )
             require(
                 all(
@@ -977,7 +1183,7 @@ def summarize(context: dict, results_dir: Path, observations: dict) -> dict:
             require(
                 item.get("status") == "FAIL"
                 and isinstance(item.get("reason"), str)
-                and re.fullmatch(r"[A-Z_]+", item["reason"]),
+                and re.fullmatch(r"[A-Z_]+", cast("str", item["reason"])) is not None,
                 "INVALID_RESULT",
             )
             bad = True
@@ -989,23 +1195,33 @@ def summarize(context: dict, results_dir: Path, observations: dict) -> dict:
     seen = set()
     ui_bad = False
     ui_pending = False
-    for item in observations.get("scenarios", []):
+    scenarios_raw = observations.get("scenarios", [])
+    if not isinstance(scenarios_raw, (list, dict, str)):
+        raise TypeError("scenarios is not iterable")
+    scenarios = cast("Iterable[JsonValue]", scenarios_raw)
+    checked_scenarios: list[ObservedScenario] = []
+    for scenario_raw in scenarios:
         require(
-            isinstance(item, dict)
-            and set(item) == {"id", "status", "observed_at", "observation"}
-            and item["id"] in UI_IDS
-            and item["id"] not in seen
-            and item["status"] in ("PENDING", "PASS", "FAIL")
-            and isinstance(item["observation"], str)
-            and len(item["observation"]) <= 240,
+            isinstance(scenario_raw, dict)
+            and set(scenario_raw) == {"id", "status", "observed_at", "observation"}
+            and scenario_raw["id"] in UI_IDS
+            and scenario_raw["id"] not in seen
+            and scenario_raw["status"] in ("PENDING", "PASS", "FAIL")
+            and isinstance(scenario_raw["observation"], str)
+            and len(scenario_raw["observation"]) <= 240,
             "INVALID_OBSERVATIONS",
         )
-        seen.add(item["id"])
-        if item["status"] == "PASS":
-            utc(item["observed_at"])
-            require(item["observation"].strip() != "", "INVALID_OBSERVATIONS")
-        ui_bad |= item["status"] == "FAIL"
-        ui_pending |= item["status"] == "PENDING"
+        scenario = cast("ObservedScenario", scenario_raw)
+        checked_scenarios.append(scenario)
+        seen.add(scenario["id"])
+        if scenario["status"] == "PASS":
+            observed_at = scenario["observed_at"]
+            if not isinstance(observed_at, str):
+                raise EvidenceError("INVALID_TIMESTAMP")
+            utc(observed_at)
+            require(scenario["observation"].strip() != "", "INVALID_OBSERVATIONS")
+        ui_bad |= scenario["status"] == "FAIL"
+        ui_pending |= scenario["status"] == "PENDING"
     require(seen == set(UI_IDS), "INVALID_OBSERVATIONS")
     status = (
         "FAIL"
@@ -1019,7 +1235,7 @@ def summarize(context: dict, results_dir: Path, observations: dict) -> dict:
         "live_acceptance": status,
         "machine": {"passed": passed, "required": len(CASES)},
         "human": {
-            "passed": sum(item["status"] == "PASS" for item in observations["scenarios"]),
+            "passed": sum(scenario["status"] == "PASS" for scenario in checked_scenarios),
             "required": len(UI_IDS),
         },
         "context_sha256": context_hash,
@@ -1056,9 +1272,13 @@ def main(argv: list[str] | None = None) -> int:
     if requested and requested[0] == "live-v2":
         module_path = Path(__file__).with_name("live_evidence_v2.py")
         spec = importlib.util.spec_from_file_location("arb034_live_v2", module_path)
+        if spec is None or spec.loader is None:
+            raise EvidenceError("INVALID_CASE")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        return module.main(requested[1:])
+        if not callable(getattr(module, "main", None)):
+            raise EvidenceError("INVALID_CASE")
+        return cast("LiveEvidenceMain", module).main(requested[1:])
     args = parser().parse_args(argv)
     if args.command == "canary":
         print(CANARIES[args.name], end="")
@@ -1067,10 +1287,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "snapshot":
             write_new(args.output, snapshot(args.project, args.settings, args.runtime_only))
         elif args.command == "bind-actor":
-            before, after, report = (
-                read_json(path) for path in (args.before, args.after, args.build_report)
-            )
-            value = context_from_anchor(
+            before = cast("HistoricalFullSnapshot", read_json(args.before))
+            after = cast("HistoricalFullSnapshot", read_json(args.after))
+            report = cast("HistoricalBuildReport", read_json(args.build_report))
+            bound_context = context_from_anchor(
                 before,
                 after,
                 report,
@@ -1078,11 +1298,12 @@ def main(argv: list[str] | None = None) -> int:
                 sha(args.after.read_bytes()),
                 sha(args.build_report.read_bytes()),
             )
-            write_new(args.output, value)
+            write_new(args.output, bound_context)
         elif args.command == "verify":
-            context = read_json(args.context)
-            before, after = read_json(args.before), read_json(args.after)
-            during = read_json(args.during) if args.during else None
+            context = cast("HistoricalContext", read_json(args.context))
+            before = cast("HistoricalFullSnapshot", read_json(args.before))
+            after = cast("HistoricalFullSnapshot", read_json(args.after))
+            during = cast("SnapshotRecord", read_json(args.during)) if args.during else None
             inputs = {"before": args.before, "after": args.after}
             if args.during:
                 inputs["during"] = args.during
@@ -1127,12 +1348,14 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"FAIL {result['reason']}", file=sys.stderr)
                 return 1
         elif args.command == "summarize":
-            value = summarize(
-                read_json(args.context), args.results_dir, read_json(args.observations)
+            summary_value = summarize(
+                cast("HistoricalContext", read_json(args.context)),
+                args.results_dir,
+                read_json(args.observations),
             )
-            write_new(args.output, value)
-            print(value["live_acceptance"])
-            return 0 if value["live_acceptance"] == "PASS" else 1
+            write_new(args.output, summary_value)
+            print(summary_value["live_acceptance"])
+            return 0 if summary_value["live_acceptance"] == "PASS" else 1
         print("PASS")
         return 0
     except (

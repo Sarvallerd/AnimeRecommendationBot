@@ -8,17 +8,26 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from typing import cast
 from unittest.mock import patch
 
+from recsys.contracts.bundle import AnimeRecord, Catalog
 from recsys.contracts.provenance import SOURCE_FILES, SOURCE_LAYOUT
 from recsys.data.sources import load_registry
-from recsys.historical.assessment import canonical, sha
+from recsys.historical.assessment import HistoricalComparison, HistoricalQuery, canonical, sha
 from recsys.historical.comparison import (
     DISTRIBUTIONS,
     ORIGINAL_HASHES,
     ORIGINALS,
     THREAD_ENVIRONMENT,
+    ComparisonArtifact,
+    ComparisonMethod,
+    ComparisonProvenance,
     EvaluationError,
+    MeasurementArtifact,
+    MeasurementWorker,
+    RawSource,
+    WorkerResult,
     _baseline_queries,
     _performance,
     _validate_bundle_links,
@@ -28,11 +37,11 @@ from recsys.historical.comparison import (
     _worker,
     compare,
 )
-from recsys.historical.genre_baseline import genre_neighbors
+from recsys.historical.genre_baseline import GenreAnime, GenreQuery, genre_neighbors
 
 
 class RootLockOriginalsTests(unittest.TestCase):
-    def test_root_lock_checks_pinned_original_bytes(self):
+    def test_root_lock_checks_pinned_original_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             lock = root / "uv.lock"
@@ -63,23 +72,46 @@ class RootLockOriginalsTests(unittest.TestCase):
 
 
 class EvaluationTests(unittest.TestCase):
-    def test_jaccard_adapter_preserves_baseline_scores_and_order(self):
-        anime = {
-            "1": {"genres": ["Action", "Drama"]},
-            "2": {"genres": ["Drama"]},
-            "3": {"genres": ["Action", "Drama"]},
-            "4": {"genres": []},
+    def test_jaccard_adapter_preserves_baseline_scores_and_order(self) -> None:
+        anime: dict[str, AnimeRecord] = {
+            key: {
+                "title": key,
+                "aliases": [],
+                "genres": genres,
+                "score": None,
+                "year": None,
+                "type": None,
+                "episodes": None,
+                "synopsis": None,
+            }
+            for key, genres in {
+                "1": ["Action", "Drama"],
+                "2": ["Drama"],
+                "3": ["Action", "Drama"],
+                "4": [],
+            }.items()
         }
-        ids, rows = _baseline_queries(anime, [{"mal_id": 1}, {"mal_id": 4}])
+        queries: list[GenreQuery] = [
+            {
+                "mal_id": item,
+                "title": str(item),
+                "popularity_rank": item,
+                "members": 1,
+                "popularity_band": "test",
+                "rationale": "synthetic baseline query",
+            }
+            for item in (1, 4)
+        ]
+        ids, rows = _baseline_queries(anime, queries)
         self.assertEqual(ids, [1, 2, 3, 4])
         self.assertEqual(
             [{"mal_id": x["mal_id"], "score": x["score"]} for x in rows[0]["recommendations"]],
-            genre_neighbors(anime, 1),
+            genre_neighbors({key: cast("GenreAnime", value) for key, value in anime.items()}, 1),
         )
         self.assertEqual(rows[1]["status"], "empty_genres")
 
-    def test_selected_worker_uses_real_vectors_and_records_timing(self):
-        def record(title):
+    def test_selected_worker_uses_real_vectors_and_records_timing(self) -> None:
+        def record(title: str) -> AnimeRecord:
             return {
                 "title": title,
                 "aliases": [],
@@ -163,12 +195,12 @@ class EvaluationTests(unittest.TestCase):
         self.assertGreater(result["prepare_wall_ns"], 0)
         self.assertTrue(all(pool["num_threads"] == 1 for pool in result["effective_threadpools"]))
 
-    def test_provenance_rejects_null_wrong_source_and_garbage_digest(self):
+    def test_provenance_rejects_null_wrong_source_and_garbage_digest(self) -> None:
         import recsys.historical.comparison as evaluation
 
         registry, registry_sha = load_registry()
         descriptors = {entry["id"]: entry for entry in registry["sources"]}
-        raw_sources = [
+        raw_sources: list[RawSource] = [
             {"id": d["id"], "size": d["size"], "sha256": d["sha256"]}
             for d in (
                 descriptors["mal_anime"],
@@ -177,7 +209,7 @@ class EvaluationTests(unittest.TestCase):
             )
         ]
         code_dir = Path(evaluation.__file__).parents[1]
-        provenance = {
+        provenance: ComparisonProvenance = {
             "registry_sha256": registry_sha,
             "raw_sources": raw_sources,
             "bundle_identity": "sha256:" + "a" * 64,
@@ -202,18 +234,21 @@ class EvaluationTests(unittest.TestCase):
             ("legacy_originals", {}),
         ):
             with self.subTest(field=field):
-                mutated = copy.deepcopy(provenance)
+                mutated: dict[str, object] = dict(copy.deepcopy(provenance))
                 mutated[field] = bad
                 with self.assertRaises(EvaluationError):
                     _validate_provenance(mutated, "1" * 64)
 
-    def test_bundle_provenance_links_to_actual_files(self):
-        from recsys.contracts.bundle import read_canonical
+    def test_bundle_provenance_links_to_actual_files(self) -> None:
+        from recsys.contracts.bundle import Manifest, read_canonical
 
         fixture = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "bundle"
         _, catalog_raw = read_canonical(fixture / "catalog.json")
         _, neighbors_raw = read_canonical(fixture / "neighbors.json")
-        manifest, _ = read_canonical(fixture / "manifest.json")
+        manifest_value, _ = read_canonical(fixture / "manifest.json")
+        assert isinstance(manifest_value, dict)
+        assert isinstance(manifest_value.get("sources"), list)
+        manifest = cast("Manifest", manifest_value)
         names = (
             "build_report",
             "glove_300d",
@@ -228,7 +263,13 @@ class EvaluationTests(unittest.TestCase):
         ]
         manifest_raw = canonical(manifest)
         sources = {item["name"]: item["sha256"] for item in manifest["sources"]}
-        provenance = {
+        provenance: ComparisonProvenance = {
+            "code_revision": "a" * 40,
+            "source_layout": SOURCE_LAYOUT,
+            "code_files": {},
+            "lockfile_sha256": "b" * 64,
+            "versions": {},
+            "legacy_originals": {},
             "bundle_identity": "sha256:" + sha(manifest_raw),
             "manifest_sha256": sha(manifest_raw),
             "neighbors_sha256": sha(neighbors_raw),
@@ -236,7 +277,7 @@ class EvaluationTests(unittest.TestCase):
             "normalization_report_sha256": sources["normalization_report"],
             "registry_sha256": sources["source_registry"],
             "raw_sources": [
-                {"id": name, "sha256": sources[name]}
+                {"id": name, "sha256": sources[name], "size": 1}
                 for name in ("mal_anime", "mal_synopsis", "glove_300d")
             ],
         }
@@ -254,7 +295,7 @@ class EvaluationTests(unittest.TestCase):
             with self.assertRaisesRegex(EvaluationError, "bundle file hashes"):
                 _validate_bundle_links(wrong, bundle / "catalog.json", catalog_raw)
 
-    def test_diagnostics_digest_must_match_actual_bytes(self):
+    def test_diagnostics_digest_must_match_actual_bytes(self) -> None:
         from recsys.historical.legacy_vectors import FEATURES, KMEANS, RETAINED_SHA256
 
         registry, _ = load_registry()
@@ -312,28 +353,63 @@ class EvaluationTests(unittest.TestCase):
         with self.assertRaisesRegex(EvaluationError, "diagnostics SHA256"):
             _validate_legacy_diagnostics(diagnostics, raw, "garbage")
         wrong = copy.deepcopy(diagnostics)
-        wrong["clustering"]["cluster_histogram"]["0"] = 99
+        clustering = wrong["clustering"]
+        assert isinstance(clustering, dict)
+        histogram = clustering["cluster_histogram"]
+        assert isinstance(histogram, dict)
+        histogram["0"] = 99
         with self.assertRaises(EvaluationError):
             _validate_legacy_diagnostics(wrong, canonical(wrong), sha(canonical(wrong)))
 
-    def test_measurements_reject_missing_metadata_bad_threads_and_output_digest(self):
+    def test_measurements_reject_missing_metadata_bad_threads_and_output_digest(self) -> None:
         comparison_raw = b"{}\n"
         diagnostics = {"fixture": True}
-        source = {"id": "glove_300d", "sha256": "a" * 64, "size": 123}
-        methods = [
-            {"id": name, "universe_count": 3, "universe_ids_sha256": "b" * 64, "queries": []}
+        source: RawSource = {"id": "glove_300d", "sha256": "a" * 64, "size": 123}
+        methods: list[ComparisonMethod] = [
+            {
+                "id": name,
+                "version": "fixture-v1",
+                "parameters": {},
+                "parameters_sha256": "a" * 64,
+                "universe_count": 3,
+                "universe_ids_sha256": "b" * 64,
+                "queries": [],
+            }
             for name in ("glove-selected", "genre-jaccard", "legacy-repaired")
         ]
-        comparison = {"methods": methods, "provenance": {"raw_sources": [source]}}
-        extras = {
+        comparison: ComparisonArtifact = {
+            "schema_version": 1,
+            "protocol_version": "arb018-v1",
+            "query_set_version": "fixture-v1",
+            "query_set_sha256": "a" * 64,
+            "catalog_sha256": "b" * 64,
+            "legacy_diagnostics_sha256": "c" * 64,
+            "methods": methods,
+            "provenance": {
+                "registry_sha256": "a" * 64,
+                "raw_sources": [source],
+                "bundle_identity": "sha256:" + "a" * 64,
+                "manifest_sha256": "a" * 64,
+                "neighbors_sha256": "b" * 64,
+                "normalization_report_sha256": "c" * 64,
+                "build_report_sha256": "d" * 64,
+                "code_revision": "e" * 40,
+                "source_layout": SOURCE_LAYOUT,
+                "code_files": {},
+                "lockfile_sha256": "f" * 64,
+                "versions": {},
+                "legacy_originals": {},
+            },
+        }
+        extras: dict[str, dict[str, object]] = {
             "glove-selected": {"glove": {"sha256": source["sha256"], "size": 123}},
             "genre-jaccard": {},
             "legacy-repaired": {"legacy_diagnostics": diagnostics},
         }
-        workers = []
+        workers: list[MeasurementWorker] = []
         for method in methods:
             name = method["id"]
-            result = {
+            worker_output: WorkerResult = {
                 "method": name,
                 "universe_count": 3,
                 "universe_ids_sha256": "b" * 64,
@@ -345,7 +421,7 @@ class EvaluationTests(unittest.TestCase):
                     "method": name,
                     "repetition": 1,
                     "exit_code": 0,
-                    "output_sha256": sha(canonical(result)),
+                    "output_sha256": sha(canonical(worker_output)),
                     "end_to_end_wall_ns": 20,
                     "prepare_wall_ns": 10,
                     "rank20_wall_ns": 5,
@@ -355,7 +431,7 @@ class EvaluationTests(unittest.TestCase):
                     else [{"num_threads": 1, "user_api": "blas", "internal_api": "openblas"}],
                 }
             )
-        measurements = {
+        measurements: MeasurementArtifact = {
             "schema_version": 1,
             "protocol_version": "arb018-v1",
             "comparison_sha256": hashlib.sha256(comparison_raw).hexdigest(),
@@ -381,17 +457,17 @@ class EvaluationTests(unittest.TestCase):
             ],
             "workers": workers,
         }
-        result = _performance(measurements, comparison_raw, comparison, diagnostics)
-        self.assertEqual(result["glove-selected"]["rank20_wall_ns"]["median"], 5)
-        mutations = []
+        performance = _performance(measurements, comparison_raw, comparison, diagnostics)
+        self.assertEqual(performance["glove-selected"]["rank20_wall_ns"]["median"], 5)
+        mutations: list[object] = []
         wrong = copy.deepcopy(measurements)
-        wrong.pop("runtime")
+        cast("dict[str, object]", wrong).pop("runtime")
         mutations.append(wrong)
         wrong = copy.deepcopy(measurements)
-        wrong.pop("thread_environment")
+        cast("dict[str, object]", wrong).pop("thread_environment")
         mutations.append(wrong)
         wrong = copy.deepcopy(measurements)
-        wrong["machine"] = None
+        cast("dict[str, object]", wrong)["machine"] = None
         mutations.append(wrong)
         wrong = copy.deepcopy(measurements)
         wrong["workers"][0]["effective_threadpools"][0]["num_threads"] = 99
@@ -407,7 +483,7 @@ class EvaluationTests(unittest.TestCase):
                 with self.assertRaises(EvaluationError):
                     _performance(mutated, comparison_raw, comparison, diagnostics)
 
-    def test_bad_repetition_never_creates_output(self):
+    def test_bad_repetition_never_creates_output(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             out = Path(temp) / "out"
             with self.assertRaisesRegex(EvaluationError, "repetitions"):
@@ -431,7 +507,7 @@ if __name__ == "__main__":
 
 
 class SummaryReportTests(unittest.TestCase):
-    def test_summary_includes_methods_machine_scope_and_short_counts(self):
+    def test_summary_includes_methods_machine_scope_and_short_counts(self) -> None:
         from recsys.historical.assessment import make_packet, make_template
         from recsys.historical.comparison import (
             METHODS,
@@ -441,7 +517,7 @@ class SummaryReportTests(unittest.TestCase):
             summarize,
         )
 
-        def record(title):
+        def record(title: str) -> AnimeRecord:
             return {
                 "title": title,
                 "aliases": [],
@@ -453,8 +529,11 @@ class SummaryReportTests(unittest.TestCase):
                 "score": 8.0,
             }
 
-        catalog = {"schema_version": 1, "anime": {"1": record("First"), "2": record("Second")}}
-        queries = [
+        catalog: Catalog = {
+            "schema_version": 1,
+            "anime": {"1": record("First"), "2": record("Second")},
+        }
+        queries: list[HistoricalQuery] = [
             {
                 "query_mal_id": 1,
                 "status": "ok",
@@ -463,7 +542,7 @@ class SummaryReportTests(unittest.TestCase):
             }
             for _ in range(20)
         ]
-        methods = [
+        methods: list[ComparisonMethod] = [
             {
                 "id": name,
                 "version": VERSIONS[name],
@@ -487,10 +566,12 @@ class SummaryReportTests(unittest.TestCase):
             "raw_sources": [{"id": "mal_anime", "size": 100, "sha256": "2" * 64}],
             "code_files": {"evaluation.py": "3" * 64},
         }
+        catalog_sha = sha(canonical(catalog))
+        query_set_sha = "4" * 64
         comparison = {
             "query_set_version": "synthetic-v1",
-            "query_set_sha256": "4" * 64,
-            "catalog_sha256": sha(canonical(catalog)),
+            "query_set_sha256": query_set_sha,
+            "catalog_sha256": catalog_sha,
             "legacy_diagnostics_sha256": "5" * 64,
             "provenance": provenance,
             "methods": methods,
@@ -515,7 +596,8 @@ class SummaryReportTests(unittest.TestCase):
                 {"method": name, "effective_threadpools": [{"num_threads": 1}]} for name in METHODS
             ],
         }
-        packet = make_packet(comparison, catalog)
+        # The packet hashes the complete comparison bytes, including context fields.
+        packet = make_packet(cast("HistoricalComparison", comparison), catalog)
         assessment = make_template(packet)
         assessment["assessor"] = {
             "id": "synthetic-fixture",
@@ -525,7 +607,11 @@ class SummaryReportTests(unittest.TestCase):
             "prompt_version": None,
             "prompt_sha256": None,
         }
-        for row in assessment["judgments"]:
+        judgments = assessment["judgments"]
+        assert isinstance(judgments, list)
+        for value in judgments:
+            assert isinstance(value, dict)
+            row = cast("dict[str, object]", value)
             row["rationale"] = "Catalog evidence is insufficient."
             row["franchise_rationale"] = "Catalog evidence is insufficient."
         perf = {

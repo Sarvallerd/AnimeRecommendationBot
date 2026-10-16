@@ -6,20 +6,28 @@ import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Callable
 from unittest.mock import patch
 
 from recsys import __version__
 from recsys.content.glove import _canonical, build
-from recsys.contracts.bundle import ContractError, check_bundle
+from recsys.contracts.bundle import AnimeRecord, ContractError, check_bundle
+from recsys.data.sources import SourceDescriptor, SourceRegistry
 from recsys.release.export import ALGORITHM, export_bundle
 
 
-def sha(raw):
+def sha(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+def _object(value: object) -> dict[str, object]:
+    if not isinstance(value, dict) or any(not isinstance(key, str) for key in value):
+        raise AssertionError("expected JSON object")
+    return value
+
+
 class ExportTests(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
@@ -39,7 +47,12 @@ class ExportTests(unittest.TestCase):
         self.inputs = (self.catalog, self.neighbors, self.report, self.normalization)
 
     @staticmethod
-    def _entry(title, aliases=None, genres=None, synopsis=None):
+    def _entry(
+        title: str,
+        aliases: list[str] | None = None,
+        genres: list[str] | None = None,
+        synopsis: str | None = None,
+    ) -> AnimeRecord:
         return {
             "title": title,
             "aliases": aliases or [],
@@ -51,7 +64,12 @@ class ExportTests(unittest.TestCase):
             "synopsis": synopsis,
         }
 
-    def _fixture(self, root, anime=None, glove_lines=None):
+    def _fixture(
+        self,
+        root: Path,
+        anime: dict[str, AnimeRecord] | None = None,
+        glove_lines: list[str] | None = None,
+    ) -> tuple[SourceRegistry, str]:
         anime = anime or {"2": self._entry("alpha"), "10": self._entry("alpha", ["beta"])}
         glove_lines = glove_lines or [
             "alpha " + " ".join(["1"] + ["0"] * 299),
@@ -61,7 +79,7 @@ class ExportTests(unittest.TestCase):
         (root / "glove.txt").write_bytes(glove_raw)
         catalog_raw = _canonical({"schema_version": 1, "anime": anime})
         (root / "catalog.json").write_bytes(catalog_raw)
-        mal = [
+        mal: list[SourceDescriptor] = [
             {
                 "id": name,
                 "filename": name + ".csv",
@@ -71,7 +89,7 @@ class ExportTests(unittest.TestCase):
             }
             for name in ("mal_anime", "mal_synopsis")
         ]
-        registry = {
+        registry: SourceRegistry = {
             "schema_version": 1,
             "provenance": {
                 "mal": {"commit": "test", "repository": "https://example.org"},
@@ -109,7 +127,7 @@ class ExportTests(unittest.TestCase):
         (root / "normalization-report.json").write_bytes(_canonical(report))
         return registry, registry_sha
 
-    def export(self, store="store"):
+    def export(self, store: str = "store") -> Path:
         return export_bundle(
             *self.inputs,
             self.root / store,
@@ -117,18 +135,18 @@ class ExportTests(unittest.TestCase):
             registry_sha256=self.registry_sha,
         )
 
-    def mutate(self, path, change):
+    def mutate(self, path: Path, change: Callable[[dict[str, object]], object]) -> None:
         value = json.loads(path.read_bytes())
-        change(value)
+        change(_object(value))
         path.write_bytes(_canonical(value))
 
-    def test_pinned_profile_matches_actual_builder(self):
+    def test_pinned_profile_matches_actual_builder(self) -> None:
         self.assertEqual(json.loads(self.report.read_bytes())["algorithm"], ALGORITHM)
         self.assertEqual(
             json.loads(self.report.read_bytes())["producer"]["package_version"], __version__
         )
 
-    def test_legacy_export_rejects_release_report_shape(self):
+    def test_legacy_export_rejects_release_report_shape(self) -> None:
         self.mutate(
             self.report,
             lambda value: value.update(
@@ -138,7 +156,7 @@ class ExportTests(unittest.TestCase):
         with self.assertRaises(ContractError):
             self.export()
 
-    def test_determinism_byte_preservation_and_existing_target(self):
+    def test_determinism_byte_preservation_and_existing_target(self) -> None:
         first = self.export("a")
         second = self.export("b")
         self.assertEqual(first.name, second.name)
@@ -159,11 +177,13 @@ class ExportTests(unittest.TestCase):
         self.assertEqual(len(manifest["sources"]), 8)
         self.assertEqual(manifest["sources"][0]["name"], "build_report")
 
-    def test_provenance_change_changes_identity_with_same_artifacts(self):
+    def test_provenance_change_changes_identity_with_same_artifacts(self) -> None:
         first = self.export("a")
         self.mutate(
             self.report,
-            lambda value: value["execution"].update(requested_block_rows=2, effective_block_rows=2),
+            lambda value: _object(value["execution"]).update(
+                requested_block_rows=2, effective_block_rows=2
+            ),
         )
         second = self.export("a")
         self.assertNotEqual(first, second)
@@ -171,7 +191,7 @@ class ExportTests(unittest.TestCase):
             (first / "neighbors.json").read_bytes(), (second / "neighbors.json").read_bytes()
         )
 
-    def test_report_corruption_rejected_before_store(self):
+    def test_report_corruption_rejected_before_store(self) -> None:
         mutations = [
             lambda x: x["files"]["neighbors.json"].update(sha256=sha(b"wrong")),
             lambda x: x["inputs"]["normalization-report.json"].update(sha256=sha(b"wrong")),
@@ -195,7 +215,7 @@ class ExportTests(unittest.TestCase):
                 self.assertFalse((self.root / f"bad-{i}").exists())
         self.report.write_bytes(original)
 
-    def test_corrupt_catalog_neighbor_and_normalization_rejected(self):
+    def test_corrupt_catalog_neighbor_and_normalization_rejected(self) -> None:
         for path, edit in (
             (self.catalog, b"bad"),
             (self.neighbors, b"bad"),
@@ -209,7 +229,7 @@ class ExportTests(unittest.TestCase):
                 self.assertFalse((self.root / f"bad-{path.name}").exists())
                 path.write_bytes(original)
 
-    def test_existing_conflicts_are_untouched(self):
+    def test_existing_conflicts_are_untouched(self) -> None:
         valid = self.export("source")
         for kind in ("incomplete", "extra", "symlink", "file"):
             store = self.root / kind
@@ -230,7 +250,7 @@ class ExportTests(unittest.TestCase):
                 self.export(kind)
             self.assertTrue(target.exists() or target.is_symlink())
 
-    def test_stage_validation_failure_leaves_no_published_directory(self):
+    def test_stage_validation_failure_leaves_no_published_directory(self) -> None:
         store = self.root / "failed"
         with patch(
             "recsys.release.export.check_bundle", side_effect=ContractError("staged failure")
@@ -239,7 +259,7 @@ class ExportTests(unittest.TestCase):
                 self.export("failed")
         self.assertEqual([p.name for p in store.iterdir()], [".publication.lock"])
 
-    def test_staged_write_failure_and_symlink_lock_are_safe(self):
+    def test_staged_write_failure_and_symlink_lock_are_safe(self) -> None:
         store = self.root / "write-failed"
         with patch("recsys.release.export.os.fsync", side_effect=OSError("sync failed")):
             with self.assertRaisesRegex(OSError, "sync failed"):
@@ -252,7 +272,7 @@ class ExportTests(unittest.TestCase):
             self.export("unsafe-lock")
         self.assertEqual([p.name for p in lock_store.iterdir()], [".publication.lock"])
 
-    def test_cooperating_concurrent_exports(self):
+    def test_cooperating_concurrent_exports(self) -> None:
         with ThreadPoolExecutor(max_workers=3) as pool:
             paths = list(pool.map(lambda _: self.export("concurrent"), range(3)))
         self.assertEqual(paths, [paths[0]] * 3)

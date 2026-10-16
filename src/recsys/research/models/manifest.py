@@ -7,22 +7,22 @@ import importlib.metadata
 import platform
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    pass
+from typing import TypedDict, cast
 
 from recsys import __version__
-from recsys.contracts.bundle import canonical_bytes
+from recsys.contracts.bundle import JSONValue, canonical_bytes
 from recsys.contracts.provenance import SOURCE_LAYOUT, source_fingerprints
 from recsys.release.lock import release_info
 from recsys.research.artifacts import (
+    FileDescriptor,
+    StreamDescriptor,
     check_descriptor,
     file_descriptor,
     read_json,
     safe_path,
     separate,
 )
+from recsys.research.gpu import GpuMetadata
 from recsys.research.models.spec import (
     EXPECTED_VARIANTS,
     GPU_DEPENDENCIES,
@@ -52,6 +52,39 @@ MODEL_FIELDS = {
 }
 
 
+class ArrayDescriptor(FileDescriptor):
+    dtype: str
+    shape: list[int]
+
+
+class ModelProducer(TypedDict):
+    code_revision: str
+    code_files_sha256: dict[str, str]
+    source_layout: str
+    python_version: str
+    package_version: str
+    dependency_versions: dict[str, str]
+    execution: dict[str, object]
+
+
+class ModelManifest(TypedDict):
+    schema_version: int
+    kind: str
+    variant_id: str
+    parameters: dict[str, JSONValue]
+    campaign_spec_sha256: str
+    prepared_identity: str
+    protocol_identity: str
+    fit_identity: str
+    catalog_descriptor: FileDescriptor
+    train_interactions: StreamDescriptor
+    train_stats: FileDescriptor
+    external_inputs: dict[str, FileDescriptor]
+    producer: ModelProducer
+    files: dict[str, FileDescriptor | ArrayDescriptor]
+    metadata: dict[str, object]
+
+
 HEX40 = re.compile(r"[0-9a-f]{40}\Z")
 
 
@@ -61,7 +94,12 @@ HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 NAME = re.compile(r"[a-z][a-z0-9_-]*\.(?:json|npy)\Z")
 
 
-def _external(variant_id, assets, prepared_dir, output_dir):
+def _external(
+    variant_id: str,
+    assets: dict[str, Path] | None,
+    prepared_dir: Path,
+    output_dir: Path,
+) -> dict[str, FileDescriptor]:
     assets = {} if assets is None else assets
     if type(assets) is not dict:
         fail("research_model_invalid")
@@ -74,7 +112,7 @@ def _external(variant_id, assets, prepared_dir, output_dir):
     )
     if set(assets) != required or any(not isinstance(path, Path) for path in assets.values()):
         fail("research_model_invalid")
-    entries = {}
+    entries: dict[str, FileDescriptor] = {}
     for name, path in assets.items():
         separate(path, prepared_dir, output_dir)
         desc = file_descriptor(path / "model-manifest.json" if variant_id == "hybrid" else path)
@@ -87,7 +125,13 @@ def _external(variant_id, assets, prepared_dir, output_dir):
     return entries
 
 
-def _producer(code_revision, variant_id, *, model_backend="cpu", scoring=None):
+def _producer(
+    code_revision: object,
+    variant_id: str,
+    *,
+    model_backend: str = "cpu",
+    scoring: GpuMetadata | None = None,
+) -> ModelProducer:
     import numpy as np
 
     if type(code_revision) is not str or HEX40.fullmatch(code_revision) is None:
@@ -109,7 +153,7 @@ def _producer(code_revision, variant_id, *, model_backend="cpu", scoring=None):
                 fail("research_gpu_unavailable")
     elif model_backend != "cpu" or scoring is not None:
         fail("research_backend_unsupported")
-    execution = {"backend": "cpu", "dtype": "float64", "blas_threads": 1}
+    execution: dict[str, object] = {"backend": "cpu", "dtype": "float64", "blas_threads": 1}
     if scoring is not None:
         execution["scoring"] = scoring
     return {
@@ -123,7 +167,7 @@ def _producer(code_revision, variant_id, *, model_backend="cpu", scoring=None):
     }
 
 
-def _payloads(stage):
+def _payloads(stage: Path) -> dict[str, FileDescriptor | ArrayDescriptor]:
     import numpy as np
 
     if any(
@@ -131,7 +175,7 @@ def _payloads(stage):
         for entry in stage.iterdir()
     ):
         fail("research_model_invalid")
-    answer = {}
+    answer: dict[str, FileDescriptor | ArrayDescriptor] = {}
     for entry in sorted(stage.iterdir()):
         base = file_descriptor(entry)
         if entry.suffix == ".json":
@@ -143,18 +187,21 @@ def _payloads(stage):
                 raise ValueError("research_model_invalid") from exc
             if not isinstance(array, np.ndarray) or array.dtype.hasobject or array.dtype.fields:
                 fail("research_model_invalid")
-            base = {**base, "dtype": array.dtype.str, "shape": list(array.shape)}
+            base = cast(
+                "ArrayDescriptor", {**base, "dtype": array.dtype.str, "shape": list(array.shape)}
+            )
         answer[entry.name] = base
     return answer
 
 
-def _check_payloads(model_dir, files):
+def _check_payloads(model_dir: Path, files: object) -> None:
     import numpy as np
 
     if type(files) is not dict or any(
         type(name) is not str or NAME.fullmatch(name) is None for name in files
     ):
         fail("research_model_invalid")
+    files = cast("dict[str, dict[str, object]]", files)
     observed = {entry.name for entry in model_dir.iterdir()}
     if observed != {"model-manifest.json", *files}:
         fail("research_model_invalid")
@@ -163,7 +210,7 @@ def _check_payloads(model_dir, files):
         if entry.suffix == ".json":
             exact(desc, {"bytes", "sha256"})
             check_descriptor(desc)
-            read_json(entry, desc)
+            read_json(entry, cast("FileDescriptor", desc))
         else:
             exact(desc, {"bytes", "sha256", "dtype", "shape"})
             check_descriptor({key: desc[key] for key in ("bytes", "sha256")})
@@ -191,20 +238,23 @@ def _check_payloads(model_dir, files):
 
 
 def _validate_manifest(
-    manifest, *, inputs: ScoringInputs, backend="cpu", expected_code_revision=None
-):
+    manifest: object,
+    *,
+    inputs: ScoringInputs,
+    backend: str = "cpu",
+    expected_code_revision: str | None = None,
+) -> ModelManifest:
     exact(manifest, MODEL_FIELDS)
+    manifest = cast("dict[str, object]", manifest)
     variant = manifest["variant_id"]
-    _model_backend(variant, backend)
     if type(variant) is not str or variant not in EXPECTED_VARIANTS:
         fail("research_model_variant_invalid")
+    _model_backend(variant, backend)
     spec, campaign_hash = campaign()
-    if (
-        type(manifest["producer"]) is not dict
-        or type(manifest["producer"].get("code_revision")) is not str
-    ):
+    producer_value = manifest["producer"]
+    if type(producer_value) is not dict or type(producer_value.get("code_revision")) is not str:
         fail("research_model_invalid")
-    producer = manifest["producer"]
+    producer = cast("ModelProducer", producer_value)
     if manifest.get("schema_version") != 2 or producer.get("source_layout") != SOURCE_LAYOUT:
         fail("research_source_layout_unsupported")
     if expected_code_revision is not None and producer["code_revision"] != expected_code_revision:
@@ -223,46 +273,55 @@ def _validate_manifest(
         with gpu_execution(expected_scoring=scoring):
             pass
     expected_producer = _producer(
-        producer["code_revision"], variant, model_backend=backend, scoring=scoring
+        producer["code_revision"],
+        variant,
+        model_backend=backend,
+        scoring=cast("GpuMetadata | None", scoring),
     )
+    checked = cast("ModelManifest", manifest)
     if (
         type(manifest["schema_version"]) is not int
         or manifest["schema_version"] != 2
         or manifest["kind"] != "arb-ml02-model"
-        or canonical_bytes(manifest["parameters"]) != canonical_bytes(spec["variants"][variant])
+        or canonical_bytes(checked["parameters"]) != canonical_bytes(spec["variants"][variant])
         or manifest["campaign_spec_sha256"] != campaign_hash
         or manifest["prepared_identity"] != inputs.prepared_identity
         or manifest["protocol_identity"] != inputs.protocol_identity
         or manifest["fit_identity"] != inputs.fit_identity
-        or manifest["catalog_descriptor"] != inputs.catalog_descriptor
-        or manifest["train_interactions"] != inputs.train_interactions_descriptor
-        or manifest["train_stats"] != inputs.train_stats_descriptor
-        or type(manifest["external_inputs"]) is not dict
+        or checked["catalog_descriptor"] != inputs.catalog_descriptor
+        or checked["train_interactions"] != inputs.train_interactions_descriptor
+        or checked["train_stats"] != inputs.train_stats_descriptor
+        or type(checked["external_inputs"]) is not dict
         or canonical_bytes(producer) != canonical_bytes(expected_producer)
     ):
         fail("research_model_invalid")
-    if variant in ("popularity", "itemknn", "puresvd") and manifest["external_inputs"]:
+    if variant in ("popularity", "itemknn", "puresvd") and checked["external_inputs"]:
         fail("research_model_invalid")
     if variant.startswith("content-"):
         locked = release_info()["inputs"]["embeddings"]
-        if manifest["external_inputs"] != {
+        if checked["external_inputs"] != {
             "glove": {"bytes": locked["text_size"], "sha256": locked["text_sha256"]}
         }:
             fail("research_model_invalid")
     if variant == "hybrid":
-        if set(manifest["external_inputs"]) != {"content_model", "puresvd_model"}:
+        if set(checked["external_inputs"]) != {"content_model", "puresvd_model"}:
             fail("research_model_invalid")
-    for desc in manifest["external_inputs"].values():
+    for desc in checked["external_inputs"].values():
         check_descriptor(desc)
+    return checked
 
 
 def _read_model_package(
-    model_dir, *, inputs: ScoringInputs, backend="cpu", expected_code_revision=None
-):
+    model_dir: str | Path,
+    *,
+    inputs: ScoringInputs,
+    backend: str = "cpu",
+    expected_code_revision: str | None = None,
+) -> tuple[ModelManifest, bytes]:
     model_dir = safe_path(model_dir, directory=True)
-    manifest, raw = read_json(model_dir / "model-manifest.json")
-    _validate_manifest(
-        manifest, inputs=inputs, backend=backend, expected_code_revision=expected_code_revision
+    value, raw = read_json(model_dir / "model-manifest.json")
+    manifest = _validate_manifest(
+        value, inputs=inputs, backend=backend, expected_code_revision=expected_code_revision
     )
     _check_payloads(model_dir, manifest["files"])
     return manifest, raw
