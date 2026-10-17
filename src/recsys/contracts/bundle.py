@@ -7,23 +7,75 @@ import math
 import re
 import sys
 from pathlib import Path
+from typing import Never, TypedDict, cast
 
 MAX_ID = 2_147_483_647
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 CATALOG_FIELDS = {"title", "aliases", "genres", "score", "year", "type", "episodes", "synopsis"}
+
+type JSONValue = None | bool | int | float | str | list[JSONValue] | dict[str, JSONValue]
+
+
+class AnimeRecord(TypedDict):
+    title: str
+    aliases: list[str]
+    genres: list[str]
+    score: int | float | None
+    year: int | None
+    type: str | None
+    episodes: int | None
+    synopsis: str | None
+
+
+class Catalog(TypedDict):
+    schema_version: int
+    anime: dict[str, AnimeRecord]
+
+
+class Neighbor(TypedDict):
+    mal_id: int
+    similarity: int | float
+
+
+class Neighbors(TypedDict):
+    schema_version: int
+    neighbors: dict[str, list[Neighbor]]
+
+
+class ManifestSource(TypedDict):
+    name: str
+    version: str
+    sha256: str
+    metadata: dict[str, JSONValue]
+
+
+class ManifestAlgorithm(TypedDict):
+    name: str
+    version: str
+    max_neighbors: int
+    similarity: str
+    parameters: dict[str, JSONValue]
+
+
+class Manifest(TypedDict):
+    schema_version: int
+    algorithm: ManifestAlgorithm
+    sources: list[ManifestSource]
+    files: dict[str, dict[str, str]]
 
 
 class ContractError(ValueError):
     """A bundle violates its wire or semantic contract."""
 
 
-def require(condition, location, message):
+def require(condition: bool, location: str, message: str) -> None:
     if not condition:
         raise ContractError(f"{location}: {message}")
 
 
-def exact_fields(value, required, location):
+def exact_fields(value: object, required: set[str], location: str) -> dict[str, object]:
     require(isinstance(value, dict), location, "expected object")
+    value = cast("dict[str, object]", value)  # require checked the object shape.
     missing = required - value.keys()
     extra = value.keys() - required
     require(
@@ -31,9 +83,10 @@ def exact_fields(value, required, location):
         location,
         f"fields differ; missing={sorted(missing)}, unexpected={sorted(extra)}",
     )
+    return value
 
 
-def integer(value, location, low, high=None):
+def integer(value: object, location: str, low: int, high: int | None = None) -> None:
     require(
         type(value) is int and value >= low and (high is None or value <= high),
         location,
@@ -41,11 +94,11 @@ def integer(value, location, low, high=None):
     )
 
 
-def nonblank(value, location):
+def nonblank(value: object, location: str) -> None:
     require(isinstance(value, str) and bool(value.strip()), location, "expected nonblank string")
 
 
-def digest(value, location):
+def digest(value: object, location: str) -> None:
     require(
         isinstance(value, str) and SHA256.fullmatch(value) is not None,
         location,
@@ -53,21 +106,25 @@ def digest(value, location):
     )
 
 
-def mal_id(value, location):
+def mal_id(value: object, location: str) -> None:
     require(
         isinstance(value, str) and re.fullmatch(r"[1-9][0-9]*", value) is not None,
         location,
         "expected canonical positive decimal MAL_ID key",
     )
+    value = cast("str", value)  # The preceding require rejects non-strings.
     require(len(value) <= 10 and int(value) <= MAX_ID, location, "MAL_ID exceeds 2147483647")
 
 
-def number(value, location, low, high, exclusive_low=False):
+def number(
+    value: object, location: str, low: int | float, high: int | float, exclusive_low: bool = False
+) -> None:
     require(
-        type(value) in (int, float) and (type(value) is int or math.isfinite(value)),
+        type(value) in (int, float) and (type(value) is int or math.isfinite(cast("float", value))),
         location,
         "expected finite JSON number",
     )
+    value = cast("int | float", value)  # The preceding require checked exact numeric types.
     require(
         (value > low if exclusive_low else value >= low) and value <= high,
         location,
@@ -75,8 +132,8 @@ def number(value, location, low, high, exclusive_low=False):
     )
 
 
-def _unique_object(pairs):
-    result = {}
+def _unique_object(pairs: list[tuple[str, JSONValue]]) -> dict[str, JSONValue]:
+    result: dict[str, JSONValue] = {}
     for key, value in pairs:
         if key in result:
             raise ContractError(f"duplicate JSON key {key!r}")
@@ -84,11 +141,11 @@ def _unique_object(pairs):
     return result
 
 
-def _reject_constant(value):
+def _reject_constant(value: str) -> Never:
     raise ContractError(f"nonfinite JSON constant {value}")
 
 
-def canonical_bytes(value):
+def canonical_bytes(value: object) -> bytes:
     return (
         json.dumps(
             value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
@@ -97,7 +154,7 @@ def canonical_bytes(value):
     ).encode("utf-8")
 
 
-def parse_canonical(raw, location):
+def parse_canonical(raw: bytes, location: str | Path) -> JSONValue:
     try:
         value = json.loads(
             raw.decode("utf-8"), object_pairs_hook=_unique_object, parse_constant=_reject_constant
@@ -106,10 +163,10 @@ def parse_canonical(raw, location):
     except (UnicodeError, json.JSONDecodeError, ValueError, OverflowError) as exc:
         raise ContractError(f"{location}: invalid JSON: {exc}") from exc
     require(raw == canonical, str(location), "noncanonical JSON encoding")
-    return value
+    return cast("JSONValue", value)  # json.loads produces JSON primitives and containers.
 
 
-def read_canonical(path):
+def read_canonical(path: str | Path) -> tuple[JSONValue, bytes]:
     try:
         raw = Path(path).read_bytes()
     except OSError as exc:
@@ -117,21 +174,23 @@ def read_canonical(path):
     return parse_canonical(raw, path), raw
 
 
-def check_catalog(value):
-    exact_fields(value, {"schema_version", "anime"}, "catalog.json")
+def check_catalog(value: object) -> set[str]:
+    value = exact_fields(value, {"schema_version", "anime"}, "catalog.json")
     integer(value["schema_version"], "catalog.json.schema_version", 1, 1)
     anime = value["anime"]
     require(
         isinstance(anime, dict) and bool(anime), "catalog.json.anime", "expected nonempty object"
     )
+    anime = cast("dict[str, object]", anime)  # Nonempty dictionary checked above.
     for key, entry in anime.items():
         loc = f"catalog.json.anime.{key}"
         mal_id(key, loc)
-        exact_fields(entry, CATALOG_FIELDS, loc)
+        entry = exact_fields(entry, CATALOG_FIELDS, loc)
         nonblank(entry["title"], f"{loc}.title")
         for field in ("aliases", "genres"):
             items = entry[field]
             require(isinstance(items, list), f"{loc}.{field}", "expected array")
+            items = cast("list[object]", items)  # Checked array above.
             for index, item in enumerate(items):
                 nonblank(item, f"{loc}.{field}[{index}]")
             require(len(items) == len(set(items)), f"{loc}.{field}", "duplicate string")
@@ -148,11 +207,12 @@ def check_catalog(value):
     return set(anime)
 
 
-def check_neighbors(value, catalog_keys):
-    exact_fields(value, {"schema_version", "neighbors"}, "neighbors.json")
+def check_neighbors(value: object, catalog_keys: set[str]) -> None:
+    value = exact_fields(value, {"schema_version", "neighbors"}, "neighbors.json")
     integer(value["schema_version"], "neighbors.json.schema_version", 1, 1)
     neighbors = value["neighbors"]
     require(isinstance(neighbors, dict), "neighbors.json.neighbors", "expected object")
+    neighbors = cast("dict[str, object]", neighbors)  # Checked object above.
     for key in neighbors:
         mal_id(key, f"neighbors.json.neighbors.{key}")
     require(
@@ -163,13 +223,15 @@ def check_neighbors(value, catalog_keys):
     for source, items in neighbors.items():
         loc = f"neighbors.json.neighbors.{source}"
         require(isinstance(items, list) and len(items) <= 5, loc, "expected array of at most 5")
-        seen = set()
-        previous = None
+        items = cast("list[object]", items)  # Checked bounded array above.
+        seen: set[int] = set()
+        previous: tuple[int | float, int] | None = None
         for index, item in enumerate(items):
             item_loc = f"{loc}[{index}]"
-            exact_fields(item, {"mal_id", "similarity"}, item_loc)
+            item = exact_fields(item, {"mal_id", "similarity"}, item_loc)
             target = item["mal_id"]
             integer(target, f"{item_loc}.mal_id", 1, MAX_ID)
+            target = cast("int", target)  # Validated integer above.
             require(
                 str(target) in catalog_keys, f"{item_loc}.mal_id", "target missing from catalog"
             )
@@ -178,6 +240,7 @@ def check_neighbors(value, catalog_keys):
             seen.add(target)
             score = item["similarity"]
             number(score, f"{item_loc}.similarity", 0, 1, exclusive_low=True)
+            score = cast("int | float", score)  # Validated finite JSON number above.
             ordering = (-score, target)
             require(
                 previous is None or previous <= ordering,
@@ -187,11 +250,13 @@ def check_neighbors(value, catalog_keys):
             previous = ordering
 
 
-def check_manifest(value, raw, file_bytes):
-    exact_fields(value, {"schema_version", "algorithm", "sources", "files"}, "manifest.json")
+def check_manifest(value: object, raw: bytes, file_bytes: dict[str, bytes]) -> str:
+    value = exact_fields(
+        value, {"schema_version", "algorithm", "sources", "files"}, "manifest.json"
+    )
     integer(value["schema_version"], "manifest.json.schema_version", 1, 1)
     algorithm = value["algorithm"]
-    exact_fields(
+    algorithm = exact_fields(
         algorithm,
         {"name", "version", "max_neighbors", "similarity", "parameters"},
         "manifest.json.algorithm",
@@ -217,15 +282,16 @@ def check_manifest(value, raw, file_bytes):
         "manifest.json.sources",
         "expected nonempty array",
     )
-    previous = None
+    sources = cast("list[object]", sources)  # Checked nonempty array above.
+    previous: tuple[str, str] | None = None
     for index, source in enumerate(sources):
         loc = f"manifest.json.sources[{index}]"
-        exact_fields(source, {"name", "version", "sha256", "metadata"}, loc)
+        source = exact_fields(source, {"name", "version", "sha256", "metadata"}, loc)
         nonblank(source["name"], f"{loc}.name")
         nonblank(source["version"], f"{loc}.version")
         digest(source["sha256"], f"{loc}.sha256")
         require(isinstance(source["metadata"], dict), f"{loc}.metadata", "expected object")
-        pair = (source["name"], source["version"])
+        pair = (cast("str", source["name"]), cast("str", source["version"]))
         require(
             previous is None or previous < pair,
             loc,
@@ -233,10 +299,10 @@ def check_manifest(value, raw, file_bytes):
         )
         previous = pair
     files = value["files"]
-    exact_fields(files, {"catalog.json", "neighbors.json"}, "manifest.json.files")
+    files = exact_fields(files, {"catalog.json", "neighbors.json"}, "manifest.json.files")
     for name, entry in files.items():
         loc = f"manifest.json.files.{name}"
-        exact_fields(entry, {"sha256"}, loc)
+        entry = exact_fields(entry, {"sha256"}, loc)
         digest(entry["sha256"], f"{loc}.sha256")
         require(
             hashlib.sha256(file_bytes[name]).hexdigest() == entry["sha256"], loc, "SHA-256 mismatch"
@@ -244,7 +310,9 @@ def check_manifest(value, raw, file_bytes):
     return "sha256:" + hashlib.sha256(raw).hexdigest()
 
 
-def check_bundle_bytes(catalog_raw, neighbors_raw, manifest_raw):
+def check_bundle_bytes(
+    catalog_raw: bytes, neighbors_raw: bytes, manifest_raw: bytes
+) -> tuple[str, int]:
     """Validate retained input bytes without reopening source files."""
     manifest = parse_canonical(manifest_raw, "manifest.json")
     catalog = parse_canonical(catalog_raw, "catalog.json")
@@ -257,7 +325,7 @@ def check_bundle_bytes(catalog_raw, neighbors_raw, manifest_raw):
     return identity, len(keys)
 
 
-def check_bundle(bundle_dir):
+def check_bundle(bundle_dir: str | Path) -> tuple[str, int]:
     """Return (bundle identity, catalog record count) after complete validation."""
     bundle_dir = Path(bundle_dir)
     try:
@@ -280,7 +348,7 @@ def check_bundle(bundle_dir):
     return identity, len(keys)
 
 
-def main(argv=None):
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("bundle_dir", type=Path)
     args = parser.parse_args(argv)

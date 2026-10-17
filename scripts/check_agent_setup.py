@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tomllib
 from pathlib import Path
+from typing import NoReturn
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / ".codex" / "config.toml"
@@ -60,14 +61,20 @@ IGNORE_CASES = {
 }
 
 
-def fail(message: str) -> None:
+def fail(message: str) -> NoReturn:
     raise ValueError(message)
 
 
-def load_toml(path: Path) -> dict:
+def _table(value: object, context: str) -> dict[str, object]:
+    if not isinstance(value, dict) or any(not isinstance(key, str) for key in value):
+        fail(f"{context}: expected a TOML table with string keys")
+    return {key: item for key, item in value.items()}
+
+
+def load_toml(path: Path) -> dict[str, object]:
     try:
         with path.open("rb") as stream:
-            return tomllib.load(stream)
+            return _table(tomllib.load(stream), str(path.relative_to(ROOT)))
     except (OSError, tomllib.TOMLDecodeError) as exc:
         fail(f"{path.relative_to(ROOT)}: {exc}")
 
@@ -80,18 +87,18 @@ def require_equal(actual: object, expected: object, context: str) -> None:
 def check_config() -> None:
     config = load_toml(CONFIG)
     require_equal(set(config), set(EXPECTED_ROOT) | {"agents"}, ".codex/config.toml keys")
-    for key, expected in EXPECTED_ROOT.items():
-        require_equal(config[key], expected, f".codex/config.toml {key}")
+    for key, root_expected in EXPECTED_ROOT.items():
+        require_equal(config[key], root_expected, f".codex/config.toml {key}")
 
-    agents = config["agents"]
+    agents = _table(config["agents"], "agents")
     require_equal(
         set(agents), set(EXPECTED_AGENT_SETTINGS) | set(ROLES), "agent settings and roles"
     )
-    for key, expected in EXPECTED_AGENT_SETTINGS.items():
-        require_equal(agents[key], expected, f"agents.{key}")
+    for setting, agent_expected in EXPECTED_AGENT_SETTINGS.items():
+        require_equal(agents[setting], agent_expected, f"agents.{setting}")
 
     for role, (model, effort, sandbox) in ROLES.items():
-        entry = agents[role]
+        entry = _table(agents[role], f"agents.{role}")
         require_equal(set(entry), {"description", "config_file"}, f"agents.{role} fields")
         if not isinstance(entry["description"], str) or not entry["description"].strip():
             fail(f"agents.{role}.description must be nonempty")
@@ -111,14 +118,14 @@ def check_config() -> None:
             },
             f"{relative} fields",
         )
-        for key, expected in {
+        for role_key, role_expected in {
             "name": role,
             "model": model,
             "model_reasoning_effort": effort,
             "sandbox_mode": sandbox,
             "agents": {"enabled": False},
         }.items():
-            require_equal(role_config[key], expected, f"{relative} {key}")
+            require_equal(role_config[role_key], role_expected, f"{relative} {role_key}")
         if (
             not isinstance(role_config["description"], str)
             or not role_config["description"].strip()

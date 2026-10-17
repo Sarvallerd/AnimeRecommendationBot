@@ -76,12 +76,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 users = counts["accepted_users"]
                 positive_users = counts["positive_users_ge_15"]
             else:
-                summary = validate_dataset(Path(parsed.dataset_dir))
-                identity = summary.identity
-                catalog_items = summary.catalog_items
-                interactions = summary.interactions
-                users = summary.users
-                positive_users = summary.positive_users_ge_15
+                dataset_summary = validate_dataset(Path(parsed.dataset_dir))
+                identity = dataset_summary.identity
+                catalog_items = dataset_summary.catalog_items
+                interactions = dataset_summary.interactions
+                users = dataset_summary.users
+                positive_users = dataset_summary.positive_users_ge_15
         except (DatasetError, OSError) as exc:
             code = str(exc) if isinstance(exc, DatasetError) else "dataset_integrity_error"
             print(f"recsys dataset: {code}", file=sys.stderr)
@@ -120,7 +120,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     )
                 )
             else:
-                summary = validate_aliases(
+                alias_summary = validate_aliases(
                     Path(parsed.aliases_dir),
                     data_dir=Path(parsed.data_dir),
                     base_dir=Path(parsed.base_dir),
@@ -128,11 +128,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     expected_identity=parsed.expected_identity,
                 )
                 identity, items, aliases, english, main = (
-                    summary.identity,
-                    summary.items,
-                    summary.aliases,
-                    summary.english,
-                    summary.main,
+                    alias_summary.identity,
+                    alias_summary.items,
+                    alias_summary.aliases,
+                    alias_summary.english,
+                    alias_summary.main,
                 )
         except (AliasError, OSError) as exc:
             code = str(exc) if isinstance(exc, AliasError) else "alias_integrity_error"
@@ -181,7 +181,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     f"changed={counts['catalog_aliases_changed_items']}"
                 )
             elif parsed.release_command == "validate":
-                summary = validate_release(
+                release_summary = validate_release(
                     Path(parsed.release_dir),
                     expected_identity=parsed.release_identity,
                     base_dir=Path(parsed.base_dir),
@@ -189,8 +189,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     alias_data_dir=Path(parsed.alias_data_dir),
                 )
                 print(
-                    f"{summary.identity} catalog={summary.catalog_count} "
-                    f"enrichment={summary.enrichment_items} changed={summary.catalog_aliases_changed_items}"
+                    f"{release_summary.identity} catalog={release_summary.catalog_count} "
+                    f"enrichment={release_summary.enrichment_items} changed={release_summary.catalog_aliases_changed_items}"
                 )
             elif parsed.release_command == "build":
                 report = build_release(
@@ -235,6 +235,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         from recsys.research.protocol import ResearchError
 
         try:
+            result: Path | str
             if parsed.research_command == "prepare":
                 from recsys.research.prepare import prepare_research
                 from recsys.research.protocol import load_protocol
@@ -282,7 +283,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             elif parsed.research_command == "predict-validation":
                 from recsys.research.predict import predict_validation
 
-                measured = {} if parsed.measurement_output else None
+                measured: dict[str, object] | None = {} if parsed.measurement_output else None
                 result = predict_validation(
                     Path(parsed.prepared_dir),
                     Path(parsed.model_dir),
@@ -318,7 +319,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     expected_campaign_identity=parsed.expected_campaign_identity,
                 )
             elif parsed.research_command == "campaign-validate":
-                from recsys.research.campaign.runner import validate_campaign
+                from recsys.research.campaign.report import validate_campaign
 
                 validated = validate_campaign(
                     Path(parsed.prepared_dir),

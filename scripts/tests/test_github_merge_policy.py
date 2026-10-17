@@ -12,6 +12,7 @@ from contextlib import redirect_stdout
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable, cast
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -21,17 +22,65 @@ SHA = "a" * 40
 NOW = datetime(2026, 10, 15, 12, tzinfo=timezone.utc)
 
 
-def fixture(*, applied: bool = False) -> dict:
+def _object(value: object) -> dict[str, object]:
+    if not isinstance(value, dict) or any(not isinstance(key, str) for key in value):
+        raise AssertionError("expected fixture object with string keys")
+    return cast("dict[str, object]", value)
+
+
+def _items(value: object) -> list[object]:
+    if not isinstance(value, list):
+        raise AssertionError("expected fixture list")
+    return cast("list[object]", value)
+
+
+def _policy_rule(policy: dict[str, object], index: int) -> dict[str, object]:
+    return _object(_items(policy["rules"])[index])
+
+
+def _ruleset(snapshot: dict[str, object]) -> dict[str, object]:
+    return _object(_items(snapshot["rulesets"])[0])
+
+
+def _rules(snapshot: dict[str, object], *, effective: bool = False) -> list[object]:
+    return _items(snapshot["effective_rules"] if effective else _ruleset(snapshot)["rules"])
+
+
+def _rule(snapshot: dict[str, object], index: int, *, effective: bool = False) -> dict[str, object]:
+    return _object(_rules(snapshot, effective=effective)[index])
+
+
+def _params(rule: dict[str, object]) -> dict[str, object]:
+    return _object(rule["parameters"])
+
+
+def _checks(snapshot: dict[str, object]) -> list[object]:
+    return _items(snapshot["check_runs"])
+
+
+def _check(snapshot: dict[str, object], index: int = 0) -> dict[str, object]:
+    return _object(_checks(snapshot)[index])
+
+
+def _repo(snapshot: dict[str, object]) -> dict[str, object]:
+    return _object(snapshot["repository"])
+
+
+def _branch_commit(snapshot: dict[str, object]) -> dict[str, object]:
+    return _object(_object(snapshot["final_branch"])["commit"])
+
+
+def fixture(*, applied: bool = False) -> dict[str, object]:
     policy = merge.load_policy()
     ruleset = dict(deepcopy(policy), id=77, source_type="Repository", source=merge.REPOSITORY)
     effective = [
         dict(
-            deepcopy(rule),
+            deepcopy(_object(rule)),
             ruleset_id=77,
             ruleset_source_type="Repository",
             ruleset_source=merge.REPOSITORY,
         )
-        for rule in policy["rules"]
+        for rule in _items(policy["rules"])
     ]
     checks = [
         dict(
@@ -67,7 +116,7 @@ def fixture(*, applied: bool = False) -> dict:
     }
 
 
-def evaluate(snapshot: dict, mode: str = "plan") -> dict:
+def evaluate(snapshot: dict[str, object], mode: str = "plan") -> dict[str, str | int | None]:
     return merge.validate_snapshot(merge.load_policy(), snapshot, mode, now=NOW)
 
 
@@ -75,7 +124,7 @@ class DeclarationTests(unittest.TestCase):
     def test_offline_policy_is_exact_and_safely_parseable(self) -> None:
         policy = merge.load_policy()
         self.assertEqual(
-            [r["type"] for r in policy["rules"]],
+            [_object(r)["type"] for r in _items(policy["rules"])],
             [
                 "deletion",
                 "non_fast_forward",
@@ -94,15 +143,16 @@ class DeclarationTests(unittest.TestCase):
                 merge.load_policy(bad)
 
     def test_declaration_rejects_looser_values_and_unknown_fields(self) -> None:
-        for change in (
+        changes: tuple[Callable[[dict[str, object]], object], ...] = (
             lambda p: p.update(bypass_actors=[{"actor_id": 1}]),
-            lambda p: p["rules"][3]["parameters"].update(required_approving_review_count=1),
-            lambda p: p["rules"][3]["parameters"].update(allowed_merge_methods=["squash", "merge"]),
-            lambda p: p["rules"][3]["parameters"].update(
+            lambda p: _params(_policy_rule(p, 3)).update(required_approving_review_count=1),
+            lambda p: _params(_policy_rule(p, 3)).update(allowed_merge_methods=["squash", "merge"]),
+            lambda p: _params(_policy_rule(p, 3)).update(
                 require_extra_approval_for_unattributed_changes=True
             ),
-            lambda p: p["rules"][4]["parameters"].update(extra=True),
-        ):
+            lambda p: _params(_policy_rule(p, 4)).update(extra=True),
+        )
+        for change in changes:
             with self.subTest(change=change), tempfile.TemporaryDirectory() as path:
                 policy = merge.load_policy()
                 change(policy)
@@ -120,49 +170,60 @@ class SnapshotTests(unittest.TestCase):
 
     def test_applied_noop_check_and_known_server_defaults(self) -> None:
         snap = fixture(applied=True)
-        snap["rulesets"][0].update(
+        _ruleset(snap).update(
             node_id="RRS_fixture",
             _links={"self": {"href": "fixture"}},
             created_at="2026-10-15T00:00:00Z",
             updated_at="2026-10-15T01:00:00Z",
         )
-        snap["rulesets"][0]["rules"].reverse()
-        snap["effective_rules"].reverse()
-        for rules in (snap["rulesets"][0]["rules"], snap["effective_rules"]):
-            pr = next(x for x in rules if x["type"] == "pull_request")
-            pr["parameters"]["required_reviewers"] = []
-            pr["parameters"]["dismissal_restriction"] = {"enabled": False, "allowed_actors": []}
+        _rules(snap).reverse()
+        _rules(snap, effective=True).reverse()
+        for rules in (_rules(snap), _rules(snap, effective=True)):
+            pr = _object(next(x for x in rules if _object(x)["type"] == "pull_request"))
+            _params(pr)["required_reviewers"] = []
+            _params(pr)["dismissal_restriction"] = {"enabled": False, "allowed_actors": []}
             pr["id"] = 99
-            checks = next(x for x in rules if x["type"] == "required_status_checks")
-            checks["parameters"]["required_status_checks"].reverse()
+            checks = _object(
+                next(x for x in rules if _object(x)["type"] == "required_status_checks")
+            )
+            _items(_params(checks)["required_status_checks"]).reverse()
         self.assertEqual(evaluate(snap), {"action": "noop", "ruleset_id": 77})
         self.assertEqual(evaluate(snap, "check")["ruleset_id"], 77)
 
     def test_unknown_and_missing_ruleset_detail_fields_fail_closed(self) -> None:
         snap = fixture(applied=True)
-        snap["rulesets"][0]["mystery_enforcement_setting"] = True
+        _ruleset(snap)["mystery_enforcement_setting"] = True
         with self.assertRaisesRegex(merge.PolicyMismatch, "detail fields"):
             evaluate(snap, "check")
         snap = fixture(applied=True)
-        del snap["rulesets"][0]["conditions"]
+        del _ruleset(snap)["conditions"]
         with self.assertRaisesRegex(merge.PolicyMismatch, "detail fields"):
             evaluate(snap, "check")
 
     def test_current_user_bypass_metadata_is_only_absent_or_never(self) -> None:
         self.assertEqual(evaluate(fixture(applied=True), "check")["action"], "noop")
         snap = fixture(applied=True)
-        snap["rulesets"][0]["current_user_can_bypass"] = "never"
+        _ruleset(snap)["current_user_can_bypass"] = "never"
         self.assertEqual(evaluate(snap, "check")["action"], "noop")
-        for value in ("always", "pull_requests_only", "exempt", "sometimes", "", None, True, 0, []):
+        invalid_values: tuple[object, ...] = (
+            "always",
+            "pull_requests_only",
+            "exempt",
+            "sometimes",
+            "",
+            None,
+            True,
+            0,
+            [],
+        )
+        for value in invalid_values:
             with self.subTest(value=value):
                 snap = fixture(applied=True)
-                snap["rulesets"][0]["current_user_can_bypass"] = value
+                _ruleset(snap)["current_user_can_bypass"] = value
                 with self.assertRaisesRegex(merge.PolicyMismatch, "current user bypass"):
                     evaluate(snap, "check")
         snap = fixture(applied=True)
-        snap["rulesets"][0].update(
-            current_user_can_bypass="never", mystery_enforcement_setting=True
-        )
+        _ruleset(snap).update(current_user_can_bypass="never", mystery_enforcement_setting=True)
         with self.assertRaisesRegex(merge.PolicyMismatch, "detail fields"):
             evaluate(snap, "check")
 
@@ -172,48 +233,40 @@ class SnapshotTests(unittest.TestCase):
         for location in ("detail", "effective"):
             with self.subTest(location=location, value=True):
                 snap = fixture(applied=True)
-                rules = (
-                    snap["rulesets"][0]["rules"]
-                    if location == "detail"
-                    else snap["effective_rules"]
+                rules = _rules(snap, effective=location != "detail")
+                pr = _object(
+                    next(rule for rule in rules if _object(rule)["type"] == "pull_request")
                 )
-                next(rule for rule in rules if rule["type"] == "pull_request")["parameters"][
-                    field
-                ] = True
+                _params(pr)[field] = True
                 self.assertEqual(evaluate(snap, "check")["action"], "noop")
-            for value in (False, 1, 0, None, "true", "false", [], {}):
+            invalid_values: tuple[object, ...] = (False, 1, 0, None, "true", "false", [], {})
+            for value in invalid_values:
                 with self.subTest(location=location, value=value):
                     snap = fixture(applied=True)
-                    rules = (
-                        snap["rulesets"][0]["rules"]
-                        if location == "detail"
-                        else snap["effective_rules"]
+                    rules = _rules(snap, effective=location != "detail")
+                    pr = _object(
+                        next(rule for rule in rules if _object(rule)["type"] == "pull_request")
                     )
-                    next(rule for rule in rules if rule["type"] == "pull_request")["parameters"][
-                        field
-                    ] = value
+                    _params(pr)[field] = value
                     with self.assertRaisesRegex(merge.PolicyMismatch, "extra approval"):
                         evaluate(snap, "check")
             snap = fixture(applied=True)
-            rules = (
-                snap["rulesets"][0]["rules"] if location == "detail" else snap["effective_rules"]
-            )
-            next(rule for rule in rules if rule["type"] == "pull_request")["parameters"].update(
-                {field: True, "unknown_neighbor": True}
-            )
+            rules = _rules(snap, effective=location != "detail")
+            pr = _object(next(rule for rule in rules if _object(rule)["type"] == "pull_request"))
+            _params(pr).update({field: True, "unknown_neighbor": True})
             with self.subTest(location=location, value="unknown neighbor"):
                 with self.assertRaises(merge.PolicyMismatch):
                     evaluate(snap, "check")
 
     def test_repository_identity_permissions_and_master_race(self) -> None:
-        changes = [
-            lambda s: s["repository"].update(id=4),
-            lambda s: s["repository"].update(full_name="other/repo"),
-            lambda s: s["repository"].update(default_branch="main"),
-            lambda s: s["repository"].update(private=True),
-            lambda s: s["repository"]["permissions"].update(admin=False),
-            lambda s: s["repository"].update(allow_squash_merge=False),
-            lambda s: s["final_branch"]["commit"].update(sha="b" * 40),
+        changes: list[Callable[[dict[str, object]], object]] = [
+            lambda s: _repo(s).update(id=4),
+            lambda s: _repo(s).update(full_name="other/repo"),
+            lambda s: _repo(s).update(default_branch="main"),
+            lambda s: _repo(s).update(private=True),
+            lambda s: _object(_repo(s)["permissions"]).update(admin=False),
+            lambda s: _repo(s).update(allow_squash_merge=False),
+            lambda s: _branch_commit(s).update(sha="b" * 40),
         ]
         for change in changes:
             with self.subTest(change=change):
@@ -223,10 +276,10 @@ class SnapshotTests(unittest.TestCase):
                     evaluate(snap)
 
     def test_foreign_inactive_duplicate_and_classic_protection(self) -> None:
-        changes = [
+        changes: list[Callable[[dict[str, object]], object]] = [
             lambda s: s.update(protection={"enabled": True}),
-            lambda s: s["ruleset_summaries"].append({"id": 9}),
-            lambda s: s["effective_rules"].append({"type": "deletion"}),
+            lambda s: _items(s["ruleset_summaries"]).append({"id": 9}),
+            lambda s: _rules(s, effective=True).append({"type": "deletion"}),
         ]
         for change in changes:
             with self.subTest(change=change):
@@ -241,26 +294,22 @@ class SnapshotTests(unittest.TestCase):
             ("bypass_actors", [{"actor_id": 1}]),
         ):
             snap = fixture(applied=True)
-            snap["rulesets"][0][key] = value
+            _ruleset(snap)[key] = value
             with self.subTest(key=key), self.assertRaises(merge.PolicyMismatch):
                 evaluate(snap)
 
     def test_effective_rules_and_policy_drift(self) -> None:
-        changes = [
-            lambda s: s["effective_rules"].pop(),
-            lambda s: s["effective_rules"][0].update(ruleset_id=8),
-            lambda s: s["effective_rules"][0].update(ruleset_source="other/repo"),
-            lambda s: s["effective_rules"][0].update(parameters={"x": 1}),
-            lambda s: s["rulesets"][0]["rules"][3]["parameters"].update(unknown=True),
-            lambda s: s["rulesets"][0]["rules"][3]["parameters"].update(
-                allowed_merge_methods=["squash", "merge"]
+        changes: list[Callable[[dict[str, object]], object]] = [
+            lambda s: _rules(s, effective=True).pop(),
+            lambda s: _rule(s, 0, effective=True).update(ruleset_id=8),
+            lambda s: _rule(s, 0, effective=True).update(ruleset_source="other/repo"),
+            lambda s: _rule(s, 0, effective=True).update(parameters={"x": 1}),
+            lambda s: _params(_rule(s, 3)).update(unknown=True),
+            lambda s: _params(_rule(s, 3)).update(allowed_merge_methods=["squash", "merge"]),
+            lambda s: _params(_rule(s, 4)).update(strict_required_status_checks_policy=False),
+            lambda s: _object(_items(_params(_rule(s, 4))["required_status_checks"])[0]).update(
+                integration_id=9
             ),
-            lambda s: s["rulesets"][0]["rules"][4]["parameters"].update(
-                strict_required_status_checks_policy=False
-            ),
-            lambda s: s["rulesets"][0]["rules"][4]["parameters"]["required_status_checks"][
-                0
-            ].update(integration_id=9),
         ]
         for change in changes:
             with self.subTest(change=change):
@@ -270,16 +319,16 @@ class SnapshotTests(unittest.TestCase):
                     evaluate(snap)
 
     def test_check_runs_require_success_unique_recent_correct_app_and_sha(self) -> None:
-        changes = [
-            lambda s: s["check_runs"].pop(),
-            lambda s: s["check_runs"].append(deepcopy(s["check_runs"][0])),
-            lambda s: s["check_runs"][0].update(status="queued"),
-            lambda s: s["check_runs"][0].update(conclusion="neutral"),
-            lambda s: s["check_runs"][0].update(conclusion="skipped"),
-            lambda s: s["check_runs"][0].update(conclusion="failure"),
-            lambda s: s["check_runs"][0].update(head_sha="b" * 40),
-            lambda s: s["check_runs"][0]["app"].update(id=123),
-            lambda s: s["check_runs"][0].update(completed_at="2026-10-01T00:00:00Z"),
+        changes: list[Callable[[dict[str, object]], object]] = [
+            lambda s: _checks(s).pop(),
+            lambda s: _checks(s).append(deepcopy(_check(s))),
+            lambda s: _check(s).update(status="queued"),
+            lambda s: _check(s).update(conclusion="neutral"),
+            lambda s: _check(s).update(conclusion="skipped"),
+            lambda s: _check(s).update(conclusion="failure"),
+            lambda s: _check(s).update(head_sha="b" * 40),
+            lambda s: _object(_check(s)["app"]).update(id=123),
+            lambda s: _check(s).update(completed_at="2026-10-01T00:00:00Z"),
         ]
         for change in changes:
             with self.subTest(change=change):
@@ -288,10 +337,10 @@ class SnapshotTests(unittest.TestCase):
                 with self.assertRaises(merge.PolicyMismatch):
                     evaluate(snap)
         snap = fixture()
-        snap["check_runs"].append(dict(name="extra-check"))
+        _checks(snap).append(dict(name="extra-check"))
         self.assertEqual(evaluate(snap)["action"], "create")
         snap = fixture(applied=True)
-        snap["check_runs"][0]["completed_at"] = "2025-01-01T00:00:00Z"
+        _check(snap)["completed_at"] = "2025-01-01T00:00:00Z"
         self.assertEqual(evaluate(snap)["action"], "noop")
 
 
@@ -301,11 +350,11 @@ class ApiTests(unittest.TestCase):
             with self.subTest(action=action):
                 snap = fixture(applied=applied)
                 completed = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-                for check in snap["check_runs"]:
-                    check["completed_at"] = completed
+                for check in _checks(snap):
+                    _object(check)["completed_at"] = completed
 
                 class FakeApi:
-                    def get_json(self, endpoint):
+                    def get_json(self, endpoint: str) -> object:
                         if endpoint == merge.API:
                             return snap["repository"]
                         if endpoint == f"{merge.API}/branches/master":
@@ -313,16 +362,18 @@ class ApiTests(unittest.TestCase):
                         if endpoint == f"{merge.API}/branches/master/protection":
                             raise merge.ApiStatus(404, "Branch not protected")
                         if endpoint == f"{merge.API}/rulesets/77" and applied:
-                            return snap["rulesets"][0]
+                            return _ruleset(snap)
                         raise AssertionError(f"unexpected GET {endpoint}")
 
-                    def get_pages(self, endpoint, **kwargs):
+                    def get_pages(
+                        self, endpoint: str, *, item_key: str | None = None
+                    ) -> list[object]:
                         if endpoint.startswith(f"{merge.API}/rulesets?"):
-                            return snap["ruleset_summaries"]
+                            return _items(snap["ruleset_summaries"])
                         if endpoint == f"{merge.API}/rules/branches/master":
-                            return snap["effective_rules"]
+                            return _rules(snap, effective=True)
                         if endpoint.startswith(f"{merge.API}/commits/{SHA}/check-runs?"):
-                            return snap["check_runs"]
+                            return _checks(snap)
                         raise AssertionError(f"unexpected GET pages {endpoint}")
 
                 output = io.StringIO()
@@ -357,17 +408,17 @@ class ApiTests(unittest.TestCase):
 
     def test_only_specific_protection_404_is_absent(self) -> None:
         class FakeApi:
-            def __init__(self, message):
+            def __init__(self, message: str) -> None:
                 self.message = message
 
-            def get_json(self, endpoint):
+            def get_json(self, endpoint: str) -> object:
                 if endpoint.endswith("/protection"):
                     raise merge.ApiStatus(404, self.message)
                 if endpoint.endswith("/branches/master"):
                     return {"name": "master", "commit": {"sha": SHA}}
                 return {}
 
-            def get_pages(self, endpoint, **kwargs):
+            def get_pages(self, endpoint: str, *, item_key: str | None = None) -> list[object]:
                 return []
 
         self.assertIsNone(

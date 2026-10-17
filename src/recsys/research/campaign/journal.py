@@ -9,6 +9,9 @@ from __future__ import annotations
 import json
 import os
 import stat
+from datetime import datetime
+from pathlib import Path
+from typing import NotRequired, TypedDict, cast
 
 from recsys.research.campaign.common import (
     AUX_PHASE,
@@ -24,10 +27,87 @@ from recsys.research.campaign.common import (
 )
 
 
+class CampaignEvent(TypedDict):
+    seq: int
+    event: str
+    utc: str
+    variant: NotRequired[str]
+    phase: NotRequired[str]
+    attempt: NotRequired[int]
+    charged_seconds: NotRequired[float]
+    status: NotRequired[str]
+    generation: NotRequired[str]
+    output_identity: NotRequired[str | None]
+    resources: NotRequired[dict[str, object] | None]
+    code: NotRequired[str | None]
+
+
+type PhaseKey = tuple[str, str]
+type SuccessState = tuple[
+    dict[PhaseKey, CampaignEvent],
+    dict[PhaseKey, int],
+    dict[PhaseKey, float],
+    dict[PhaseKey, CampaignEvent],
+    set[PhaseKey],
+]
+
+
+def _validated_event(value: object) -> CampaignEvent:
+    if type(value) is not dict:
+        _fail()
+    event = cast("dict[str, object]", value)
+    if (
+        any(type(key) is not str for key in event)
+        or type(event.get("seq")) is not int
+        or type(event.get("event")) is not str
+        or type(event.get("utc")) is not str
+    ):
+        _fail()
+    for key in ("variant", "phase", "status", "generation", "plan_identity"):
+        if key in event and type(event[key]) is not str:
+            _fail()
+    if "attempt" in event and type(event["attempt"]) is not int:
+        _fail()
+    for key in ("charged_seconds", "remaining_seconds"):
+        if key in event and type(event[key]) not in (int, float):
+            _fail()
+    for key in ("output_identity", "code"):
+        if key in event and event[key] is not None and type(event[key]) is not str:
+            _fail()
+    if "resources" in event and event["resources"] is not None:
+        resources = event["resources"]
+        if type(resources) is not dict or any(type(key) is not str for key in resources):
+            _fail()
+    if "resumed" in event and type(event["resumed"]) is not bool:
+        _fail()
+    if event["event"] in ("attempt_started", "attempt_finished", "attempt_interrupted"):
+        required = {"variant", "phase", "attempt"}
+        if event["event"] == "attempt_started" or (
+            event["event"] == "attempt_finished" and event.get("status") == "success"
+        ):
+            required.add("generation")
+        if not required <= event.keys():
+            _fail()
+        if event["event"] != "attempt_started" and "charged_seconds" not in event:
+            _fail()
+        if event["event"] == "attempt_finished" and "status" not in event:
+            _fail()
+        if (
+            event["event"] == "attempt_finished"
+            and event.get("status") == "success"
+            and (
+                type(event.get("output_identity")) is not str
+                or type(event.get("code")) not in (str, type(None))
+            )
+        ):
+            _fail()
+    return cast("CampaignEvent", event)
+
+
 class _Journal:
-    def __init__(self, path):
+    def __init__(self, path: Path) -> None:
         self.path = path
-        self.events = []
+        self.events: list[CampaignEvent] = []
         if path.exists():
             if path.is_symlink():
                 _fail()
@@ -46,12 +126,19 @@ class _Journal:
                     event = json.loads(raw)
                 except (ValueError, UnicodeError):
                     _fail()
-                if raw != _canonical(event) or event.get("seq") != len(self.events) + 1:
+                if raw != _canonical(event):
                     _fail()
-                self.events.append(event)
+                checked = _validated_event(event)
+                if checked["seq"] != len(self.events) + 1:
+                    _fail()
+                self.events.append(checked)
 
-    def append(self, name, **fields):
-        event = {"seq": len(self.events) + 1, "event": name, "utc": _iso(_now()), **fields}
+    def append(self, name: str, **fields: object) -> CampaignEvent:
+        if any(key in fields for key in ("seq", "event", "utc")):
+            _fail()
+        event = _validated_event(
+            {"seq": len(self.events) + 1, "event": name, "utc": _iso(_now()), **fields}
+        )
         if self.events and _parse_iso(event["utc"]) < _parse_iso(self.events[-1]["utc"]):
             _fail("research_campaign_clock_invalid")
         raw = _canonical(event)
@@ -70,14 +157,14 @@ class _Journal:
         return event
 
 
-def _successes(events):
+def _successes(events: list[CampaignEvent]) -> SuccessState:
     """Restore durable successes, charges, attempts and unresolved starts."""
-    successes = {}
-    attempts = {}
-    charged = {}
-    starts = {}
-    failed = set()
-    latest_utc = None
+    successes: dict[PhaseKey, CampaignEvent] = {}
+    attempts: dict[PhaseKey, int] = {}
+    charged: dict[PhaseKey, float] = {}
+    starts: dict[PhaseKey, CampaignEvent] = {}
+    failed: set[PhaseKey] = set()
+    latest_utc: datetime | None = None
     for event in events:
         timestamp = _parse_iso(event["utc"])
         if latest_utc is not None and timestamp < latest_utc:

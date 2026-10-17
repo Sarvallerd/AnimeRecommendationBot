@@ -4,14 +4,23 @@ This module deliberately keeps the notebook's metadata serialization and exclusi
 It is not a claim that the lost historical cluster assignments were reproduced.
 """
 
+from __future__ import annotations
+
 import hashlib
 import json
 import math
 import re
 from collections import Counter
+from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Literal, NotRequired, TypedDict, cast
 
 from recsys.content.glove import DIMENSION
+from recsys.historical.assessment import HistoricalQuery, HistoricalRecommendation
+
+if TYPE_CHECKING:
+    import numpy as np
+    from numpy.typing import NDArray
 
 
 class LegacyError(ValueError):
@@ -126,7 +135,21 @@ SEASONS = {
     "Jun": "summer",
     "Feb": "winter",
 }
-KMEANS = {
+
+
+class KMeansParameters(TypedDict):
+    n_clusters: int
+    init: Literal["k-means++"]
+    n_init: int
+    max_iter: int
+    tol: float
+    verbose: int
+    random_state: int
+    copy_x: bool
+    algorithm: Literal["lloyd"]
+
+
+KMEANS: KMeansParameters = {
     "n_clusters": 20,
     "init": "k-means++",
     "n_init": 10,
@@ -142,20 +165,47 @@ RETAINED_SHA256 = "6a621eed1bf9a089ac57f1a4370a3efdcf4e042b56826c632d753e44c062c
 
 @dataclass
 class LegacyDataset:
-    records: dict[int, dict]
+    records: dict[int, LegacyRecord]
     parsed_genres: dict[int, set[str]]
     exclusions: dict[int, list[str]]
-    counts: dict
+    counts: dict[str, object]
 
 
-def _id(value):
+class LegacyRecord(TypedDict):
+    Score: float
+    year: int
+    Name: NotRequired[str]
+    Type: NotRequired[str]
+    Episodes: NotRequired[float]
+    Source: NotRequired[str]
+    Duration: NotRequired[int]
+    Rating: NotRequired[int]
+    Popularity: NotRequired[float]
+    Favorites: NotRequired[float]
+    sypnopsis: NotRequired[str]
+    season: NotRequired[str]
+    Genres: NotRequired[str]
+
+
+class LegacyVectorDiagnostics(TypedDict):
+    status_counts: dict[str, int]
+    nonready_ids: list[int]
+    statuses: dict[int, str]
+    serialized_text_sha256: str
+    vector_sha256: str
+
+
+type RawCsvRows = Iterable[dict[str, str] | tuple[int, dict[str, str]]]
+
+
+def _id(value: object) -> int:
     raw = str(value)
     if not re.fullmatch(r"[1-9][0-9]*", raw) or int(raw) > 2_147_483_647:
         raise LegacyError(f"invalid MAL_ID {raw!r}")
     return int(raw)
 
 
-def _missing(value):
+def _missing(value: object) -> bool:
     # Pandas read_csv's relevant default NA spellings plus the anime-only literal Unknown.
     return value is None or str(value) in {
         "",
@@ -170,8 +220,8 @@ def _missing(value):
     }
 
 
-def _index(rows, columns, source):
-    indexed = {}
+def _index(rows: RawCsvRows, columns: tuple[str, ...], source: str) -> dict[int, dict[str, str]]:
+    indexed: dict[int, dict[str, str]] = {}
     for item in rows:
         row = item[1] if isinstance(item, tuple) else item
         if not isinstance(row, dict) or any(column not in row for column in columns):
@@ -183,7 +233,7 @@ def _index(rows, columns, source):
     return indexed
 
 
-def _duration(value):
+def _duration(value: str) -> int:
     parts = value.split()
     seconds = 0
     for i, part in enumerate(parts):
@@ -195,7 +245,7 @@ def _duration(value):
     return seconds
 
 
-def _float(value, field, mal_id):
+def _float(value: str | int | float, field: str, mal_id: int) -> float:
     try:
         result = float(value)
     except (TypeError, ValueError, OverflowError) as exc:
@@ -205,12 +255,14 @@ def _float(value, field, mal_id):
     return result
 
 
-def prepare_legacy_rows(anime_rows, synopsis_rows) -> LegacyDataset:
+def prepare_legacy_rows(anime_rows: RawCsvRows, synopsis_rows: RawCsvRows) -> LegacyDataset:
     """Apply notebook eligibility with stable IDs and explicit scalar types."""
     anime = _index(anime_rows, ANIME_COLUMNS, "anime")
     synopsis = _index(synopsis_rows, SYNOPSIS_COLUMNS, "synopsis")
-    records, genres, exclusions = {}, {}, {}
-    missing_counts = Counter()
+    records: dict[int, LegacyRecord] = {}
+    genres: dict[int, set[str]] = {}
+    exclusions: dict[int, list[str]] = {}
+    missing_counts: Counter[str] = Counter()
     metadata_count = 0
     for mal_id, row in sorted(anime.items()):
         reasons = [field for field in REQUIRED if _missing(row[field])]
@@ -251,7 +303,7 @@ def prepare_legacy_rows(anime_rows, synopsis_rows) -> LegacyDataset:
             raise LegacyError(f"unknown Rating for MAL_ID {mal_id}")
         raw_genres = row["Genres"]
         parsed = set(raw_genres.split(", "))
-        record = {
+        record: LegacyRecord = {
             "Name": str(name),
             "Score": _float(row["Score"], "Score", mal_id),
             "Type": str(row["Type"]),
@@ -279,11 +331,11 @@ def prepare_legacy_rows(anime_rows, synopsis_rows) -> LegacyDataset:
     return LegacyDataset(records, genres, exclusions, counts)
 
 
-def retained_ids_sha(dataset):
+def retained_ids_sha(dataset: LegacyDataset) -> str:
     return hashlib.sha256("".join(f"{i}\n" for i in sorted(dataset.records)).encode()).hexdigest()
 
 
-def cluster_legacy(dataset):
+def cluster_legacy(dataset: LegacyDataset) -> tuple[dict[int, int], dict[str, object]]:
     """Fit the explicit notebook-era KMeans profile on ordered binary genre features."""
     import numpy as np
     from sklearn.cluster import KMeans
@@ -317,26 +369,37 @@ def cluster_legacy(dataset):
     }
 
 
-def legacy_tokens(record, cluster: int) -> list[str]:
+def legacy_tokens(record: LegacyRecord, cluster: int) -> list[str]:
     if type(cluster) is not int:
         raise LegacyError("cluster must be an integer")
-    metadata = {field: cluster if field == "cluster" else record[field] for field in FIELDS}
+    metadata = {
+        field: cluster if field == "cluster" else cast("dict[str, object]", record)[field]
+        for field in FIELDS
+    }
     return re.sub(r"[^\w\s]", "", str(metadata).lower()).split()
 
 
-def build_legacy_vectors(dataset, labels, embeddings):
+def build_legacy_vectors(
+    dataset: LegacyDataset,
+    labels: dict[int, int],
+    embeddings: dict[str, NDArray[np.float64]],
+) -> tuple[list[int], NDArray[np.float64], LegacyVectorDiagnostics]:
     import numpy as np
 
     ids = sorted(dataset.records)
     if set(ids) != set(labels):
         raise LegacyError("cluster labels do not cover dataset")
     vectors = np.zeros((len(ids), DIMENSION), dtype=np.float64)
-    statuses, counts = {}, Counter()
-    texts = []
+    statuses: dict[int, str] = {}
+    counts: Counter[str] = Counter()
+    texts: list[dict[str, object]] = []
     for index, mal_id in enumerate(ids):
         record = dataset.records[mal_id]
         cluster = labels[mal_id]
-        metadata = {field: cluster if field == "cluster" else record[field] for field in FIELDS}
+        metadata = {
+            field: cluster if field == "cluster" else cast("dict[str, object]", record)[field]
+            for field in FIELDS
+        }
         texts.append({"mal_id": mal_id, "text": str(metadata)})
         tokens = legacy_tokens(record, cluster)
         matched = 0
@@ -391,7 +454,13 @@ def build_legacy_vectors(dataset, labels, embeddings):
     )
 
 
-def legacy_neighbors(dataset, ids, vectors, labels, query_id: int):
+def legacy_neighbors(
+    dataset: LegacyDataset,
+    ids: list[int],
+    vectors: NDArray[np.float64],
+    labels: dict[int, int],
+    query_id: int,
+) -> HistoricalQuery:
     import numpy as np
 
     if query_id not in dataset.records:
@@ -422,7 +491,7 @@ def legacy_neighbors(dataset, ids, vectors, labels, query_id: int):
     same_cluster.sort(
         key=lambda j: (-dataset.records[ids[j]]["Score"], -dataset.records[ids[j]]["year"], ids[j])
     )
-    recommendations = [
+    recommendations: list[HistoricalRecommendation] = [
         {"rank": rank, "mal_id": ids[j], "score": float(scores[j])}
         for rank, j in enumerate(same_cluster[:5], 1)
     ]

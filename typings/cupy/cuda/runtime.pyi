@@ -1,0 +1,13 @@
+from __future__ import annotations
+
+from typing import TypedDict
+
+class DeviceProperties(TypedDict):
+    name: str | bytes
+    major: int
+    minor: int
+
+def getDeviceProperties(device: int) -> DeviceProperties: ...
+def memGetInfo() -> tuple[int, int]: ...
+def runtimeGetVersion() -> int: ...
+def driverGetVersion() -> int: ...

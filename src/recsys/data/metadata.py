@@ -9,8 +9,9 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from typing import TypedDict
 
-from recsys.contracts.bundle import MAX_ID, check_catalog
+from recsys.contracts.bundle import MAX_ID, AnimeRecord, Catalog, check_catalog
 
 DETAIL_COLUMNS = (
     "mal_id",
@@ -51,11 +52,22 @@ ID_PATTERN = re.compile(r"[0-9]+\Z", re.ASCII)
 DATE_PATTERN = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", re.ASCII)
 
 
+class MetadataFact(TypedDict):
+    first_release_date: str | None
+    airing_status: str
+    seasonal_year: int | None
+
+
+class MetadataFacts(TypedDict):
+    schema_version: int
+    anime: dict[str, MetadataFact]
+
+
 @dataclass(frozen=True)
 class MetadataResult:
-    catalog: dict
-    facts: dict
-    qa: dict
+    catalog: Catalog
+    facts: MetadataFacts
+    qa: dict[str, int]
 
     @property
     def ids(self) -> set[int]:
@@ -146,9 +158,9 @@ def _synopsis(value: str | None) -> str | None:
 
 def normalize_metadata(details_path: Path) -> MetadataResult:
     """Read a verified details copy; no raw metadata values appear in errors."""
-    catalog: dict[str, dict] = {}
-    facts: dict[str, dict] = {}
-    counts = Counter()
+    catalog: dict[str, AnimeRecord] = {}
+    facts: dict[str, MetadataFact] = {}
+    counts: Counter[str] = Counter()
     duplicate_ids: set[str] = set()
     seen_ids: set[str] = set()
     try:
@@ -242,11 +254,10 @@ def normalize_metadata(details_path: Path) -> MetadataResult:
         raise ValueError("metadata_schema_invalid") from None
     counts["catalog_items"] = len(catalog)
     counts["duplicate_mal_ids"] = len(duplicate_ids)
-    payload = {"schema_version": 1, "anime": catalog}
+    payload: Catalog = {"schema_version": 1, "anime": catalog}
     try:
         check_catalog(payload)
     except ValueError:
         raise ValueError("metadata_schema_invalid") from None
-    return MetadataResult(
-        payload, {"schema_version": 1, "anime": facts}, dict(sorted(counts.items()))
-    )
+    facts_payload: MetadataFacts = {"schema_version": 1, "anime": facts}
+    return MetadataResult(payload, facts_payload, dict(sorted(counts.items())))

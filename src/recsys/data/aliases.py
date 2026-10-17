@@ -14,9 +14,10 @@ from collections import Counter
 from dataclasses import dataclass
 from importlib import metadata as package_metadata
 from pathlib import Path
+from typing import Never, TypedDict, cast
 from urllib.parse import urlsplit
 
-from recsys.contracts.bundle import MAX_ID, canonical_bytes, parse_canonical
+from recsys.contracts.bundle import MAX_ID, AnimeRecord, Catalog, canonical_bytes, parse_canonical
 from recsys.contracts.io import fsync_directory, publish_no_replace
 from recsys.contracts.provenance import (
     LEGACY_V1_PACKAGE_VERSION,
@@ -26,7 +27,7 @@ from recsys.contracts.provenance import (
 )
 from recsys.contracts.resources import resource_bytes, resource_path
 from recsys.data.dataset import DatasetError, DatasetSpec, validate_dataset
-from recsys.data.sources import SourceError, validate_registry
+from recsys.data.sources import SourceError, SourceRegistry, validate_registry
 
 SNAPSHOT = "nafiul-2026-v1"
 REGISTRY_RESOURCE = "source_registry_nafiul_2026_v1.json"
@@ -142,6 +143,36 @@ class AliasError(Exception):
     """A fixed-code failure that never includes source text or private paths."""
 
 
+class AliasEntry(TypedDict):
+    source_field: str
+    text: str
+
+
+class AliasFileDescriptor(TypedDict):
+    bytes: int
+    sha256: str
+
+
+class AliasPayload(TypedDict):
+    schema_version: int
+    aliases: dict[str, list[AliasEntry]]
+
+
+class AliasQa(TypedDict):
+    schema_version: int
+    counts: dict[str, int]
+    fields: dict[str, dict[str, dict[str, int]]]
+
+
+class AliasExpectations(TypedDict):
+    schema_version: int
+    snapshot_id: str
+    source_sha256: str
+    base_identity: str
+    counts: dict[str, int]
+    fields: dict[str, dict[str, dict[str, int]]]
+
+
 @dataclass(frozen=True)
 class AliasSpec:
     snapshot_id: str
@@ -172,8 +203,8 @@ def _same_json(left: object, right: object) -> bool:
         return False
 
 
-def _unique_object(pairs: list[tuple[str, object]]) -> dict:
-    result = {}
+def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
     for key, value in pairs:
         if key in result:
             raise ValueError("duplicate JSON key")
@@ -181,8 +212,8 @@ def _unique_object(pairs: list[tuple[str, object]]) -> dict:
     return result
 
 
-def _json_unique(raw: bytes) -> dict:
-    def reject_constant(_value: str):
+def _json_unique(raw: bytes) -> dict[str, object]:
+    def reject_constant(_value: str) -> Never:
         raise ValueError("nonfinite JSON constant")
 
     value = json.loads(
@@ -190,7 +221,7 @@ def _json_unique(raw: bytes) -> dict:
     )
     if not isinstance(value, dict):
         raise ValueError("expected JSON object")
-    return value
+    return cast("dict[str, object]", value)  # Parsed top-level object checked above.
 
 
 def _fields_shape(fields: object) -> bool:
@@ -211,7 +242,9 @@ def _fields_shape(fields: object) -> bool:
     )
 
 
-def _load_spec(spec: AliasSpec | None) -> tuple[AliasSpec, dict, dict, str, str]:
+def _load_spec(
+    spec: AliasSpec | None,
+) -> tuple[AliasSpec, SourceRegistry, AliasExpectations, str, str]:
     if spec is None:
         spec = AliasSpec(
             SNAPSHOT,
@@ -227,7 +260,9 @@ def _load_spec(spec: AliasSpec | None) -> tuple[AliasSpec, dict, dict, str, str]
         expectations = parse_canonical(spec.expectations_bytes, "alias_expectations")
     except (ValueError, TypeError, OSError, UnicodeError, SourceError) as exc:
         raise AliasError("alias_integrity_error") from exc
-    dataset_provenance = registry.get("provenance", {}).get("dataset")
+    registry_typed = cast("SourceRegistry", registry)  # validate_registry checked source records.
+    provenance = registry.get("provenance")
+    dataset_provenance = provenance.get("dataset") if isinstance(provenance, dict) else None
     if (
         type(registry.get("schema_version")) is not int
         or not isinstance(dataset_provenance, dict)
@@ -244,20 +279,26 @@ def _load_spec(spec: AliasSpec | None) -> tuple[AliasSpec, dict, dict, str, str]
         or spec.expectations_resource
         not in (EXPECTATIONS_RESOURCE, resource_path("expectations", EXPECTATIONS_RESOURCE))
         or dataset_provenance.get("snapshot_id") != spec.snapshot_id
-        or len(registry["sources"]) != 1
-        or registry["sources"][0]["id"] != "nafiul_anime_csv"
-        or registry["sources"][0]["filename"] != "anime_info.csv"
-        or expectations["source_sha256"] != registry["sources"][0]["sha256"]
+        or len(registry_typed["sources"]) != 1
+        or registry_typed["sources"][0]["id"] != "nafiul_anime_csv"
+        or registry_typed["sources"][0]["filename"] != "anime_info.csv"
+        or expectations["source_sha256"] != registry_typed["sources"][0]["sha256"]
         or not isinstance(expectations["counts"], dict)
         or set(expectations["counts"]) != COUNT_KEYS
         or any(type(value) is not int or value < 0 for value in expectations["counts"].values())
         or not _fields_shape(expectations["fields"])
     ):
         raise AliasError("alias_integrity_error")
-    return spec, registry, expectations, _sha(spec.registry_bytes), _sha(spec.expectations_bytes)
+    return (
+        spec,
+        registry_typed,
+        cast("AliasExpectations", expectations),
+        _sha(spec.registry_bytes),
+        _sha(spec.expectations_bytes),
+    )
 
 
-def _read_source(data_dir: Path, registry: dict, registry_sha: str) -> bytes:
+def _read_source(data_dir: Path, registry: SourceRegistry, registry_sha: str) -> bytes:
     descriptor = registry["sources"][0]
     manifest_path = data_dir / "source-manifest.json"
     source_path = data_dir / descriptor["filename"]
@@ -295,7 +336,7 @@ def _read_source(data_dir: Path, registry: dict, registry_sha: str) -> bytes:
 
 def _base_catalog(
     base_dir: Path, base_identity: str, base_spec: DatasetSpec | None
-) -> tuple[dict, dict]:
+) -> tuple[dict[str, AnimeRecord], AliasFileDescriptor]:
     try:
         validate_dataset(base_dir, expected_identity=base_identity, _spec=base_spec)
         manifest_path = base_dir / "dataset-manifest.json"
@@ -305,12 +346,17 @@ def _base_catalog(
         manifest_raw = manifest_path.read_bytes()
         if "sha256:" + _sha(manifest_raw) != base_identity:
             raise AliasError("base_integrity_error")
-        manifest = parse_canonical(manifest_raw, "base_manifest")
+        manifest_value = parse_canonical(manifest_raw, "base_manifest")
+        manifest = cast("dict[str, object]", manifest_value)  # Validated dataset bytes.
         catalog_raw = catalog_path.read_bytes()
-        descriptor = manifest["files"]["catalog.json"]
+        descriptor = cast(
+            "AliasFileDescriptor",
+            cast("dict[str, object]", manifest["files"])["catalog.json"],
+        )
         if len(catalog_raw) != descriptor["bytes"] or _sha(catalog_raw) != descriptor["sha256"]:
             raise AliasError("base_integrity_error")
-        catalog = parse_canonical(catalog_raw, "base_catalog")
+        catalog_value = parse_canonical(catalog_raw, "base_catalog")
+        catalog = cast("Catalog", catalog_value)  # Same bytes validated by validate_dataset.
         return catalog["anime"], descriptor
     except (DatasetError, OSError, ValueError, TypeError, KeyError) as exc:
         raise AliasError("base_integrity_error") from exc
@@ -341,7 +387,7 @@ def _valid_url(raw: str, mal_id: str) -> bool:
         return False
 
 
-def _field(raw: str, counts: Counter) -> str | None:
+def _field(raw: str, counts: Counter[str]) -> str | None:
     stripped = raw.strip()
     normalized = unicodedata.normalize("NFC", stripped)
     counts["trim_changed"] += raw != stripped
@@ -396,7 +442,7 @@ def _rows(raw: bytes) -> list[tuple[str | None, str, str, str, str]]:
         raise AliasError("alias_csv_invalid") from exc
 
 
-def _derive(raw: bytes, base: dict) -> tuple[dict, dict]:
+def _derive(raw: bytes, base: dict[str, AnimeRecord]) -> tuple[AliasPayload, AliasQa]:
     records = _rows(raw)
     ids = Counter(item[0] for item in records if item[0] is not None)
     base_ids = set(base)
@@ -420,8 +466,10 @@ def _derive(raw: bytes, base: dict) -> tuple[dict, dict]:
             "base_without_unambiguous_match": len(base_ids - overlap),
         }
     )
-    fields = {scope: {name: Counter() for name in FIELD_NAMES} for scope in FIELD_SCOPES}
-    aliases = {}
+    fields: dict[str, dict[str, Counter[str]]] = {
+        scope: {name: Counter() for name in FIELD_NAMES} for scope in FIELD_SCOPES
+    }
+    aliases: dict[str, list[AliasEntry]] = {}
     for mal_id, main_raw, english_raw, url, synonyms in records:
         _field(english_raw, fields["all_source"]["title_english"])
         _field(main_raw, fields["all_source"]["title"])
@@ -456,7 +504,7 @@ def _derive(raw: bytes, base: dict) -> tuple[dict, dict]:
             counts["main_eq_base_alias"] += eq_alias
             counts["main_eq_added_english"] += eq_english
             counts["redundant_main"] += eq_primary or eq_alias or eq_english
-        entries = []
+        entries: list[AliasEntry] = []
         if english:
             entries.append({"source_field": "title_english", "text": english})
             counts["emitted_english"] += 1
@@ -475,7 +523,7 @@ def _derive(raw: bytes, base: dict) -> tuple[dict, dict]:
     counts["eligible_without_aliases"] = counts["eligible_overlap"] - len(aliases)
     counts["base_without_aliases"] = len(base_ids) - len(aliases)
     counts["base_without_eligible_match"] = len(base_ids) - counts["eligible_overlap"]
-    qa = {
+    qa: AliasQa = {
         "schema_version": 1,
         "counts": {key: counts[key] for key in sorted(COUNT_KEYS)},
         "fields": {
@@ -489,12 +537,12 @@ def _derive(raw: bytes, base: dict) -> tuple[dict, dict]:
     return {"schema_version": 1, "aliases": aliases}, qa
 
 
-def _check_expectations(qa: dict, expectations: dict) -> None:
+def _check_expectations(qa: AliasQa, expectations: AliasExpectations) -> None:
     if qa["counts"] != expectations["counts"] or qa["fields"] != expectations["fields"]:
         raise AliasError("alias_qa_mismatch")
 
 
-def _write(path: Path, value: dict) -> bytes:
+def _write(path: Path, value: object) -> bytes:
     raw = canonical_bytes(value)
     with path.open("xb") as stream:
         os.chmod(path, 0o600)
@@ -508,7 +556,7 @@ def _publish(stage: Path, target: Path) -> None:
     publish_no_replace(stage, target)
 
 
-def _read_json(path: Path) -> tuple[dict, bytes]:
+def _read_json(path: Path) -> tuple[dict[str, object], bytes]:
     if path.is_symlink() or not path.is_file():
         raise AliasError("alias_integrity_error")
     try:
@@ -518,15 +566,17 @@ def _read_json(path: Path) -> tuple[dict, bytes]:
         raise AliasError("alias_integrity_error") from exc
     if not isinstance(parsed, dict):
         raise AliasError("alias_integrity_error")
-    return parsed, raw
+    return cast("dict[str, object]", parsed), raw  # Top-level object checked above.
 
 
-def _validate_output(stage: Path, manifest: dict, alias_bytes: bytes, qa_bytes: bytes) -> None:
+def _validate_output(
+    stage: Path, manifest: dict[str, object], alias_bytes: bytes, qa_bytes: bytes
+) -> None:
     if {path.name for path in stage.iterdir()} != set(ALL_OUTPUTS):
         raise AliasError("alias_integrity_error")
     for name, expected_raw in (("aliases.json", alias_bytes), ("alias-qa.json", qa_bytes)):
         _, raw = _read_json(stage / name)
-        if raw != expected_raw or manifest["files"][name] != {
+        if raw != expected_raw or cast("dict[str, object]", manifest["files"])[name] != {
             "bytes": len(raw),
             "sha256": _sha(raw),
         }:
@@ -561,7 +611,7 @@ def _prepare(
     expected_base_identity: str,
     spec: AliasSpec | None,
     base_spec: DatasetSpec | None,
-):
+) -> tuple[AliasSpec, SourceRegistry, str, str, AliasFileDescriptor, int, AliasPayload, AliasQa]:
     if not isinstance(expected_base_identity, str) or not IDENTITY.fullmatch(
         expected_base_identity
     ):

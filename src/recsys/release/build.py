@@ -6,11 +6,15 @@ import re
 import shutil
 import tempfile
 from collections import Counter
+from collections.abc import Iterable
 from pathlib import Path
+from typing import TypedDict, cast
 
 from recsys import __version__
 from recsys.content.glove import (
     SCORE_BLOCK_BUDGET,
+    AnimeDiagnostics,
+    Coverage,
     _effective_rows,
     _tokens,
     build_vectors,
@@ -19,6 +23,9 @@ from recsys.content.glove import (
 )
 from recsys.contracts.bundle import (
     ContractError,
+    JSONValue,
+    ManifestSource,
+    Neighbors,
     canonical_bytes,
     check_bundle_bytes,
     check_catalog,
@@ -30,7 +37,9 @@ from recsys.contracts.bundle import (
 )
 from recsys.contracts.provenance import SOURCE_LAYOUT, source_fingerprints
 from recsys.contracts.resources import resource_bytes
-from recsys.data.sources import SourceError, validate_registry
+from recsys.data.aliases import AliasSpec
+from recsys.data.dataset import DatasetSpec
+from recsys.data.sources import SourceError, SourceRegistry, validate_registry
 from recsys.release.catalog import ReleaseError, VerifiedRelease, _sha, _verified_release
 from recsys.release.export import ALGORITHM, _code_sha, _publish, _same, _validate_diagnostics
 
@@ -62,7 +71,31 @@ def _safe_file(path: Path) -> bytes:
     return path.read_bytes()
 
 
-def _glove_registry(raw: bytes | None):
+class BuildProducer(TypedDict):
+    package_version: str
+    python_version: str
+    numpy_version: str
+    source_layout: str
+    code_files: dict[str, str]
+
+
+class BuildReport(TypedDict):
+    schema_version: int
+    kind: str
+    builder_version: str
+    catalog_release_identity: str
+    algorithm: dict[str, object]
+    sources: list[ManifestSource]
+    registry_sha256: str
+    inputs: dict[str, object]
+    files: dict[str, object]
+    producer: BuildProducer
+    execution: dict[str, int]
+    coverage: Coverage
+    anime: dict[str, AnimeDiagnostics]
+
+
+def _glove_registry(raw: bytes | None) -> tuple[SourceRegistry, str]:
     if raw is None:
         raw = resource_bytes("registries", "source_registry_glove_6b_300d_v1.json")
     # Registry is distributed in readable JSON, and its original bytes are the pinned identity.
@@ -70,32 +103,39 @@ def _glove_registry(raw: bytes | None):
 
     value = _json_unique(raw)
     validate_registry(value)
+    registry = cast("SourceRegistry", value)
+    glove_provenance = registry["provenance"].get("glove")
     if (
-        set(value) != {"schema_version", "provenance", "sources"}
-        or type(value["schema_version"]) is not int
-        or value["schema_version"] != 1
-        or set(value["provenance"]) != {"glove"}
-        or [item["id"] for item in value["sources"]] != ["glove_zip", "glove_300d"]
+        set(registry) != {"schema_version", "provenance", "sources"}
+        or type(registry["schema_version"]) is not int
+        or registry["schema_version"] != 1
+        or set(registry["provenance"]) != {"glove"}
+        or not isinstance(glove_provenance, dict)
+        or [item["id"] for item in registry["sources"]] != ["glove_zip", "glove_300d"]
     ):
         raise ReleaseBuildError("release_build_integrity_error")
-    return value, _sha(raw)
+    return registry, _sha(raw)
 
 
-def _source(name, version, digest, metadata):
+def _source(name: str, version: str, digest: str, metadata: dict[str, JSONValue]) -> ManifestSource:
     return {"name": name, "version": version, "sha256": digest, "metadata": metadata}
 
 
-def _sources(verified: VerifiedRelease, registry: dict, registry_sha: str):
-    base = verified.base_manifest
-    alias = verified.alias_manifest
+def _sources(
+    verified: VerifiedRelease, registry: SourceRegistry, registry_sha: str
+) -> list[ManifestSource]:
+    base = cast("dict[str, JSONValue]", verified.base_manifest)
+    alias = cast("dict[str, JSONValue]", verified.alias_manifest)
     release = verified.manifest
+    base_normalizer = cast("dict[str, str]", base["normalizer"])
+    alias_normalizer = cast("dict[str, JSONValue]", alias["normalizer"])
     descriptions = {item["id"]: item for item in registry["sources"]}
     glove = descriptions["glove_300d"]
-    provenance = registry["provenance"]["glove"]
+    provenance = cast("dict[str, str]", registry["provenance"]["glove"])
     items = [
         _source(
             "research_dataset",
-            base["normalizer"]["version"],
+            base_normalizer["version"],
             verified.summary.base_identity.split(":", 1)[1],
             {
                 "filename": "dataset-manifest.json",
@@ -107,12 +147,12 @@ def _sources(verified: VerifiedRelease, registry: dict, registry_sha: str):
         ),
         _source(
             "alias_enrichment",
-            alias["normalizer"]["version"],
+            cast("str", alias_normalizer["version"]),
             verified.summary.alias_identity.split(":", 1)[1],
             {
                 "filename": "alias-manifest.json",
                 "snapshot_id": alias["snapshot_id"],
-                "policy": alias["normalizer"]["policy"],
+                "policy": alias_normalizer["policy"],
                 "base": alias["base"],
                 "manifest_sha256": release["inputs"]["aliases"]["manifest"]["sha256"],
             },
@@ -153,15 +193,15 @@ def _sources(verified: VerifiedRelease, registry: dict, registry_sha: str):
 
 
 def _verified(
-    release_dir,
+    release_dir: str | Path,
     *,
-    expected_release_identity,
-    base_dir,
-    aliases_dir,
-    alias_data_dir,
-    _base_spec,
-    _alias_spec,
-):
+    expected_release_identity: str,
+    base_dir: str | Path,
+    aliases_dir: str | Path,
+    alias_data_dir: str | Path,
+    _base_spec: DatasetSpec | None,
+    _alias_spec: AliasSpec | None,
+) -> VerifiedRelease:
     return _verified_release(
         release_dir,
         base_dir=base_dir,
@@ -173,14 +213,14 @@ def _verified(
     )
 
 
-def _write(path: Path, raw: bytes):
+def _write(path: Path, raw: bytes) -> None:
     with open(path, "xb", opener=lambda name, flags: os.open(name, flags, 0o600)) as stream:
         stream.write(raw)
         stream.flush()
         os.fsync(stream.fileno())
 
 
-def _fsync(path: Path):
+def _fsync(path: Path) -> None:
     fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
     try:
         os.fsync(fd)
@@ -188,7 +228,7 @@ def _fsync(path: Path):
         os.close(fd)
 
 
-def _check_output(output: Path, inputs):
+def _check_output(output: Path, inputs: Iterable[str | Path]) -> None:
     if (
         not output.parent.is_dir()
         or output.parent.is_symlink()
@@ -203,7 +243,7 @@ def _check_output(output: Path, inputs):
             raise ReleaseBuildError("release_build_integrity_error")
 
 
-def _check_export_store(output: Path, input_dirs) -> None:
+def _check_export_store(output: Path, input_dirs: Iterable[str | Path]) -> None:
     """Keep publication and its lock outside every immutable input tree."""
     for component in (output, *output.parents):
         if component.is_symlink() or (component.exists() and not component.is_dir()):
@@ -216,18 +256,18 @@ def _check_export_store(output: Path, input_dirs) -> None:
 
 
 def build_release(
-    release_dir,
-    glove_path,
-    output_dir,
+    release_dir: str | Path,
+    glove_path: str | Path,
+    output_dir: str | Path,
     *,
-    expected_release_identity,
-    base_dir,
-    aliases_dir,
-    alias_data_dir,
-    block_size=256,
-    _base_spec=None,
-    _alias_spec=None,
-    _glove_registry_bytes=None,
+    expected_release_identity: str,
+    base_dir: str | Path,
+    aliases_dir: str | Path,
+    alias_data_dir: str | Path,
+    block_size: int = 256,
+    _base_spec: DatasetSpec | None = None,
+    _alias_spec: AliasSpec | None = None,
+    _glove_registry_bytes: bytes | None = None,
 ) -> Path:
     """Validate once, then publish exactly neighbors.json and the v2 report."""
     import numpy as np
@@ -254,7 +294,7 @@ def build_release(
         embeddings, glove_info = load_embeddings(glove_path, vocabulary, descriptions["glove_300d"])
         ids, vectors, diagnostics = build_vectors(anime, embeddings)
         del embeddings, vocabulary
-        neighbors = {
+        neighbors: Neighbors = {
             "schema_version": 1,
             "neighbors": cosine_neighbors(ids, vectors, block_size=block_size),
         }
@@ -267,7 +307,7 @@ def build_release(
         }
         check_neighbors(neighbors, check_catalog(verified.catalog))
         neighbor_raw = canonical_bytes(neighbors)
-        report = {
+        report: BuildReport = {
             "schema_version": 3,
             "kind": "arb-release-build",
             "builder_version": BUILDER_VERSION,
@@ -336,9 +376,16 @@ def build_release(
 
 
 def _validate_release_report(
-    report, verified, neighbors, neighbor_raw, registry, registry_sha, *, enforce_current
-):
-    exact_fields(report, REPORT_FIELDS, "build-report.json")
+    report: object,
+    verified: VerifiedRelease,
+    neighbors: Neighbors,
+    neighbor_raw: bytes,
+    registry: SourceRegistry,
+    registry_sha: str,
+    *,
+    enforce_current: bool,
+) -> BuildReport:
+    report = exact_fields(report, REPORT_FIELDS, "build-report.json")
     integer(report["schema_version"], "build-report.json.schema_version", 3, 3)
     _same(report["kind"], "arb-release-build", "build-report.json.kind")
     _same(report["builder_version"], BUILDER_VERSION, "build-report.json.builder_version")
@@ -378,9 +425,8 @@ def _validate_release_report(
         },
         "build-report.json.files",
     )
-    producer = report["producer"]
-    exact_fields(
-        producer,
+    producer = exact_fields(
+        report["producer"],
         {"package_version", "python_version", "numpy_version", "code_files", "source_layout"},
         "build-report.json.producer",
     )
@@ -395,21 +441,22 @@ def _validate_release_report(
     _same(producer["source_layout"], SOURCE_LAYOUT, "build-report.json.producer.source_layout")
     _same(producer["code_files"], source_fingerprints(), "build-report.json.producer.code_files")
     _validate_diagnostics(report, verified.catalog, neighbors)
+    return cast("BuildReport", report)  # Every scalar and nested record checked above.
 
 
 def export_release_bundle(
-    release_dir,
-    neighbors_path,
-    build_report_path,
-    output_dir,
+    release_dir: str | Path,
+    neighbors_path: str | Path,
+    build_report_path: str | Path,
+    output_dir: str | Path,
     *,
-    expected_release_identity,
-    base_dir,
-    aliases_dir,
-    alias_data_dir,
-    _base_spec=None,
-    _alias_spec=None,
-    _glove_registry_bytes=None,
+    expected_release_identity: str,
+    base_dir: str | Path,
+    aliases_dir: str | Path,
+    alias_data_dir: str | Path,
+    _base_spec: DatasetSpec | None = None,
+    _alias_spec: AliasSpec | None = None,
+    _glove_registry_bytes: bytes | None = None,
 ) -> Path:
     """Validate every retained input and publish the unchanged v1 runtime wire format."""
     try:
@@ -440,16 +487,26 @@ def export_release_bundle(
         neighbors = parse_canonical(neighbors_raw, "neighbors.json")
         report = parse_canonical(report_raw, "build-report.json")
         check_neighbors(neighbors, check_catalog(verified.catalog))
-        _validate_release_report(
-            report, verified, neighbors, neighbors_raw, registry, registry_sha, enforce_current=True
+        checked_neighbors = cast("Neighbors", neighbors)
+        checked_report = _validate_release_report(
+            report,
+            verified,
+            checked_neighbors,
+            neighbors_raw,
+            registry,
+            registry_sha,
+            enforce_current=True,
         )
         sources = [
-            *report["sources"],
+            *checked_report["sources"],
             _source(
                 "build_report",
                 BUILDER_VERSION,
                 _sha(report_raw),
-                {"filename": "build-report.json", "producer": report["producer"]},
+                {
+                    "filename": "build-report.json",
+                    "producer": cast("JSONValue", checked_report["producer"]),
+                },
             ),
             _source(
                 "bundle_exporter",
@@ -467,9 +524,9 @@ def export_release_bundle(
         manifest_raw = canonical_bytes(
             {
                 "schema_version": 1,
-                "algorithm": report["algorithm"],
+                "algorithm": checked_report["algorithm"],
                 "sources": sources,
-                "files": report["files"],
+                "files": checked_report["files"],
             }
         )
         identity, count = check_bundle_bytes(verified.catalog_raw, neighbors_raw, manifest_raw)

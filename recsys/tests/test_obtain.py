@@ -1,5 +1,7 @@
 """Exercise acquisition with small ZIP and HTTP fixtures."""
 
+from __future__ import annotations
+
 import hashlib
 import http.client
 import io
@@ -13,23 +15,31 @@ import warnings
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import TracebackType
+from typing import Mapping
 from unittest.mock import patch
 
 from recsys.data.obtain import obtain
-from recsys.data.sources import SourceError, load_registry
+from recsys.data.sources import SourceDescriptor, SourceError, SourceRegistry, load_registry
 
 
-def descriptor(source_id, filename, content, **origin):
-    return {
+def descriptor(source_id: str, filename: str, content: bytes, **origin: str) -> SourceDescriptor:
+    source: SourceDescriptor = {
         "id": source_id,
         "filename": filename,
         "size": len(content),
         "sha256": hashlib.sha256(content).hexdigest(),
-        **origin,
     }
+    if "url" in origin:
+        source["url"] = origin["url"]
+    if "archive_id" in origin:
+        source["archive_id"] = origin["archive_id"]
+    if "member" in origin:
+        source["member"] = origin["member"]
+    return source
 
 
-def make_zip(items):
+def make_zip(items: list[tuple[str | zipfile.ZipInfo, bytes]]) -> bytes:
     output = io.BytesIO()
     with zipfile.ZipFile(output, "w") as archive:
         with warnings.catch_warnings():
@@ -40,13 +50,13 @@ def make_zip(items):
 
 
 class LocalServer:
-    def __init__(self, responses):
+    def __init__(self, responses: Mapping[str, tuple[int, bytes]]) -> None:
         self.responses = responses
-        self.requests = []
+        self.requests: list[str] = []
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
-            def do_GET(self):
+            def do_GET(self) -> None:
                 outer.requests.append(self.path)
                 response = outer.responses.get(self.path)
                 if response is None:
@@ -57,27 +67,32 @@ class LocalServer:
                 self.end_headers()
                 self.wfile.write(body)
 
-            def log_message(self, *_args):
+            def log_message(self, format: str, *args: object) -> None:
                 pass
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
 
-    def __enter__(self):
+    def __enter__(self) -> LocalServer:
         self.thread.start()
         return self
 
-    def __exit__(self, *_args):
+    def __exit__(
+        self,
+        _exc_type: type[BaseException] | None,
+        _exc: BaseException | None,
+        _traceback: TracebackType | None,
+    ) -> None:
         self.server.shutdown()
         self.server.server_close()
         self.thread.join()
 
-    def url(self, path):
+    def url(self, path: str) -> str:
         return f"http://127.0.0.1:{self.server.server_port}/{path}"
 
 
 class ObtainTests(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.data = Path(self.temp.name) / "raw"
@@ -85,7 +100,14 @@ class ObtainTests(unittest.TestCase):
         self.txt = b"anime 0.1 0.2 0.3\n"
         self.zip_bytes = make_zip([("glove.6B.300d.txt", self.txt), ("../escape", b"bad")])
 
-    def registry(self, server, *, csv=None, zip_bytes=None, txt=None):
+    def registry(
+        self,
+        server: LocalServer,
+        *,
+        csv: bytes | None = None,
+        zip_bytes: bytes | None = None,
+        txt: bytes | None = None,
+    ) -> SourceRegistry:
         csv = self.csv if csv is None else csv
         zip_bytes = self.zip_bytes if zip_bytes is None else zip_bytes
         txt = self.txt if txt is None else txt
@@ -101,7 +123,7 @@ class ObtainTests(unittest.TestCase):
             ],
         }
 
-    def two_csv_registry(self, server):
+    def two_csv_registry(self, server: LocalServer) -> SourceRegistry:
         return {
             "schema_version": 1,
             "provenance": {"dataset": {"snapshot_id": "two-csv-fixture", "version": 1}},
@@ -111,10 +133,10 @@ class ObtainTests(unittest.TestCase):
             ],
         }
 
-    def assert_no_temps(self):
+    def assert_no_temps(self) -> None:
         self.assertEqual(list(self.data.glob(".*.tmp")), [])
 
-    def test_download_extract_manifest_and_repeat_cache(self):
+    def test_download_extract_manifest_and_repeat_cache(self) -> None:
         with LocalServer(
             {"/anime.csv": (200, self.csv), "/glove.6B.zip": (200, self.zip_bytes)}
         ) as server:
@@ -132,7 +154,7 @@ class ObtainTests(unittest.TestCase):
             self.assertEqual(len(server.requests), 2)
             self.assert_no_temps()
 
-    def test_offline_uses_archive_and_missing_fails_without_network(self):
+    def test_offline_uses_archive_and_missing_fails_without_network(self) -> None:
         with LocalServer(
             {"/anime.csv": (200, self.csv), "/glove.6B.zip": (200, self.zip_bytes)}
         ) as server:
@@ -147,7 +169,7 @@ class ObtainTests(unittest.TestCase):
             self.assertFalse((self.data / "source-manifest.json").exists())
             self.assertEqual(len(server.requests), 2)
 
-    def test_existing_corruption_fails_and_invalidates_manifest(self):
+    def test_existing_corruption_fails_and_invalidates_manifest(self) -> None:
         with LocalServer(
             {"/anime.csv": (200, self.csv), "/glove.6B.zip": (200, self.zip_bytes)}
         ) as server:
@@ -159,7 +181,7 @@ class ObtainTests(unittest.TestCase):
             self.assertFalse((self.data / "source-manifest.json").exists())
             self.assertEqual(len(server.requests), 2)
 
-    def test_bad_downloads_leave_no_final_or_temp(self):
+    def test_bad_downloads_leave_no_final_or_temp(self) -> None:
         for status, body, expected in (
             (200, b"X" + self.csv[1:], "invalid source"),
             (200, self.csv[:-1], "invalid source"),
@@ -175,7 +197,7 @@ class ObtainTests(unittest.TestCase):
                     self.assertFalse((self.data / "source-manifest.json").exists())
                     self.assert_no_temps()
 
-    def test_missing_duplicate_and_wrong_archive_members(self):
+    def test_missing_duplicate_and_wrong_archive_members(self) -> None:
         cases = (
             (make_zip([("other.txt", self.txt)]), "exactly one"),
             (make_zip([("glove.6B.300d.txt", self.txt)] * 2), "exactly one"),
@@ -195,7 +217,7 @@ class ObtainTests(unittest.TestCase):
                 for path in self.data.iterdir():
                     path.unlink()
 
-    def test_rejects_directory_mode_without_trailing_slash(self):
+    def test_rejects_directory_mode_without_trailing_slash(self) -> None:
         member = zipfile.ZipInfo("glove.6B.300d.txt")
         member.create_system = 3
         member.external_attr = (stat.S_IFDIR | 0o755) << 16
@@ -210,7 +232,7 @@ class ObtainTests(unittest.TestCase):
         self.assertFalse((self.data / "source-manifest.json").exists())
         self.assert_no_temps()
 
-    def test_rejects_symlink_target(self):
+    def test_rejects_symlink_target(self) -> None:
         self.data.mkdir()
         outside = Path(self.temp.name) / "outside"
         outside.write_bytes(self.csv)
@@ -220,7 +242,7 @@ class ObtainTests(unittest.TestCase):
                 obtain(self.data, registry=self.registry(server), offline=True)
         self.assertEqual(outside.read_bytes(), self.csv)
 
-    def test_two_csv_cache_offline_and_fixture_digest_preserved(self):
+    def test_two_csv_cache_offline_and_fixture_digest_preserved(self) -> None:
         with LocalServer(
             {"/details.csv": (200, self.csv), "/ratings.csv": (200, self.txt)}
         ) as server:
@@ -239,7 +261,7 @@ class ObtainTests(unittest.TestCase):
             self.assertEqual(server.requests, ["/details.csv", "/ratings.csv"])
             self.assert_no_temps()
 
-    def test_foreign_or_malformed_manifest_is_preserved_before_network(self):
+    def test_foreign_or_malformed_manifest_is_preserved_before_network(self) -> None:
         with LocalServer(
             {"/details.csv": (200, self.csv), "/ratings.csv": (200, self.txt)}
         ) as server:
@@ -280,7 +302,7 @@ class ObtainTests(unittest.TestCase):
                         self.assertEqual(unrelated.read_bytes(), b"keep")
                         self.assert_no_temps()
 
-    def test_symlink_and_unreadable_manifest_are_preserved(self):
+    def test_symlink_and_unreadable_manifest_are_preserved(self) -> None:
         with LocalServer({}) as server:
             registry = self.two_csv_registry(server)
             self.data.mkdir()
@@ -300,7 +322,7 @@ class ObtainTests(unittest.TestCase):
             self.assertEqual(manifest.read_bytes(), b"unreadable marker")
             self.assertEqual(server.requests, [])
 
-    def test_directory_and_other_snapshot_manifest_are_preserved(self):
+    def test_directory_and_other_snapshot_manifest_are_preserved(self) -> None:
         self.data.mkdir()
         manifest = self.data / "source-manifest.json"
         manifest.mkdir()
@@ -328,7 +350,7 @@ class ObtainTests(unittest.TestCase):
             sorted(path.name for path in self.data.iterdir()), ["source-manifest.json"]
         )
 
-    def test_download_failure_never_echoes_remote_credentials(self):
+    def test_download_failure_never_echoes_remote_credentials(self) -> None:
         with LocalServer({}) as server:
             registry = self.two_csv_registry(server)
             registry["sources"][0]["url"] = "https://user:synthetic-secret@example.invalid/path"
@@ -341,7 +363,7 @@ class ObtainTests(unittest.TestCase):
         self.assertNotIn("synthetic-secret", str(caught.exception))
         self.assertFalse((self.data / "source-manifest.json").exists())
 
-    def test_two_csv_failure_and_interrupted_stream_leave_no_success(self):
+    def test_two_csv_failure_and_interrupted_stream_leave_no_success(self) -> None:
         for status, body, expected in (
             (200, b"X" + self.txt[1:], "invalid source"),
             (200, self.txt[:-1], "invalid source"),
@@ -361,13 +383,18 @@ class ObtainTests(unittest.TestCase):
                     path.unlink()
 
         class InterruptedStream:
-            def __enter__(self):
+            def __enter__(self) -> InterruptedStream:
                 return self
 
-            def __exit__(self, *_args):
+            def __exit__(
+                self,
+                _exc_type: type[BaseException] | None,
+                _exc: BaseException | None,
+                _traceback: TracebackType | None,
+            ) -> None:
                 pass
 
-            def read(self, _size):
+            def read(self, _size: int) -> bytes:
                 if not hasattr(self, "started"):
                     self.started = True
                     return b"partial"
@@ -383,7 +410,7 @@ class ObtainTests(unittest.TestCase):
         self.assertFalse((self.data / "source-manifest.json").exists())
         self.assert_no_temps()
 
-    def test_snapshot_registry_conflict_and_unknown_snapshot_before_filesystem(self):
+    def test_snapshot_registry_conflict_and_unknown_snapshot_before_filesystem(self) -> None:
         with LocalServer({}) as server:
             registry = self.two_csv_registry(server)
             with self.assertRaisesRegex(SourceError, "snapshot and registry"):

@@ -1,9 +1,15 @@
 """Paired user bootstrap and prespecified minimum-N rule."""
 
+from __future__ import annotations
+
+import math
 from collections import defaultdict
 from pathlib import Path
+from typing import TYPE_CHECKING, Literal, cast
 
 from recsys.research.artifacts import (
+    StreamDescriptor,
+    check_descriptor,
     cleanup,
     open_stage,
     publish,
@@ -13,10 +19,84 @@ from recsys.research.artifacts import (
     stream_jsonl,
     write_json,
 )
-from recsys.research.protocol import exact, fail, sha
+from recsys.research.evaluation.evaluate import METRICS, EvaluationManifest, PrivateMetric
+from recsys.research.protocol import ProtocolSpec, exact, fail, sha
+
+if TYPE_CHECKING:
+    import numpy as np
+    from numpy.typing import NDArray
+
+type EvaluationRows = dict[tuple[str, str], PrivateMetric]
+type EvaluationRecord = tuple[EvaluationManifest, str, EvaluationRows]
+type PrimaryIndex = dict[str, dict[tuple[str, int], tuple[str, float]]]
 
 
-def _evaluation(path, expected_prepared_identity):
+def _private_metric(value: object) -> PrivateMetric:
+    exact(
+        value,
+        {
+            "query_id",
+            "user_key",
+            "split",
+            "cohort",
+            "mask",
+            "order",
+            "n",
+            "history_bin",
+            "seed_band",
+            "ranking",
+            "metrics",
+            "known_history_repeats",
+            "completed_repeats",
+            "recent_2024_seed_count",
+            "genre_diversity",
+        },
+    )
+    row = cast("dict[str, object]", value)
+    if any(
+        type(row[field]) is not str
+        for field in (
+            "query_id",
+            "user_key",
+            "split",
+            "cohort",
+            "mask",
+            "order",
+            "history_bin",
+            "seed_band",
+        )
+    ):
+        fail()
+    if any(
+        type(row[field]) is not int
+        for field in ("n", "known_history_repeats", "completed_repeats", "recent_2024_seed_count")
+    ):
+        fail()
+    ranking = row["ranking"]
+    if type(ranking) is not list or any(type(item) is not int for item in ranking):
+        fail()
+    metric_value = row["metrics"]
+    exact(metric_value, METRICS)
+    metric_map = cast("dict[str, object]", metric_value)
+    for key in METRICS:
+        metric = metric_map[key]
+        if type(metric) is not float or not math.isfinite(metric):
+            fail()
+    diversity_value = row["genre_diversity"]
+    exact(diversity_value, {"mean", "valid_pair_coverage"})
+    diversity = cast("dict[str, object]", diversity_value)
+    mean = diversity["mean"]
+    coverage = diversity["valid_pair_coverage"]
+    if (
+        (mean is not None and (type(mean) is not float or not math.isfinite(mean)))
+        or type(coverage) is not float
+        or not math.isfinite(coverage)
+    ):
+        fail()
+    return cast("PrivateMetric", row)
+
+
+def _evaluation(path: str | Path, expected_prepared_identity: str) -> EvaluationRecord:
     path = safe_path(path, directory=True)
     if {item.name for item in path.iterdir()} != {
         "evaluation-manifest.json",
@@ -24,9 +104,9 @@ def _evaluation(path, expected_prepared_identity):
         "user-metrics.jsonl.gz",
     }:
         fail()
-    manifest, raw = read_json(path / "evaluation-manifest.json")
+    value, raw = read_json(path / "evaluation-manifest.json")
     exact(
-        manifest,
+        value,
         {
             "schema_version",
             "kind",
@@ -41,48 +121,64 @@ def _evaluation(path, expected_prepared_identity):
             "files",
         },
     )
+    raw_manifest = cast("dict[str, object]", value)
     if (
-        type(manifest["schema_version"]) is not int
-        or manifest["schema_version"] != 1
-        or manifest["kind"] != "arb-ml-evaluation"
-        or manifest["split"] != "validation"
-        or manifest["prepared_identity"] != expected_prepared_identity
-        or manifest["selection_identity"] is not None
-        or set(manifest["files"]) != {"report.json", "user-metrics.jsonl.gz"}
+        type(raw_manifest["schema_version"]) is not int
+        or raw_manifest["schema_version"] != 1
+        or raw_manifest["kind"] != "arb-ml-evaluation"
+        or raw_manifest["split"] != "validation"
+        or raw_manifest["prepared_identity"] != expected_prepared_identity
+        or raw_manifest["selection_identity"] is not None
+        or any(
+            type(raw_manifest[field]) is not str
+            for field in (
+                "prediction_identity",
+                "model_id",
+                "config_sha256",
+                "fit_identity",
+                "prediction_code_revision",
+            )
+        )
     ):
         fail()
-    report, _ = read_json(path / "report.json", manifest["files"]["report.json"])
+    files_value = raw_manifest["files"]
+    exact(files_value, {"report.json", "user-metrics.jsonl.gz"})
+    files = cast("dict[str, object]", files_value)
+    check_descriptor(files["report.json"])
+    check_descriptor(files["user-metrics.jsonl.gz"], stream=True)
+    manifest = cast("EvaluationManifest", raw_manifest)
+    report_value, _ = read_json(path / "report.json", manifest["files"]["report.json"])
+    exact(
+        report_value,
+        {
+            "schema_version",
+            "kind",
+            "split",
+            "prediction_identity",
+            "prepared_identity",
+            "queries",
+            "groups",
+        },
+    )
+    report = cast("dict[str, object]", report_value)
     if (
-        report["split"] != "validation"
+        type(report["schema_version"]) is not int
+        or report["schema_version"] != 1
+        or report["kind"] != "arb-ml-evaluation-report"
+        or report["split"] != "validation"
         or report["prepared_identity"] != expected_prepared_identity
         or report["prediction_identity"] != manifest["prediction_identity"]
+        or type(report["queries"]) is not int
+        or type(report["groups"]) is not list
     ):
         fail()
-    rows = {}
-    per_query = defaultdict(set)
-    for row in stream_jsonl(
-        path / "user-metrics.jsonl.gz", manifest["files"]["user-metrics.jsonl.gz"]
+    rows: EvaluationRows = {}
+    per_query: defaultdict[str, set[str]] = defaultdict(set)
+    for row_value in stream_jsonl(
+        path / "user-metrics.jsonl.gz",
+        cast("StreamDescriptor", manifest["files"]["user-metrics.jsonl.gz"]),
     ):
-        exact(
-            row,
-            {
-                "query_id",
-                "user_key",
-                "split",
-                "cohort",
-                "mask",
-                "order",
-                "n",
-                "history_bin",
-                "seed_band",
-                "ranking",
-                "metrics",
-                "known_history_repeats",
-                "completed_repeats",
-                "recent_2024_seed_count",
-                "genre_diversity",
-            },
-        )
+        row = _private_metric(row_value)
         key = (row["query_id"], row["mask"])
         if (
             key in rows
@@ -102,8 +198,8 @@ def _evaluation(path, expected_prepared_identity):
     return manifest, "sha256:" + sha(raw), rows
 
 
-def _primary(rows):
-    by_user = defaultdict(dict)
+def _primary(rows: EvaluationRows) -> tuple[list[str], PrimaryIndex]:
+    by_user: defaultdict[str, dict[tuple[str, int], tuple[str, float]]] = defaultdict(dict)
     for row in rows.values():
         if (
             row["cohort"] == "main"
@@ -122,13 +218,17 @@ def _primary(rows):
     return users, by_user
 
 
-def _quantile(values, probability, method):
+def _quantile(
+    values: NDArray[np.float64], probability: float, method: Literal["higher", "lower"]
+) -> float:
     import numpy as np
 
     return float(np.quantile(values, probability, method=method))
 
 
-def _bootstrap(matrix, seed, replicates):
+def _bootstrap(
+    matrix: NDArray[np.float64], seed: int, replicates: int
+) -> NDArray[np.float64] | None:
     import numpy as np
 
     rng = np.random.Generator(np.random.PCG64(seed))
@@ -144,7 +244,7 @@ def _bootstrap(matrix, seed, replicates):
     )
 
 
-def _policy(matrix, protocol):
+def _policy(matrix: NDArray[np.float64], protocol: ProtocolSpec) -> dict[str, object]:
     import numpy as np
 
     epsilon = protocol["comparison"]["epsilon_ndcg5"]
@@ -162,7 +262,9 @@ def _policy(matrix, protocol):
     bootstrap = _bootstrap(
         matrix, protocol["comparison"]["seed"], protocol["comparison"]["bootstrap_replicates"]
     )
-    errors = []
+    if bootstrap is None:
+        fail("research_unpaired_evaluation")
+    errors: list[NDArray[np.float64]] = []
     for n in range(10):
         for j in range(10):
             if j != n:
@@ -189,7 +291,9 @@ def _policy(matrix, protocol):
     }
 
 
-def _comparison_report(evaluations, prepared_identity, protocol):
+def _comparison_report(
+    evaluations: list[EvaluationRecord], prepared_identity: str, protocol: ProtocolSpec
+) -> dict[str, object]:
     """Derive every public comparison field from verified private validation rows."""
     import numpy as np
 
@@ -200,8 +304,8 @@ def _comparison_report(evaluations, prepared_identity, protocol):
         fail()
     reference_keys = set(evaluations[0][2])
     reference_users, reference_primary = _primary(evaluations[0][2])
-    models = []
-    matrices = []
+    models: list[dict[str, object]] = []
+    matrices: list[NDArray[np.float64]] = []
     for manifest, eval_id, rows in evaluations:
         if set(rows) != reference_keys:
             fail("research_unpaired_evaluation")
@@ -251,7 +355,7 @@ def _comparison_report(evaluations, prepared_identity, protocol):
                 "n_policy": _policy(matrix, protocol),
             }
         )
-    pairs = []
+    pairs: list[dict[str, object]] = []
     if len(reference_users) >= 2:
         base = matrices[0]
         for index in range(1, len(matrices)):
@@ -261,6 +365,8 @@ def _comparison_report(evaluations, prepared_identity, protocol):
                 protocol["comparison"]["seed"],
                 protocol["comparison"]["bootstrap_replicates"],
             )
+            if bootstrap is None:
+                fail("research_unpaired_evaluation")
             pairs.append(
                 {
                     "left": ids[0],
@@ -289,7 +395,12 @@ def _comparison_report(evaluations, prepared_identity, protocol):
     return report
 
 
-def compare_evaluations(evaluation_dirs, output_dir, *, expected_prepared_identity):
+def compare_evaluations(
+    evaluation_dirs: list[str | Path] | tuple[str | Path, ...],
+    output_dir: str | Path,
+    *,
+    expected_prepared_identity: str,
+) -> Path:
     if type(evaluation_dirs) not in (list, tuple) or not evaluation_dirs:
         fail()
     output_dir = Path(output_dir)

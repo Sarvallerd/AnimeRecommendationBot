@@ -9,9 +9,12 @@ from __future__ import annotations
 import importlib.metadata
 import platform
 import re
-from datetime import timedelta
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import NotRequired, TypedDict, cast
 
 from recsys.contracts.provenance import SOURCE_LAYOUT, source_fingerprints
+from recsys.research.artifacts import FileDescriptor
 from recsys.research.campaign.common import (
     AUX_PHASE,
     AUX_VARIANTS,
@@ -27,11 +30,55 @@ from recsys.research.campaign.common import (
 )
 
 
-def _backend(variant, configured):
+class CampaignVariant(TypedDict):
+    variant_id: str
+    parameters: object
+    backend: str
+    components: NotRequired[list[dict[str, str]]]
+
+
+class CampaignScheduling(TypedDict):
+    cpu_workers: int
+    gpu_workers: int
+    blas_threads: int
+    gpu_optional_benchmark: str
+
+
+class SourceReceipt(TypedDict):
+    source_layout: str
+    code_files_sha256: dict[str, str]
+    python_version: str
+    package_versions: dict[str, str]
+
+
+class CampaignPlan(TypedDict):
+    schema_version: int
+    kind: str
+    prepared_identity: str
+    protocol_identity: str
+    fit_identity: str
+    catalog_descriptor: FileDescriptor
+    train_interactions: FileDescriptor
+    train_stats: FileDescriptor
+    campaign_spec_sha256: str
+    code_revision: str
+    producer: SourceReceipt
+    variants: list[CampaignVariant]
+    auxiliary_fits: list[dict[str, str]]
+    execution_config_count: int
+    assets: dict[str, FileDescriptor]
+    budgets: dict[str, float | int]
+    scheduling: CampaignScheduling
+    score_retention: str
+    created_utc: str
+    deadline_utc: str
+
+
+def _backend(variant: str, configured: str) -> str:
     return "cpu" if configured == "cpu" or variant in ("popularity", "itemknn", "hybrid") else "gpu"
 
 
-def _expected_nodes(plan):
+def _expected_nodes(plan: CampaignPlan) -> set[tuple[str, str]]:
     nodes = {(variant, phase) for variant in VARIANTS for phase in PHASES}
     if plan["scheduling"]["gpu_workers"] == 1 and any(
         entry["backend"] == "gpu" for entry in plan["variants"]
@@ -40,14 +87,92 @@ def _expected_nodes(plan):
     return nodes
 
 
-def _component_phase(plan):
+def _component_phase(plan: CampaignPlan) -> str:
     return AUX_PHASE if plan["auxiliary_fits"] else "fit"
 
 
-def _validate_plan_structure(plan):
+def _string_map(value: object) -> bool:
+    return type(value) is dict and all(
+        type(key) is str and type(item) is str for key, item in value.items()
+    )
+
+
+def _descriptor(value: object) -> bool:
+    return (
+        type(value) is dict and type(value.get("bytes")) is int and type(value.get("sha256")) is str
+    )
+
+
+def _plan_fields_valid(plan: dict[str, object]) -> bool:
+    producer = plan.get("producer")
+    variants = plan.get("variants")
+    auxiliary = plan.get("auxiliary_fits")
+    assets = plan.get("assets")
+    budgets = plan.get("budgets")
+    scheduling = plan.get("scheduling")
+    if (
+        type(producer) is not dict
+        or not _string_map(producer.get("code_files_sha256"))
+        or type(producer.get("python_version")) is not str
+        or not _string_map(producer.get("package_versions"))
+        or any(
+            type(plan.get(key)) is not str
+            for key in (
+                "kind",
+                "prepared_identity",
+                "protocol_identity",
+                "fit_identity",
+                "campaign_spec_sha256",
+                "code_revision",
+                "score_retention",
+                "created_utc",
+                "deadline_utc",
+            )
+        )
+        or any(
+            not _descriptor(plan.get(key))
+            for key in ("catalog_descriptor", "train_interactions", "train_stats")
+        )
+        or type(plan.get("execution_config_count")) is not int
+        or type(variants) is not list
+        or type(auxiliary) is not list
+        or type(assets) is not dict
+        or type(budgets) is not dict
+        or type(scheduling) is not dict
+    ):
+        return False
+    if any(
+        type(item) is not dict
+        or type(item.get("variant_id")) is not str
+        or "parameters" not in item
+        or type(item.get("backend")) is not str
+        or (
+            "components" in item
+            and (
+                type(item["components"]) is not list
+                or not all(_string_map(component) for component in item["components"])
+            )
+        )
+        for item in variants
+    ):
+        return False
+    return (
+        all(_string_map(item) for item in auxiliary)
+        and all(type(key) is str and _descriptor(item) for key, item in assets.items())
+        and all(type(key) is str and type(item) in (int, float) for key, item in budgets.items())
+        and all(
+            type(scheduling.get(key)) is int
+            for key in ("cpu_workers", "gpu_workers", "blas_threads")
+        )
+        and type(scheduling.get("gpu_optional_benchmark")) is str
+    )
+
+
+def _validate_plan_structure(plan: object) -> str:
     if (
         type(plan) is not dict
-        or plan.get("schema_version") != 2
+        or type(plan.get("schema_version")) is not int
+        or plan["schema_version"] != 2
         or type(plan.get("producer")) is not dict
         or plan["producer"].get("source_layout") != SOURCE_LAYOUT
     ):
@@ -65,6 +190,9 @@ def _validate_plan_structure(plan):
         or plan.get("score_retention") != "keep"
     ):
         _fail("research_campaign_plan_mismatch")
+    if not _plan_fields_valid(cast("dict[str, object]", plan)):
+        _fail("research_campaign_plan_mismatch")
+    plan = cast("CampaignPlan", plan)
     configured = "gpu" if any(item.get("backend") == "gpu" for item in plan["variants"]) else "cpu"
     expected_aux = (
         [
@@ -123,9 +251,9 @@ def _validate_plan_structure(plan):
     return configured
 
 
-def _source_receipt(backend):
+def _source_receipt(backend: str) -> SourceReceipt:
     names = source_fingerprints()
-    dependencies = ("numpy", "scipy", "scikit-learn", "threadpoolctl")
+    dependencies: tuple[str, ...] = ("numpy", "scipy", "scikit-learn", "threadpoolctl")
     if backend == "gpu":
         from recsys.research.models.spec import GPU_DEPENDENCIES
 
@@ -139,8 +267,14 @@ def _source_receipt(backend):
 
 
 def _plan(
-    prepared_dir, expected_prepared_identity, code_revision, glove, backend, cpu_workers, created
-):
+    prepared_dir: str | Path,
+    expected_prepared_identity: str,
+    code_revision: str,
+    glove: str | Path,
+    backend: str,
+    cpu_workers: int,
+    created: datetime,
+) -> CampaignPlan:
     from recsys.release.lock import release_info
     from recsys.research.artifacts import file_descriptor
     from recsys.research.models.inputs import read_scoring_inputs
@@ -178,6 +312,18 @@ def _plan(
         else []
     )
     component_phase = AUX_PHASE if auxiliary else "fit"
+    variants: list[CampaignVariant] = []
+    for name in VARIANTS:
+        item: CampaignVariant = {
+            "variant_id": name,
+            "parameters": spec["variants"][name],
+            "backend": _backend(name, backend),
+        }
+        if name == "hybrid":
+            item["components"] = [
+                {"variant_id": variant, "phase": component_phase} for variant in AUX_VARIANTS
+            ]
+        variants.append(item)
     return {
         "schema_version": 2,
         "kind": "arb-ml02-campaign-plan",
@@ -190,24 +336,7 @@ def _plan(
         "campaign_spec_sha256": campaign_sha,
         "code_revision": code_revision,
         "producer": _source_receipt(backend),
-        "variants": [
-            {
-                "variant_id": name,
-                "parameters": spec["variants"][name],
-                "backend": _backend(name, backend),
-                **(
-                    {
-                        "components": [
-                            {"variant_id": variant, "phase": component_phase}
-                            for variant in AUX_VARIANTS
-                        ]
-                    }
-                    if name == "hybrid"
-                    else {}
-                ),
-            }
-            for name in VARIANTS
-        ],
+        "variants": variants,
         "auxiliary_fits": auxiliary,
         "execution_config_count": 9 if backend == "gpu" else 7,
         "assets": {"glove": glove_desc},

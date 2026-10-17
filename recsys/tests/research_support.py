@@ -3,23 +3,58 @@
 import hashlib
 from pathlib import Path
 from types import SimpleNamespace
+from typing import NotRequired, TypedDict, cast
 from unittest.mock import patch
 
-from recsys.contracts.bundle import canonical_bytes
-from recsys.research.artifacts import StreamWriter, identity, read_json, stream_jsonl, write_json
-from recsys.research.prepare import prepare_research
+from recsys.contracts.bundle import Catalog, canonical_bytes
+from recsys.research.artifacts import (
+    StreamDescriptor,
+    StreamWriter,
+    identity,
+    read_json,
+    stream_jsonl,
+    write_json,
+)
+from recsys.research.evaluation.evaluate import EvaluationQuery, EvaluationTrainStats
+from recsys.research.prepare import PreparationManifest, prepare_research
 from recsys.research.protocol import sha
 
 
+class FixtureIdentity(TypedDict):
+    identity: str
+
+
+class FixtureCatalogRelease(FixtureIdentity):
+    catalog_sha256: str
+    catalog_count: int
+
+
+class FixtureEmbeddings(TypedDict):
+    text_size: int
+    text_sha256: str
+
+
+class FixtureInputs(TypedDict):
+    base: FixtureIdentity
+    aliases: FixtureIdentity
+    catalog_release: FixtureCatalogRelease
+    embeddings: NotRequired[FixtureEmbeddings]
+
+
+class FixtureLock(TypedDict):
+    release_id: str
+    inputs: FixtureInputs
+
+
 class ResearchFixture:
-    def __init__(self, root, *, short_user=None):
+    def __init__(self, root: str | Path, *, short_user: str | None = None) -> None:
         self.root = Path(root)
         self.dataset = self.root / "dataset"
         self.release = self.root / "release"
         self.dataset.mkdir()
         self.release.mkdir()
         self.items = list(range(1, 22))
-        self.catalog = {
+        self.catalog: Catalog = {
             "schema_version": 1,
             "anime": {
                 str(item): {
@@ -78,7 +113,7 @@ class ResearchFixture:
         }
         release_raw = canonical_bytes(release_manifest)
         (self.release / "release-manifest.json").write_bytes(release_raw)
-        self.lock = {
+        self.lock: FixtureLock = {
             "release_id": "neelagiri-2025-nafiul-2026-v1",
             "inputs": {
                 "base": {"identity": "sha256:" + sha(base)},
@@ -91,7 +126,7 @@ class ResearchFixture:
             },
         }
 
-    def prepare(self, name="prepared"):
+    def prepare(self, name: str = "prepared") -> Path:
         output = self.root / name
         with (
             patch(
@@ -106,21 +141,31 @@ class ResearchFixture:
         return output
 
     def predictions(
-        self, prepared, name, *, split="validation", queries_path=None, model_id="fixture"
-    ):
+        self,
+        prepared: Path,
+        name: str,
+        *,
+        split: str = "validation",
+        queries_path: Path | None = None,
+        model_id: str = "fixture",
+    ) -> Path:
         output = self.root / name
         output.mkdir()
-        prep, _ = read_json(prepared / "prepare-manifest.json")
-        fit, _ = read_json(prepared / "fit/manifest.json")
-        stats, _ = read_json(prepared / "fit/train-stats.json")
+        prep_value, _ = read_json(prepared / "prepare-manifest.json")
+        prep = cast("PreparationManifest", prep_value)
+        read_json(prepared / "fit/manifest.json")
+        stats_value, _ = read_json(prepared / "fit/train-stats.json")
+        stats = cast("EvaluationTrainStats", stats_value)
         if queries_path is None:
             queries_path = prepared / "development/queries.jsonl.gz"
-            query_desc = prep["files"]["development/queries.jsonl.gz"]
+            query_desc = cast("StreamDescriptor", prep["files"]["development/queries.jsonl.gz"])
         else:
-            manifest, _ = read_json(queries_path.parent / "test-query-manifest.json")
-            query_desc = manifest["queries"]
+            manifest_value, _ = read_json(queries_path.parent / "test-query-manifest.json")
+            manifest = cast("dict[str, object]", manifest_value)
+            query_desc = cast("StreamDescriptor", manifest["queries"])
         score_writer = StreamWriter(output / "scores.jsonl.gz")
-        for query in stream_jsonl(queries_path, query_desc):
+        for query_value in stream_jsonl(queries_path, query_desc):
+            query = cast("EvaluationQuery", query_value)
             scores = [
                 [
                     item,

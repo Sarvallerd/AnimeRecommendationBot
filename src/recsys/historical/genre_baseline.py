@@ -5,6 +5,7 @@ import json
 import os
 import tempfile
 from pathlib import Path
+from typing import TypedDict, cast
 
 from recsys.contracts.resources import resource_bytes
 from recsys.data.sources import SourceError, load_registry
@@ -12,6 +13,32 @@ from recsys.data.sources import SourceError, load_registry
 
 class QualityError(ValueError):
     """The pinned quality inputs or query specification are invalid."""
+
+
+class GenreAnime(TypedDict):
+    title: str
+    genres: list[str]
+
+
+class GenreQuery(TypedDict):
+    mal_id: int
+    title: str
+    popularity_rank: int
+    members: int
+    popularity_band: str
+    rationale: str
+
+
+class GenreNeighbor(TypedDict):
+    mal_id: int
+    score: float
+
+
+class GenreSpec(TypedDict):
+    query_set_version: str
+    queries: list[GenreQuery]
+    catalog_sha256: str
+    catalog_count: int
 
 
 PROTOCOL_VERSION = "arb008-v1"
@@ -37,18 +64,19 @@ def _sha(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def _load_json(raw: bytes, name: str) -> dict:
+def _load_json(raw: bytes, name: str) -> dict[str, object]:
     try:
         value = json.loads(raw)
     except (UnicodeError, ValueError) as exc:
         raise QualityError(f"invalid {name} JSON: {exc}") from exc
     if not isinstance(value, dict):
         raise QualityError(f"{name} must be a JSON object")
-    return value
+    return cast("dict[str, object]", value)
 
 
-def _validate_spec_metadata(spec: dict) -> None:
+def _validate_spec_metadata(spec: dict[str, object]) -> None:
     """Keep the stated source pins tied to the installed source registry."""
+    query_set_version = spec.get("query_set_version")
     if (
         type(spec.get("schema_version")) is not int
         or spec["schema_version"] != 1
@@ -56,8 +84,8 @@ def _validate_spec_metadata(spec: dict) -> None:
         or spec.get("normalizer_version") != "1"
         or type(spec.get("catalog_schema_version")) is not int
         or spec["catalog_schema_version"] != 1
-        or not isinstance(spec.get("query_set_version"), str)
-        or not spec["query_set_version"].strip()
+        or not isinstance(query_set_version, str)
+        or not query_set_version.strip()
     ):
         raise QualityError("invalid quality query specification version")
     selection = spec.get("selection")
@@ -78,18 +106,20 @@ def _validate_spec_metadata(spec: dict) -> None:
     except SourceError as exc:
         raise QualityError(f"invalid packaged source registry: {exc}") from exc
     provenance = spec.get("source_provenance")
+    mal_provenance = registry["provenance"].get("mal")
     sources = {source["id"]: source for source in registry["sources"]}
     if (
         spec.get("registry_sha256") != registry_sha
         or not isinstance(provenance, dict)
-        or provenance.get("mal_repository_commit") != registry["provenance"]["mal"]["commit"]
+        or not isinstance(mal_provenance, dict)
+        or provenance.get("mal_repository_commit") != mal_provenance.get("commit")
         or provenance.get("anime_csv_sha256") != sources["mal_anime"]["sha256"]
         or provenance.get("synopsis_csv_sha256") != sources["mal_synopsis"]["sha256"]
     ):
         raise QualityError("quality query source provenance does not match packaged registry")
 
 
-def _validate_catalog(catalog: dict, expected_count: int) -> dict[str, dict]:
+def _validate_catalog(catalog: dict[str, object], expected_count: int) -> dict[str, GenreAnime]:
     anime = catalog.get("anime")
     if (
         type(catalog.get("schema_version")) is not int
@@ -117,10 +147,10 @@ def _validate_catalog(catalog: dict, expected_count: int) -> dict[str, dict]:
             or len(set(genres)) != len(genres)
         ):
             raise QualityError(f"invalid title or genres for MAL_ID {key}")
-    return anime
+    return cast("dict[str, GenreAnime]", anime)
 
 
-def _validate_query_set(spec: dict, anime: dict[str, dict]) -> list[dict]:
+def _validate_query_set(spec: dict[str, object], anime: dict[str, GenreAnime]) -> list[GenreQuery]:
     queries = spec.get("queries")
     if not isinstance(queries, list) or len(queries) != 20:
         raise QualityError("quality query set must contain exactly 20 queries")
@@ -157,10 +187,10 @@ def _validate_query_set(spec: dict, anime: dict[str, dict]) -> list[dict]:
         counts[band] += 1
     if any(count != 5 for count in counts.values()):
         raise QualityError("quality query set needs five queries per popularity band")
-    return queries
+    return cast("list[GenreQuery]", queries)
 
 
-def genre_neighbors(anime: dict[str, dict], query_id: int, k: int = 5) -> list[dict]:
+def genre_neighbors(anime: dict[str, GenreAnime], query_id: int, k: int = 5) -> list[GenreNeighbor]:
     """Rank positive Jaccard neighbors by score, then numeric MAL_ID."""
     if type(query_id) is not int or str(query_id) not in anime:
         raise QualityError(f"unknown query MAL_ID {query_id!r}")
@@ -198,15 +228,15 @@ def _write_atomic(path: Path, content: bytes) -> None:
             temp.unlink(missing_ok=True)
 
 
-def run_baseline(catalog_path: Path, output_dir: Path, *, query_set: dict | None = None) -> Path:
+def run_baseline(catalog_path: Path, output_dir: Path, *, query_set: object = None) -> Path:
     """Validate pinned inputs and write the baseline and blank assessment template."""
     if query_set is None:
         spec_raw = resource_bytes("queries", "quality_queries_v1.json")
         spec = _load_json(spec_raw, "packaged query specification")
     else:
-        spec = query_set
-        if not isinstance(spec, dict):
+        if not isinstance(query_set, dict):
             raise QualityError("query specification must be a JSON object")
+        spec = cast("dict[str, object]", query_set)
         spec_raw = _canonical(spec)
     _validate_spec_metadata(spec)
     raw = Path(catalog_path).read_bytes()

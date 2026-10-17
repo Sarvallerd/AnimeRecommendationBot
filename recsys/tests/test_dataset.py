@@ -7,6 +7,7 @@ import io
 import json
 import tempfile
 import unittest
+from collections.abc import Iterable, Sequence
 from importlib import resources
 from pathlib import Path
 
@@ -19,17 +20,17 @@ from recsys.data.dataset import (
     validate_dataset,
 )
 from recsys.data.interactions import CSV_COLUMNS, HEADER
-from recsys.data.metadata import DETAIL_COLUMNS
+from recsys.data.metadata import DETAIL_COLUMNS, MetadataFact
 
 
-def _write_csv(path, fields, records):
+def _write_csv(path: Path, fields: Sequence[str], records: Iterable[Sequence[str]]) -> None:
     with path.open("w", encoding="utf-8", newline="") as stream:
         writer = csv.writer(stream)
         writer.writerow(fields)
         writer.writerows(records)
 
 
-def _detail(mal, title, date, status, year):
+def _detail(mal: int | str, title: str, date: str, status: str, year: int) -> list[str]:
     row = {field: "" for field in DETAIL_COLUMNS}
     row.update(
         mal_id=str(mal),
@@ -47,7 +48,7 @@ def _detail(mal, title, date, status, year):
     return [row[field] for field in DETAIL_COLUMNS]
 
 
-def _gzip(raw):
+def _gzip(raw: bytes) -> bytes:
     target = io.BytesIO()
     with gzip.GzipFile(filename="", mode="wb", fileobj=target, compresslevel=6, mtime=0) as stream:
         stream.write(raw)
@@ -55,7 +56,7 @@ def _gzip(raw):
 
 
 class Fixture:
-    def __init__(self, root):
+    def __init__(self, root: str | Path) -> None:
         self.root = Path(root)
         self.cache = self.root / "cache"
         self.cache.mkdir()
@@ -160,7 +161,7 @@ class Fixture:
             canonical_bytes(expectations),
         )
 
-    def run(self, name="output", *, threads=2):
+    def run(self, name: str = "output", *, threads: int = 2) -> Path:
         output = self.root / name
         normalize_dataset(
             "neelagiri-2025-v1",
@@ -174,12 +175,12 @@ class Fixture:
 
 
 class DatasetTests(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.fixture = Fixture(self.tmp.name)
 
-    def test_full_fixture_determinism_and_stream_validation(self):
+    def test_full_fixture_determinism_and_stream_validation(self) -> None:
         first = self.fixture.run("first", threads=1)
         second = self.fixture.run("second", threads=2)
         self.assertEqual(
@@ -202,7 +203,7 @@ class DatasetTests(unittest.TestCase):
         with self.assertRaisesRegex(DatasetError, "dataset_integrity_error"):
             self.fixture.run("first")
 
-    def test_permuted_source_rows_preserve_interactions_but_change_identity(self):
+    def test_permuted_source_rows_preserve_interactions_but_change_identity(self) -> None:
         first = self.fixture.run("first")
         alternative_root = self.fixture.root / "alternative"
         alternative_root.mkdir()
@@ -239,7 +240,7 @@ class DatasetTests(unittest.TestCase):
             validate_dataset(second, _spec=alternative.spec).identity,
         )
 
-    def test_pinned_expectations_match_source_audit(self):
+    def test_pinned_expectations_match_source_audit(self) -> None:
         repository = Path(__file__).parents[2]
         report = json.loads(
             (
@@ -279,14 +280,14 @@ class DatasetTests(unittest.TestCase):
             audit["distributions"]["rated_items_per_user_bins"],
         )
 
-    def test_corrupt_cache_preserves_target_absence(self):
+    def test_corrupt_cache_preserves_target_absence(self) -> None:
         with (self.fixture.cache / "ratings.csv").open("ab") as stream:
             stream.write(b"canary-private-username")
         with self.assertRaisesRegex(DatasetError, "input_hash_mismatch"):
             self.fixture.run()
         self.assertFalse((self.fixture.root / "output").exists())
 
-    def test_foreign_source_manifest_preserved(self):
+    def test_foreign_source_manifest_preserved(self) -> None:
         source_manifest = self.fixture.cache / "source-manifest.json"
         changed = json.loads(source_manifest.read_bytes())
         changed["registry_sha256"] = "0" * 64
@@ -297,7 +298,7 @@ class DatasetTests(unittest.TestCase):
         self.assertEqual(source_manifest.read_bytes(), raw)
         self.assertFalse((self.fixture.root / "output").exists())
 
-    def test_fixture_qa_mismatch_cannot_publish(self):
+    def test_fixture_qa_mismatch_cannot_publish(self) -> None:
         expected = json.loads(self.fixture.spec.expectations_bytes)
         expected["counts"]["accepted_users"] += 1
         changed = DatasetSpec(
@@ -317,7 +318,7 @@ class DatasetTests(unittest.TestCase):
         self.assertFalse((self.fixture.root / "output").exists())
         self.assertEqual(list((self.fixture.root / "scratch").iterdir()), [])
 
-    def test_frozen_provenance_and_trusted_identity(self):
+    def test_frozen_provenance_and_trusted_identity(self) -> None:
         output = self.fixture.run()
         manifest_path = output / "dataset-manifest.json"
         manifest = json.loads(manifest_path.read_bytes())
@@ -333,7 +334,7 @@ class DatasetTests(unittest.TestCase):
         with self.assertRaisesRegex(DatasetError, "dataset_integrity_error"):
             validate_dataset(output, _spec=self.fixture.spec)
 
-    def test_qa_tampering_and_truncated_gzip(self):
+    def test_qa_tampering_and_truncated_gzip(self) -> None:
         output = self.fixture.run()
         manifest_path = output / "dataset-manifest.json"
         qa_path = output / "dataset-qa.json"
@@ -356,7 +357,40 @@ class DatasetTests(unittest.TestCase):
         with self.assertRaisesRegex(DatasetError, "dataset_integrity_error"):
             validate_dataset(output, _spec=self.fixture.spec)
 
-    def test_invalid_fixture_expectations_cannot_bypass_pins(self):
+    def test_manifest_files_must_be_mapping(self) -> None:
+        output = self.fixture.run()
+        manifest_path = output / "dataset-manifest.json"
+        manifest = json.loads(manifest_path.read_bytes())
+        manifest["files"] = list(manifest["files"])
+        manifest_path.write_bytes(canonical_bytes(manifest))
+        with self.assertRaisesRegex(DatasetError, "dataset_integrity_error"):
+            validate_dataset(output, _spec=self.fixture.spec)
+
+    def test_unconsumed_qa_values_must_have_declared_types(self) -> None:
+        output = self.fixture.run()
+        manifest_path = output / "dataset-manifest.json"
+        qa_path = output / "dataset-qa.json"
+        original = json.loads(qa_path.read_bytes())
+        for section, key, value in (
+            ("counts", "future_count", True),
+            ("distributions", "future_distribution", {"one": "1"}),
+            ("metadata_diagnostics", "future_diagnostic", "1"),
+        ):
+            with self.subTest(section=section):
+                qa = json.loads(canonical_bytes(original))
+                qa[section][key] = value
+                raw = canonical_bytes(qa)
+                qa_path.write_bytes(raw)
+                manifest = json.loads(manifest_path.read_bytes())
+                manifest["files"]["dataset-qa.json"] = {
+                    "bytes": len(raw),
+                    "sha256": hashlib.sha256(raw).hexdigest(),
+                }
+                manifest_path.write_bytes(canonical_bytes(manifest))
+                with self.assertRaisesRegex(DatasetError, "dataset_integrity_error"):
+                    validate_dataset(output, _spec=self.fixture.spec)
+
+    def test_invalid_fixture_expectations_cannot_bypass_pins(self) -> None:
         resource = json.loads(self.fixture.spec.expectations_bytes)
         del resource["counts"]["accepted_pairs"]
         bad = DatasetSpec(
@@ -383,7 +417,7 @@ class DatasetTests(unittest.TestCase):
                 _spec=self.fixture.spec,
             )
 
-    def test_sorted_unique_pairs_and_single_gzip_member(self):
+    def test_sorted_unique_pairs_and_single_gzip_member(self) -> None:
         output = self.fixture.run()
         compressed = output / "interactions.tsv.gz"
         plain = gzip.decompress(compressed.read_bytes())
@@ -401,7 +435,7 @@ class DatasetTests(unittest.TestCase):
         with self.assertRaisesRegex(DatasetError, "dataset_integrity_error"):
             validate_dataset(output, _spec=self.fixture.spec)
 
-    def test_streaming_validator_handles_high_compression_ratio(self):
+    def test_streaming_validator_handles_high_compression_ratio(self) -> None:
         key = b"u1_" + b"0" * 64
         raw = HEADER + b"".join(
             key + b"\t" + str(mal).encode("ascii") + b"\t8\tcompleted\n"
@@ -417,15 +451,20 @@ class DatasetTests(unittest.TestCase):
             "uncompressed_bytes": len(raw),
             "canonical_sha256": hashlib.sha256(raw).hexdigest(),
         }
+        fact: MetadataFact = {
+            "first_release_date": None,
+            "airing_status": "unknown",
+            "seasonal_year": None,
+        }
         derived, rated_ids = _validate_interactions(
-            path, dict.fromkeys(map(str, range(1, 250_001))), entry
+            path, dict.fromkeys(map(str, range(1, 250_001)), fact), entry
         )
         self.assertEqual(derived["counts"]["accepted_pairs"], 250_000)
         self.assertEqual(derived["counts"]["accepted_users"], 1)
         self.assertEqual(len(rated_ids), 250_000)
 
     @staticmethod
-    def _refresh_interactions_manifest(output, plain):
+    def _refresh_interactions_manifest(output: Path, plain: bytes) -> None:
         manifest_path = output / "dataset-manifest.json"
         manifest = json.loads(manifest_path.read_bytes())
         raw = (output / "interactions.tsv.gz").read_bytes()

@@ -1,21 +1,30 @@
+import copy
 import tempfile
 import unittest
 from pathlib import Path
+from typing import cast
 
 from research_support import ResearchFixture
 
-from recsys.research.artifacts import identity, read_json, stream_jsonl, stream_tsv
-from recsys.research.prepare import validate_preparation
+from recsys.contracts.bundle import Catalog, canonical_bytes, check_catalog
+from recsys.research.artifacts import (
+    StreamDescriptor,
+    identity,
+    read_json,
+    stream_jsonl,
+    stream_tsv,
+)
+from recsys.research.prepare import PreparationLabel, validate_preparation
 from recsys.research.protocol import ResearchError, split_user
 
 
 class PrepareTests(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.fixture = ResearchFixture(self.tmp.name)
 
-    def test_determinism_projection_and_heldout_fit_separation(self):
+    def test_determinism_projection_and_heldout_fit_separation(self) -> None:
         first = self.fixture.prepare("a")
         second = self.fixture.prepare("b")
         for path in first.rglob("*"):
@@ -25,29 +34,36 @@ class PrepareTests(unittest.TestCase):
             first, expected_identity=identity(first / "prepare-manifest.json")
         )
         files = manifest["files"]
-        catalog, _ = read_json(first / "model-catalog.json")
+        catalog_value, _ = read_json(first / "model-catalog.json")
+        check_catalog(catalog_value)
+        catalog = cast("Catalog", catalog_value)
         self.assertEqual(set(catalog["anime"]), set(map(str, self.fixture.items)))
         self.assertTrue(all(item["score"] is None for item in catalog["anime"].values()))
         train = list(
             stream_tsv(
-                first / "fit/train-interactions.tsv.gz", files["fit/train-interactions.tsv.gz"]
+                first / "fit/train-interactions.tsv.gz",
+                cast("StreamDescriptor", files["fit/train-interactions.tsv.gz"]),
             )
         )
         self.assertTrue(
             all(split_user(row.split(b"\t")[0].decode()) == "train" for row in train[1:])
         )
         self.assertTrue(all(b"\tcompleted\n" in row for row in train[1:]))
-        validation = list(
+        validation_values = list(
             stream_jsonl(
                 first / "evaluator/validation-labels.jsonl.gz",
-                files["evaluator/validation-labels.jsonl.gz"],
+                cast("StreamDescriptor", files["evaluator/validation-labels.jsonl.gz"]),
             )
         )
-        test = list(
+        test_values = list(
             stream_jsonl(
-                first / "evaluator/test-labels.jsonl.gz", files["evaluator/test-labels.jsonl.gz"]
+                first / "evaluator/test-labels.jsonl.gz",
+                cast("StreamDescriptor", files["evaluator/test-labels.jsonl.gz"]),
             )
         )
+        assert all(isinstance(row, dict) for row in validation_values + test_values)
+        validation = cast("list[PreparationLabel]", validation_values)
+        test = cast("list[PreparationLabel]", test_values)
         self.assertTrue(
             {row["user_key"] for row in validation}.isdisjoint({row["user_key"] for row in test})
         )
@@ -66,14 +82,15 @@ class PrepareTests(unittest.TestCase):
         )
         queries = list(
             stream_jsonl(
-                first / "development/queries.jsonl.gz", files["development/queries.jsonl.gz"]
+                first / "development/queries.jsonl.gz",
+                cast("StreamDescriptor", files["development/queries.jsonl.gz"]),
             )
         )
         self.assertEqual(len(queries), len(validation))
         self.assertEqual(len(queries), 8 * 41)
         self.assertEqual(manifest["counts"]["sampled_users"], 15)
 
-    def test_short_cohort_query_bounds(self):
+    def test_short_cohort_query_bounds(self) -> None:
         short_user = next(user for user in self.fixture.users if split_user(user) == "validation")
         # Build a second fixture in a different directory with one 3-positive user.
         another = Path(self.tmp.name) / "short"
@@ -83,18 +100,23 @@ class PrepareTests(unittest.TestCase):
         manifest = validate_preparation(
             prepared, expected_identity=identity(prepared / "prepare-manifest.json")
         )
-        labels = list(
+        label_values = list(
             stream_jsonl(
                 prepared / "evaluator/validation-labels.jsonl.gz",
-                manifest["files"]["evaluator/validation-labels.jsonl.gz"],
+                cast(
+                    "StreamDescriptor",
+                    manifest["files"]["evaluator/validation-labels.jsonl.gz"],
+                ),
             )
         )
+        assert all(isinstance(row, dict) for row in label_values)
+        labels = cast("list[PreparationLabel]", label_values)
         short = [row for row in labels if row["user_key"] == short_user]
         self.assertEqual(len(short), 9)  # N=0 and four orders at N=1,2.
         self.assertEqual(len(short[0]["target_ids"]), 1)
         self.assertEqual(max(row["n"] for row in short), 2)
 
-    def test_heldout_rating_change_does_not_change_train_statistics(self):
+    def test_heldout_rating_change_does_not_change_train_statistics(self) -> None:
         first = self.fixture.prepare("first")
         train_before = (first / "fit/train-stats.json").read_bytes()
         heldout = next(user for user in self.fixture.users if split_user(user) == "validation")
@@ -119,7 +141,7 @@ class PrepareTests(unittest.TestCase):
         second = self.fixture.prepare("second")
         self.assertEqual(train_before, (second / "fit/train-stats.json").read_bytes())
 
-    def test_tamper_and_unsafe_output_fail_closed(self):
+    def test_tamper_and_unsafe_output_fail_closed(self) -> None:
         prepared = self.fixture.prepare()
         expected = identity(prepared / "prepare-manifest.json")
         (prepared / "fit/train-stats.json").write_bytes(b"{}\n")
@@ -131,3 +153,20 @@ class PrepareTests(unittest.TestCase):
         link.symlink_to(self.fixture.release, target_is_directory=True)
         with self.assertRaises(ResearchError):
             self.fixture.prepare("unsafe")
+
+    def test_rehashed_manifest_rejects_invalid_field_containers(self) -> None:
+        prepared = self.fixture.prepare()
+        path = prepared / "prepare-manifest.json"
+        value, _ = read_json(path)
+        assert isinstance(value, dict)
+        for name, field, replacement in (
+            ("files", "files", 3),
+            ("counts", "counts", []),
+            ("protocol_identity", "protocol_identity", 3),
+        ):
+            with self.subTest(name=name):
+                changed = copy.deepcopy(value)
+                changed[field] = replacement
+                path.write_bytes(canonical_bytes(changed))
+                with self.assertRaises(ResearchError):
+                    validate_preparation(prepared, expected_identity=identity(path))

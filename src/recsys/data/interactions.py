@@ -1,13 +1,37 @@
 """Disk-backed normalization of pinned Neelagiri rating histories."""
 
+from __future__ import annotations
+
 import gzip
 import hashlib
 import os
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING, TypedDict, cast
 
 from recsys.data.metadata import MetadataResult
+
+if TYPE_CHECKING:
+    import duckdb
+
+
+class InteractionLimits(TypedDict):
+    memory_limit_mib: int
+    threads: int
+    spill_limit_mib: int
+
+
+class LossReasons(TypedDict):
+    primary: dict[str, int]
+    overlap_flags: dict[str, int]
+
+
+class InteractionQa(TypedDict):
+    counts: dict[str, int]
+    distributions: dict[str, dict[str, int]]
+    loss_reasons: LossReasons
+
 
 SCHEMA = "arb-interactions-v1"
 HEADER = b"dataset_user_key\tmal_id\trating\twatch_status\n"
@@ -38,7 +62,7 @@ EXPLICIT_SCORE = r"[+]?0*(10|[1-9])([.]0+)?"
 
 @dataclass(frozen=True)
 class InteractionResult:
-    qa: dict
+    qa: InteractionQa
     rows: int
     uncompressed_bytes: int
     canonical_sha256: str
@@ -60,11 +84,12 @@ def _sql_string(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
-def _scalar(db, sql: str) -> int:
-    return int(db.execute(sql).fetchone()[0] or 0)
+def _scalar(db: duckdb.DuckDBPyConnection, sql: str) -> int:
+    row = cast("tuple[int | None]", db.execute(sql).fetchone())  # COUNT/SUM scalar SQL row.
+    return int(row[0] or 0)
 
 
-def _hist(db, sql: str) -> dict[str, int]:
+def _hist(db: duckdb.DuckDBPyConnection, sql: str) -> dict[str, int]:
     return {str(key): int(value) for key, value in db.execute(sql).fetchall()}
 
 
@@ -88,7 +113,7 @@ def build_interactions(
     metadata: MetadataResult,
     output_path: Path,
     work_dir: Path,
-    limits: dict,
+    limits: InteractionLimits,
     namespace: str = NAMESPACE,
 ) -> InteractionResult:
     """Group all score states without loading rating rows into Python memory."""
@@ -329,7 +354,7 @@ def build_interactions(
         compressed_bytes = output_path.stat().st_size
         with output_path.open("rb") as compressed:
             compressed_sha = hashlib.file_digest(compressed, "sha256").hexdigest()
-        qa = {
+        qa: InteractionQa = {
             "counts": {
                 **base,
                 **pair_counts,

@@ -1,18 +1,21 @@
+import copy
 import importlib
 import os
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
+from typing import IO, cast
 from unittest.mock import patch
 
 import numpy as np
 from research_model_support import ModelFixture, patch_release_info
+from research_support import FixtureLock
 
-from recsys.contracts.bundle import canonical_bytes
-from recsys.research.artifacts import identity, read_json
+from recsys.contracts.bundle import JSONValue, canonical_bytes
+from recsys.research.artifacts import FileDescriptor, identity, read_json
 from recsys.research.models.inputs import iter_training_rows
-from recsys.research.models.manifest import _external
+from recsys.research.models.manifest import ModelManifest, _external, _validate_manifest
 from recsys.research.models.package import (
     fit_model,
     load_model,
@@ -20,35 +23,46 @@ from recsys.research.models.package import (
     read_training_inputs,
 )
 from recsys.research.models.spec import campaign
+from recsys.research.models.types import ScoreVector, ScoringInputs, TrainingInputs
 from recsys.research.protocol import ResearchError
 
 
+def _object(path: Path) -> dict[str, object]:
+    value, _ = read_json(path)
+    assert isinstance(value, dict)
+    return cast("dict[str, object]", value)
+
+
 class ModelTests(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.fixture = ModelFixture(tmp.name)
         self.prepared, self.prepared_identity = self.fixture.make_prepared()
 
-    def inputs(self):
+    def inputs(self) -> ScoringInputs:
         with patch_release_info(self.fixture.lock):
             return read_scoring_inputs(
                 self.prepared, expected_prepared_identity=self.prepared_identity
             )
 
-    def test_old_preparation_is_rejected_before_payload_or_publication(self):
+    def test_old_preparation_is_rejected_before_payload_or_publication(self) -> None:
         path = self.prepared / "prepare-manifest.json"
-        manifest, _ = read_json(path)
+        manifest = _object(path)
         manifest["schema_version"] = 1
-        manifest["producer"].pop("source_layout")
+        producer = manifest["producer"]
+        assert isinstance(producer, dict)
+        producer.pop("source_layout")
         path.write_bytes(canonical_bytes(manifest))
         old_identity = identity(path)
         real_read = read_json
 
-        def manifest_only(source, *args, **kwargs):
+        def manifest_only(
+            source: str | Path, expected: FileDescriptor | None = None
+        ) -> tuple[object, bytes]:
             if Path(source).name != "prepare-manifest.json":
                 raise AssertionError("payload opened before source-layout gate")
-            return real_read(source, *args, **kwargs)
+            return real_read(source, expected)
 
         output = self.fixture.root / "old-layout-should-not-publish"
         with (
@@ -65,13 +79,15 @@ class ModelTests(unittest.TestCase):
                 )
         self.assertFalse(output.exists())
 
-    def test_old_model_manifest_rejects_before_payload_read(self):
+    def test_old_model_manifest_rejects_before_payload_read(self) -> None:
         model = self.fixture.fit_popularity(self.prepared, self.prepared_identity)
         inputs = self.inputs()
         path = model / "model-manifest.json"
-        manifest, _ = read_json(path)
+        manifest = _object(path)
         manifest["schema_version"] = 1
-        manifest["producer"].pop("source_layout")
+        producer = manifest["producer"]
+        assert isinstance(producer, dict)
+        producer.pop("source_layout")
         path.write_bytes(canonical_bytes(manifest))
         with patch(
             "recsys.research.models.manifest._check_payloads",
@@ -80,10 +96,27 @@ class ModelTests(unittest.TestCase):
             with self.assertRaisesRegex(ResearchError, "research_source_layout_unsupported"):
                 load_model(model, inputs=inputs)
 
-    def test_popularity_model_deterministic_and_train_stats_only(self):
+    def test_model_manifest_rejects_unproven_nested_record_types(self) -> None:
+        model = self.fixture.fit_popularity(self.prepared, self.prepared_identity)
+        manifest = _object(model / "model-manifest.json")
+        inputs = self.inputs()
+        for field in ("metadata", "files"):
+            with self.subTest(field=field):
+                malformed = {**manifest, field: 3}
+                with self.assertRaises(ResearchError):
+                    _validate_manifest(malformed, inputs=inputs)
+
+    def test_popularity_model_deterministic_and_train_stats_only(self) -> None:
         source_open = Path.open
 
-        def guarded(path, *args, **kwargs):
+        def guarded(
+            path: Path,
+            mode: str = "r",
+            buffering: int = -1,
+            encoding: str | None = None,
+            errors: str | None = None,
+            newline: str | None = None,
+        ) -> IO[str] | IO[bytes]:
             if path.name in {
                 "train-interactions.tsv.gz",
                 "validation-labels.jsonl.gz",
@@ -91,7 +124,7 @@ class ModelTests(unittest.TestCase):
                 "splits.tsv.gz",
             }:
                 raise AssertionError("private stream opened")
-            return source_open(path, *args, **kwargs)
+            return source_open(path, mode, buffering, encoding, errors, newline)
 
         with patch.object(Path, "open", guarded):
             first = self.fixture.fit_popularity(self.prepared, self.prepared_identity, "first")
@@ -142,7 +175,7 @@ class ModelTests(unittest.TestCase):
             },
         )
 
-    def test_train_stream_full_validation_and_lazy_unavailable_backend(self):
+    def test_train_stream_full_validation_and_lazy_unavailable_backend(self) -> None:
         with patch_release_info(self.fixture.lock):
             inputs = read_training_inputs(
                 self.prepared, expected_prepared_identity=self.prepared_identity
@@ -152,7 +185,7 @@ class ModelTests(unittest.TestCase):
         self.assertTrue(all(1 <= rating <= 10 for _, _, rating in rows))
         real_import = importlib.import_module
 
-        def missing_cf(name, package=None):
+        def missing_cf(name: str, package: str | None = None) -> ModuleType:
             if name == ".collaborative" and package == "recsys.research.models":
                 raise ModuleNotFoundError(name="recsys.research.models.collaborative")
             return real_import(name, package)
@@ -174,7 +207,7 @@ class ModelTests(unittest.TestCase):
                 )
         self.assertFalse((self.fixture.root / "missing").exists())
 
-    def test_tampered_model_manifest_or_prepared_identity_fails_closed(self):
+    def test_tampered_model_manifest_or_prepared_identity_fails_closed(self) -> None:
         model = self.fixture.fit_popularity(self.prepared, self.prepared_identity)
         path = model / "model-manifest.json"
         original = path.read_bytes()
@@ -184,14 +217,18 @@ class ModelTests(unittest.TestCase):
             ("catalog_descriptor", {"bytes": 0, "sha256": "0" * 64}),
         ):
             with self.subTest(field=field):
-                manifest, _ = read_json(path)
+                manifest = _object(path)
                 manifest[field] = value
                 path.write_bytes(canonical_bytes(manifest))
                 with self.assertRaises(ResearchError):
                     load_model(model, inputs=self.inputs())
                 path.write_bytes(original)
-        manifest, _ = read_json(path)
-        manifest["producer"]["code_files_sha256"]["research/models/package.py"] = "0" * 64
+        manifest = _object(path)
+        producer = manifest["producer"]
+        assert isinstance(producer, dict)
+        hashes = producer["code_files_sha256"]
+        assert isinstance(hashes, dict)
+        hashes["research/models/package.py"] = "0" * 64
         path.write_bytes(canonical_bytes(manifest))
         with self.assertRaises(ResearchError):
             load_model(model, inputs=self.inputs())
@@ -203,7 +240,7 @@ class ModelTests(unittest.TestCase):
         with self.assertRaises(ResearchError):
             load_model(model, inputs=self.inputs())
 
-    def test_no_overlap_no_replace_and_private_mode(self):
+    def test_no_overlap_no_replace_and_private_mode(self) -> None:
         model = self.fixture.fit_popularity(self.prepared, self.prepared_identity)
         self.assertEqual(model.stat().st_mode & 0o777, 0o700)
         self.assertEqual((model / "model-manifest.json").stat().st_mode & 0o777, 0o600)
@@ -219,17 +256,36 @@ class ModelTests(unittest.TestCase):
                     code_revision="a" * 40,
                 )
 
-    def test_common_publisher_protects_backend_numpy_payload(self):
-        def fit_stub(inputs, parameters, assets, stage):
+    def test_common_publisher_protects_backend_numpy_payload(self) -> None:
+        def fit_stub(
+            inputs: TrainingInputs,
+            parameters: dict[str, JSONValue],
+            assets: dict[str, Path],
+            stage: Path,
+        ) -> dict[str, object]:
             path = stage / "vector.npy"
             np.save(path, np.array([1.0], dtype=np.float64))
             os.chmod(path, 0o644)
             return {"fixture": True}
 
+        class StubScorer:
+            def score(self, seed_mal_ids: tuple[int, ...]) -> ScoreVector:
+                raise AssertionError("scoring not expected")
+
+        def load_stub(
+            model_dir: Path,
+            manifest: ModelManifest,
+            inputs: ScoringInputs,
+            *,
+            backend: str = "cpu",
+            payload_prefix: str = "",
+        ) -> StubScorer:
+            return StubScorer()
+
         backend = SimpleNamespace(
             CODE_FILES=("research_model_popularity.py",),
             fit=fit_stub,
-            load=lambda model_dir, manifest, inputs: SimpleNamespace(score=lambda seeds: None),
+            load=load_stub,
         )
         for variant in ("itemknn", "puresvd"):
             with self.subTest(variant=variant):
@@ -254,7 +310,7 @@ class ModelTests(unittest.TestCase):
                 self.assertEqual(output.stat().st_mode & 0o777, 0o700)
                 path = output / "model-manifest.json"
                 original = path.read_bytes()
-                changed, _ = read_json(path)
+                changed = _object(path)
                 changed["external_inputs"] = {"glove": {"bytes": 0, "sha256": "0" * 64}}
                 path.write_bytes(canonical_bytes(changed))
                 with (
@@ -279,20 +335,15 @@ class ModelTests(unittest.TestCase):
                     with self.assertRaises(ResearchError):
                         load_model(output, inputs=self.inputs())
 
-    def test_content_asset_accepts_concrete_path_and_checks_lock(self):
+    def test_content_asset_accepts_concrete_path_and_checks_lock(self) -> None:
         glove = self.fixture.root / "glove.txt"
         glove.write_bytes(b"tiny test embedding")
         from recsys.research.protocol import sha
 
-        lock = {
-            **self.fixture.lock,
-            "inputs": {
-                **self.fixture.lock["inputs"],
-                "embeddings": {
-                    "text_size": glove.stat().st_size,
-                    "text_sha256": sha(glove.read_bytes()),
-                },
-            },
+        lock: FixtureLock = copy.deepcopy(self.fixture.lock)
+        lock["inputs"]["embeddings"] = {
+            "text_size": glove.stat().st_size,
+            "text_sha256": sha(glove.read_bytes()),
         }
         with patch_release_info(lock):
             self.assertEqual(

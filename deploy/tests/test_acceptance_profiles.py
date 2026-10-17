@@ -7,22 +7,33 @@ import pathlib
 import shutil
 import tempfile
 import unittest
+from typing import cast
+
+from deploy.tests.acceptance_types import AcceptanceProfile, ProfileModule
 
 SCRIPT = pathlib.Path(__file__).with_name("acceptance-profiles.py")
 SPEC = importlib.util.spec_from_file_location("arb033_profile_tests", SCRIPT)
-p = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(p)
+if SPEC is None or SPEC.loader is None:
+    raise ImportError(f"cannot load acceptance profiles from {SCRIPT}")
+loaded = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(loaded)
+for export in ("ProfileError", "BundleSummary", "load_profile", "check_profile_bundle", "digest"):
+    if not callable(getattr(loaded, export, None)):
+        raise ImportError(f"acceptance profiles missing {export}")
+p = cast("ProfileModule", loaded)
 FIXTURE = pathlib.Path(__file__).resolve().parents[2] / "tests/fixtures/bundle"
 
 
-def encoded(value):
+def encoded(value: object) -> bytes:
     return (
         json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
     ).encode()
 
 
-def fixture_profile():
+def fixture_profile() -> AcceptanceProfile:
     lock = copy.deepcopy(p.load_profile(p.NEW_RELEASE).lock)
+    if lock is None:
+        raise AssertionError("current acceptance profile requires a lock")
     lock["semantic_expectations"] = {
         "catalog_count": 8,
         "neighbor_count_histogram": {"0": 1, "1": 0, "2": 1, "3": 0, "4": 0, "5": 6},
@@ -31,11 +42,12 @@ def fixture_profile():
         "vector_status_counts": {"ready": 7, "oov_only": 1, "no_tokens": 0, "zero_vector": 0},
         "zero_vector_ids": [99],
     }
-    lock["reference"]["bundle_identity"] = "sha256:" + p.digest(
-        (FIXTURE / "manifest.json").read_bytes()
-    )
-    lock["reference"]["catalog_sha256"] = p.digest((FIXTURE / "catalog.json").read_bytes())
-    lock["reference"]["neighbors_sha256"] = p.digest((FIXTURE / "neighbors.json").read_bytes())
+    reference = lock["reference"]
+    if type(reference) is not dict:
+        raise AssertionError("current acceptance lock requires reference fields")
+    reference["bundle_identity"] = "sha256:" + p.digest((FIXTURE / "manifest.json").read_bytes())
+    reference["catalog_sha256"] = p.digest((FIXTURE / "catalog.json").read_bytes())
+    reference["neighbors_sha256"] = p.digest((FIXTURE / "neighbors.json").read_bytes())
     lock_raw = encoded(lock)
     profile = json.loads((p.PROFILE_DIR / p.PROFILE_FILES[p.NEW_RELEASE]).read_bytes())
     profile["expectations"]["release_lock_sha256"] = p.digest(lock_raw)
@@ -43,12 +55,14 @@ def fixture_profile():
 
 
 class ProfileTests(unittest.TestCase):
-    def test_committed_pins_and_fixture_semantics(self):
+    def test_committed_pins_and_fixture_semantics(self) -> None:
         actual = p.load_profile(p.NEW_RELEASE)
         self.assertEqual(actual.lock_sha256, p.TRUSTED_LOCK_SHA)
         self.assertEqual(actual.expectations["catalog_count"], 28955)
         self.assertEqual(p.load_profile(p.LEGACY_RELEASE).expectations["catalog_count"], 17562)
         profile = fixture_profile()
+        if profile.reference is None:
+            raise AssertionError("current acceptance profile requires a reference")
         with tempfile.TemporaryDirectory() as scratch:
             bundle = pathlib.Path(scratch) / "bundle"
             bundle.mkdir()
@@ -61,7 +75,7 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(summary.histogram, profile.expectations["neighbor_count_histogram"])
         self.assertEqual([r["mal_id"] for r in summary.neighbors["1"]], [10, 11, 12, 2, 3])
 
-    def test_selector_lock_schema_and_json_guards(self):
+    def test_selector_lock_schema_and_json_guards(self) -> None:
         with self.assertRaisesRegex(p.ProfileError, "UNKNOWN_RELEASE"):
             p.load_profile("current")
         with self.assertRaisesRegex(p.ProfileError, "UNKNOWN_RELEASE"):
@@ -79,7 +93,7 @@ class ProfileTests(unittest.TestCase):
         with self.assertRaisesRegex(p.ProfileError, "LOCK_SHA_MISMATCH"):
             p.load_profile(p.NEW_RELEASE, _lock_bytes=b"{}\n")
 
-    def test_bundle_recalculation_and_unsafe_paths(self):
+    def test_bundle_recalculation_and_unsafe_paths(self) -> None:
         profile = fixture_profile()
         with tempfile.TemporaryDirectory() as scratch:
             bundle = pathlib.Path(scratch) / "bundle"

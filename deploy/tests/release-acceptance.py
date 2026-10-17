@@ -14,7 +14,25 @@ import stat
 import subprocess
 import sys
 import time
+from collections.abc import Iterable, Sequence
 from pathlib import Path
+from types import ModuleType
+from typing import TYPE_CHECKING, TypedDict, cast
+
+if TYPE_CHECKING:
+    from deploy.tests.acceptance_types import (
+        AcceptanceProfile,
+        BundleSummaryView,
+        ContainerRecord,
+        CurrentAcceptanceProfile,
+        EvidenceModule,
+        JsonObject,
+        PathDescriptor,
+        ProfileLock,
+        ProfileModule,
+        SavedDescriptor,
+        SnapshotRecord,
+    )
 
 ROOT = Path(__file__).resolve().parents[2]
 NEW = "neelagiri-2025-nafiul-2026-v1"
@@ -53,19 +71,36 @@ REASON = {
 }
 
 
-def load(name, filename):
+def load(name: str, filename: str) -> ModuleType:
     spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name(filename))
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load acceptance script {filename}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
 
-p = load("arb033_profiles", "acceptance-profiles.py")
-e = load("arb033_evidence", "acceptance-evidence.py")
+p_module = load("arb033_profiles", "acceptance-profiles.py")
+for export in ("load_profile", "check_profile_bundle", "canonical", "digest"):
+    if not callable(getattr(p_module, export, None)):
+        raise ImportError(f"acceptance profiles missing {export}")
+p = cast("ProfileModule", p_module)
+e_module = load("arb033_evidence", "acceptance-evidence.py")
+for export in (
+    "canonical",
+    "utc",
+    "read_settings",
+    "container",
+    "snapshot",
+    "validate_database",
+):
+    if not callable(getattr(e_module, export, None)):
+        raise ImportError(f"acceptance evidence missing {export}")
+e = cast("EvidenceModule", e_module)
 
 
 class ReleaseError(ValueError):
-    def __init__(self, code):
+    def __init__(self, code: str) -> None:
         super().__init__(code)
         self.code = code
 
@@ -74,16 +109,533 @@ class ReferenceCheckoutRequired(ReleaseError):
     """Current source cannot reproduce the accepted v1 producer bytes."""
 
 
-def need(condition, code):
+class Selection(TypedDict):
+    path: Path
+    identity: str
+    count: int
+
+
+class Retained(TypedDict):
+    input_files: dict[str, PathDescriptor]
+    input_paths: list[Path]
+    old_files: dict[str, PathDescriptor]
+
+
+class PhaseEntry(TypedDict):
+    label: str
+    bundle_identity: str
+    settings: SavedDescriptor
+    snapshot: SavedDescriptor
+
+
+class SwitchState(TypedDict):
+    begun: bool
+
+
+class RecordedBot(TypedDict):
+    running: bool
+
+
+class RecordedPostgres(TypedDict):
+    id: str
+    image_id: str
+    database_volume: str
+    started_at: str
+    running: bool
+
+
+class RecordedPrepare(TypedDict):
+    id: str
+    image_id: str
+    status: str
+    exit_code: int
+    user: str
+    read_only_root: bool
+    restart_count: int
+    artifact_mount: dict[str, object]
+    bundle_id: str
+    bundle_count: int
+    started_at: str
+
+
+class RecordedRuntime(TypedDict):
+    bot: RecordedBot | None
+    prepare: RecordedPrepare | None
+    postgres: RecordedPostgres | None
+
+
+class RecordedSnapshot(TypedDict):
+    schema_version: int
+    kind: str
+    snapshot_sql_sha256: str
+    source_commit: str
+    captured_at: str
+    deployment: dict[str, str]
+    runtime: RecordedRuntime
+    database: JsonObject | None
+
+
+class SourceRecord(TypedDict):
+    commit: str
+    tool_sha256: str
+    compose_sha256: str
+    dockerfile_sha256: dict[str, str]
+
+
+class OriginalRecord(TypedDict):
+    settings_sha256: str
+    settings_uid: int
+    settings_gid: int
+    settings_mode: int
+    bundle_identity: str
+    bundle_path: str
+    bundle_file_sha256: dict[str, str]
+
+
+class InputsRecord(TypedDict):
+    base_identity: str
+    alias_identity: str
+    catalog_release_identity: str
+    embeddings_sha256: str
+
+
+class BuildRecord(TypedDict):
+    identity: str
+    path: str
+    count: int
+    report_sha256: str
+    file_sha256: dict[str, str]
+    producer: JsonObject
+    block_size: int
+    report: SavedDescriptor
+
+
+class RuntimeReport(TypedDict):
+    project: str
+    builder_image_id: str
+    bot_image_id: str
+    postgres_image_id: str
+    database_volume: str
+    baseline_snapshot_sha256: str
+    prepare_sequence: list[PhaseEntry]
+
+
+class PreparationReport(TypedDict):
+    schema_version: int
+    kind: str
+    scope: str
+    status: str
+    reason: str
+    profile: JsonObject
+    source: SourceRecord
+    original: OriginalRecord
+    inputs: InputsRecord
+    builds: dict[str, BuildRecord]
+    runtime: RuntimeReport
+    checks: dict[str, str]
+    live_acceptance: str
+    production_history_preservation: str
+    live_verifier: str
+    saved_evidence: dict[str, SavedDescriptor]
+
+
+def need(condition: bool, code: str) -> None:
     if not condition:
         raise ReleaseError(code)
 
 
-def sha(raw):
+def record(value: object, names: tuple[str, ...], code: str) -> dict[str, object]:
+    need(type(value) is dict and set(value) == set(names), code)
+    return cast("dict[str, object]", value)
+
+
+def mapping(value: object, code: str) -> dict[str, object]:
+    need(type(value) is dict and all(type(key) is str for key in value), code)
+    return cast("dict[str, object]", value)
+
+
+def required(value: object, names: tuple[str, ...], code: str) -> dict[str, object]:
+    data = mapping(value, code)
+    need(all(name in data for name in names), code)
+    return data
+
+
+def text_value(value: object, code: str) -> str:
+    if type(value) is not str:
+        raise ReleaseError(code)
+    return value
+
+
+def integer_value(value: object, code: str) -> int:
+    if type(value) is not int:
+        raise ReleaseError(code)
+    return value
+
+
+def items(value: object, code: str) -> list[object]:
+    need(type(value) is list, code)
+    return cast("list[object]", value)
+
+
+def string_map(value: object, code: str) -> dict[str, str]:
+    content = mapping(value, code)
+    for item in content.values():
+        text_value(item, code)
+    return cast("dict[str, str]", content)
+
+
+def saved_shape(value: object, code: str) -> SavedDescriptor:
+    data = record(value, ("file", "sha256"), code)
+    text_value(data["file"], code)
+    text_value(data["sha256"], code)
+    return cast("SavedDescriptor", data)
+
+
+def path_shape(value: object, code: str) -> PathDescriptor:
+    data = record(value, ("path", "sha256", "bytes"), code)
+    text_value(data["path"], code)
+    text_value(data["sha256"], code)
+    integer_value(data["bytes"], code)
+    return cast("PathDescriptor", data)
+
+
+def path_map(value: object, code: str) -> dict[str, PathDescriptor]:
+    data = mapping(value, code)
+    for item in data.values():
+        path_shape(item, code)
+    return cast("dict[str, PathDescriptor]", data)
+
+
+def snapshot_shape(value: JsonObject, code: str) -> RecordedSnapshot:
+    data = required(
+        value,
+        (
+            "schema_version",
+            "kind",
+            "snapshot_sql_sha256",
+            "source_commit",
+            "captured_at",
+            "deployment",
+            "runtime",
+            "database",
+        ),
+        code,
+    )
+    integer_value(data["schema_version"], code)
+    for name in ("kind", "snapshot_sql_sha256", "source_commit", "captured_at"):
+        text_value(data[name], code)
+    deployment = required(
+        data["deployment"], ("project", "compose_sha256", "settings_sha256"), code
+    )
+    for name in ("project", "compose_sha256", "settings_sha256"):
+        text_value(deployment[name], code)
+    runtime = required(data["runtime"], ("bot", "prepare", "postgres"), code)
+    bot = runtime["bot"]
+    if bot is not None:
+        bot_data = required(bot, ("running",), code)
+        need(type(bot_data["running"]) is bool, code)
+    pg = runtime["postgres"]
+    if pg is not None:
+        pg_data = required(pg, ("id", "image_id", "database_volume", "started_at", "running"), code)
+        for name in ("id", "image_id", "database_volume", "started_at"):
+            text_value(pg_data[name], code)
+        need(type(pg_data["running"]) is bool, code)
+    prepare = runtime["prepare"]
+    if prepare is not None:
+        prepare_data = required(
+            prepare,
+            (
+                "id",
+                "image_id",
+                "status",
+                "exit_code",
+                "user",
+                "read_only_root",
+                "restart_count",
+                "artifact_mount",
+                "bundle_id",
+                "bundle_count",
+                "started_at",
+            ),
+            code,
+        )
+        for name in ("id", "image_id", "status", "user", "bundle_id", "started_at"):
+            text_value(prepare_data[name], code)
+        for name in ("exit_code", "restart_count", "bundle_count"):
+            integer_value(prepare_data[name], code)
+        need(type(prepare_data["read_only_root"]) is bool, code)
+        mount = required(prepare_data["artifact_mount"], ("source", "rw"), code)
+        text_value(mount["source"], code)
+        need(type(mount["rw"]) is bool, code)
+    if data["database"] is not None:
+        mapping(data["database"], code)
+    return cast("RecordedSnapshot", value)
+
+
+def manifest_sources(value: JsonObject, code: str) -> dict[str, dict[str, object]]:
+    result: dict[str, dict[str, object]] = {}
+    for item in items(value.get("sources"), code):
+        source = required(item, ("name", "sha256", "metadata"), code)
+        name = text_value(source["name"], code)
+        text_value(source["sha256"], code)
+        mapping(source["metadata"], code)
+        result[name] = source
+    return result
+
+
+def report_shape(value: JsonObject) -> PreparationReport:
+    """Check complete persisted wire types without rebuilding or dropping any field."""
+    code = "EVIDENCE_INVALID"
+    report = record(
+        value,
+        (
+            "schema_version",
+            "kind",
+            "scope",
+            "status",
+            "reason",
+            "profile",
+            "source",
+            "original",
+            "inputs",
+            "builds",
+            "runtime",
+            "checks",
+            "live_acceptance",
+            "production_history_preservation",
+            "live_verifier",
+            "saved_evidence",
+        ),
+        code,
+    )
+    integer_value(report["schema_version"], code)
+    for name in (
+        "kind",
+        "scope",
+        "status",
+        "reason",
+        "live_acceptance",
+        "production_history_preservation",
+        "live_verifier",
+    ):
+        text_value(report[name], code)
+    profile = mapping(report["profile"], code)
+    for name in ("id", "sha256", "release_id", "release_lock_sha256"):
+        text_value(profile[name], code)
+    source = record(
+        report["source"],
+        ("commit", "tool_sha256", "compose_sha256", "dockerfile_sha256"),
+        code,
+    )
+    for name in ("commit", "tool_sha256", "compose_sha256"):
+        text_value(source[name], code)
+    string_map(source["dockerfile_sha256"], code)
+    original = mapping(report["original"], code)
+    for name in ("settings_sha256", "bundle_identity", "bundle_path"):
+        text_value(original[name], code)
+    for name in ("settings_uid", "settings_gid", "settings_mode"):
+        integer_value(original[name], code)
+    string_map(original["bundle_file_sha256"], code)
+    inputs = mapping(report["inputs"], code)
+    for name in (
+        "base_identity",
+        "alias_identity",
+        "catalog_release_identity",
+        "embeddings_sha256",
+    ):
+        text_value(inputs[name], code)
+    builds = mapping(report["builds"], code)
+    need(set(builds) == {"A", "B"}, code)
+    for entry in builds.values():
+        build = record(
+            entry,
+            (
+                "identity",
+                "path",
+                "count",
+                "report_sha256",
+                "file_sha256",
+                "producer",
+                "block_size",
+                "report",
+            ),
+            code,
+        )
+        for name in ("identity", "path", "report_sha256"):
+            text_value(build[name], code)
+        for name in ("count", "block_size"):
+            integer_value(build[name], code)
+        string_map(build["file_sha256"], code)
+        mapping(build["producer"], code)
+        saved_shape(build["report"], code)
+    runtime = record(
+        report["runtime"],
+        (
+            "project",
+            "builder_image_id",
+            "bot_image_id",
+            "postgres_image_id",
+            "database_volume",
+            "baseline_snapshot_sha256",
+            "prepare_sequence",
+        ),
+        code,
+    )
+    for name in (
+        "project",
+        "builder_image_id",
+        "bot_image_id",
+        "postgres_image_id",
+        "database_volume",
+        "baseline_snapshot_sha256",
+    ):
+        text_value(runtime[name], code)
+    for entry in items(runtime["prepare_sequence"], code):
+        phase = record(entry, ("label", "bundle_identity", "settings", "snapshot"), code)
+        text_value(phase["label"], code)
+        text_value(phase["bundle_identity"], code)
+        saved_shape(phase["settings"], code)
+        saved_shape(phase["snapshot"], code)
+    string_map(report["checks"], code)
+    records = mapping(report["saved_evidence"], code)
+    for item in records.values():
+        saved_shape(item, code)
+    return cast("PreparationReport", value)
+
+
+def current_profile(profile: AcceptanceProfile, code: str) -> CurrentAcceptanceProfile:
+    """Narrow a pinned release profile only after checking its complete nested shape."""
+    need(
+        profile.id == NEW
+        and profile.release_id == NEW
+        and profile.policy == "release-lock-v1"
+        and profile.sha256 == p.TRUSTED_NEW_PROFILE_SHA
+        and profile.lock_sha256 == p.TRUSTED_LOCK_SHA,
+        code,
+    )
+    lock = record(
+        profile.lock,
+        ("schema_version", "kind", "release_id", "inputs", "reference", "semantic_expectations"),
+        code,
+    )
+    need(
+        integer_value(lock["schema_version"], code) == 1
+        and lock["kind"] == "arb-release-lock"
+        and lock["release_id"] == NEW,
+        code,
+    )
+    inputs = record(
+        lock["inputs"], ("algorithm", "aliases", "base", "catalog_release", "embeddings"), code
+    )
+    for source_name in ("base", "aliases"):
+        source = record(inputs[source_name], ("identity", "snapshot_id"), code)
+        text_value(source["identity"], code)
+        text_value(source["snapshot_id"], code)
+    release = record(
+        inputs["catalog_release"], ("catalog_count", "catalog_sha256", "identity"), code
+    )
+    integer_value(release["catalog_count"], code)
+    for name in ("catalog_sha256", "identity"):
+        text_value(release[name], code)
+    embeddings = record(
+        inputs["embeddings"],
+        ("registry_sha256", "snapshot_id", "text_sha256", "text_size"),
+        code,
+    )
+    integer_value(embeddings["text_size"], code)
+    for name in ("registry_sha256", "snapshot_id", "text_sha256"):
+        text_value(embeddings[name], code)
+    algorithm = record(
+        inputs["algorithm"],
+        ("max_neighbors", "name", "parameters", "similarity", "version"),
+        code,
+    )
+    integer_value(algorithm["max_neighbors"], code)
+    for name in ("name", "similarity", "version"):
+        text_value(algorithm[name], code)
+    need(type(algorithm["parameters"]) is dict, code)
+    reference = record(
+        lock["reference"],
+        (
+            "block_size",
+            "build_report_sha256",
+            "bundle_identity",
+            "catalog_sha256",
+            "neighbors_sha256",
+            "producer",
+        ),
+        code,
+    )
+    integer_value(reference["block_size"], code)
+    for name in ("build_report_sha256", "bundle_identity", "catalog_sha256", "neighbors_sha256"):
+        text_value(reference[name], code)
+    producer = record(
+        reference["producer"],
+        (
+            "code_files_sha256",
+            "numpy_version",
+            "package_version",
+            "python_version",
+            "source_commit",
+        ),
+        code,
+    )
+    for name in ("numpy_version", "package_version", "python_version", "source_commit"):
+        text_value(producer[name], code)
+    code_files = producer["code_files_sha256"]
+    need(
+        type(code_files) is dict
+        and all(type(name) is str and type(digest) is str for name, digest in code_files.items()),
+        code,
+    )
+    semantic = record(
+        lock["semantic_expectations"],
+        (
+            "catalog_count",
+            "neighbor_count_histogram",
+            "smoke_seed",
+            "empty_seed",
+            "vector_status_counts",
+            "zero_vector_ids",
+        ),
+        code,
+    )
+    integer_value(semantic["catalog_count"], code)
+    for name in ("neighbor_count_histogram", "vector_status_counts"):
+        counts = semantic[name]
+        need(
+            type(counts) is dict
+            and all(type(key) is str and type(count) is int for key, count in counts.items()),
+            code,
+        )
+    smoke = record(semantic["smoke_seed"], ("mal_id", "query", "neighbor_ids"), code)
+    integer_value(smoke["mal_id"], code)
+    text_value(smoke["query"], code)
+    need(
+        type(smoke["neighbor_ids"]) is list
+        and all(type(item) is int for item in smoke["neighbor_ids"]),
+        code,
+    )
+    if semantic["empty_seed"] is not None:
+        empty = record(semantic["empty_seed"], ("mal_id", "query"), code)
+        integer_value(empty["mal_id"], code)
+        text_value(empty["query"], code)
+    need(
+        type(semantic["zero_vector_ids"]) is list
+        and all(type(item) is int for item in semantic["zero_vector_ids"])
+        and profile.inputs == inputs
+        and profile.reference == reference
+        and profile.expectations == semantic,
+        code,
+    )
+    return cast("CurrentAcceptanceProfile", profile)
+
+
+def sha(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def file_sha(path):
+def file_sha(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as stream:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
@@ -91,7 +643,7 @@ def file_sha(path):
     return h.hexdigest()
 
 
-def guarded(path, *, directory=False):
+def guarded(path: str | Path, *, directory: bool = False) -> Path:
     path = Path(path)
     need(
         path.is_absolute()
@@ -103,7 +655,7 @@ def guarded(path, *, directory=False):
     return path
 
 
-def primary_root(checkout=ROOT):
+def primary_root(checkout: Path = ROOT) -> Path:
     result = subprocess.run(
         [
             "git",
@@ -125,16 +677,16 @@ def primary_root(checkout=ROOT):
     return common.parent
 
 
-def private_roots(checkout=ROOT):
+def private_roots(checkout: Path = ROOT) -> tuple[Path, Path]:
     primary = primary_root(checkout)
     return (primary / ".arb", primary / ".tools" / "arb033-acceptance")
 
 
-def project_lock_dir(checkout=ROOT):
+def project_lock_dir(checkout: Path = ROOT) -> Path:
     return primary_root(checkout) / ".arb" / "acceptance-locks"
 
 
-def private_file(path, raw):
+def private_file(path: Path, raw: bytes) -> SavedDescriptor:
     need(
         not path.exists()
         and not path.is_symlink()
@@ -150,50 +702,54 @@ def private_file(path, raw):
     return {"file": path.name, "sha256": sha(raw)}
 
 
-def save_json(path, value):
+def save_json(path: Path, value: object) -> SavedDescriptor:
     return private_file(path, e.canonical(value))
 
 
-def saved(evidence, descriptor):
+def saved(evidence: Path, descriptor: object) -> bytes:
     need(
         type(descriptor) is dict
         and set(descriptor) == {"file", "sha256"}
         and type(descriptor["file"]) is str
+        and type(descriptor["sha256"]) is str
         and Path(descriptor["file"]).name == descriptor["file"]
         and re.fullmatch("[0-9a-f]{64}", descriptor["sha256"]) is not None,
         "EVIDENCE_INVALID",
     )
+    descriptor = cast("SavedDescriptor", descriptor)
     path = guarded(evidence / descriptor["file"])
     raw = path.read_bytes()
     need(sha(raw) == descriptor["sha256"], "EVIDENCE_INVALID")
     return raw
 
 
-def saved_json(evidence, descriptor):
+def saved_json(evidence: Path, descriptor: object) -> JsonObject:
     return p.canonical(saved(evidence, descriptor))
 
 
-def descriptor(path):
+def descriptor(path: str | Path) -> PathDescriptor:
     path = guarded(path)
     return {"path": str(path), "sha256": file_sha(path), "bytes": path.stat().st_size}
 
 
-def check_descriptor(item):
+def check_descriptor(item: object) -> None:
     need(
         type(item) is dict
         and set(item) == {"path", "sha256", "bytes"}
+        and type(item["path"]) is str
         and type(item["sha256"]) is str
-        and re.fullmatch("[0-9a-f]{64}", item["sha256"])
+        and re.fullmatch("[0-9a-f]{64}", item["sha256"]) is not None
         and type(item["bytes"]) is int
         and item["bytes"] >= 0,
         "EVIDENCE_INVALID",
     )
+    item = cast("PathDescriptor", item)
     path = guarded(Path(item["path"]))
     need(path.stat().st_size == item["bytes"] and file_sha(path) == item["sha256"], "INPUT_CHANGED")
 
 
-def files_under(paths):
-    result = {}
+def files_under(paths: Iterable[Path]) -> dict[str, PathDescriptor]:
+    result: dict[str, PathDescriptor] = {}
     for base in paths:
         base = guarded(base, directory=True)
         for path in sorted(base.rglob("*")):
@@ -203,7 +759,7 @@ def files_under(paths):
     return result
 
 
-def source_head():
+def source_head() -> str:
     root = subprocess.run(
         ["git", "-c", f"safe.directory={ROOT}", "rev-parse", "--show-toplevel"],
         cwd=ROOT,
@@ -222,13 +778,13 @@ def source_head():
         check=False,
     )
     need(
-        result.returncode == 0 and re.fullmatch("[0-9a-f]{40}", result.stdout.strip()),
+        result.returncode == 0 and re.fullmatch("[0-9a-f]{40}", result.stdout.strip()) is not None,
         "SOURCE_CHANGED",
     )
     return result.stdout.strip()
 
 
-def clean(head):
+def clean(head: str) -> None:
     need(source_head() == head, "SOURCE_CHANGED")
     result = subprocess.run(
         [
@@ -248,11 +804,13 @@ def clean(head):
     need(result.returncode == 0 and not result.stdout, "SOURCE_CHANGED")
 
 
-def env_clean():
+def env_clean() -> dict[str, str]:
     return {k: v for k, v in os.environ.items() if not k.startswith(("ARB_", "COMPOSE_"))}
 
 
-def command(argv, *, timeout=300, input_text=None, both=False):
+def command(
+    argv: Sequence[str], *, timeout: int = 300, input_text: str | None = None, both: bool = False
+) -> str:
     try:
         result = subprocess.run(
             argv,
@@ -271,11 +829,11 @@ def command(argv, *, timeout=300, input_text=None, both=False):
 
 
 class Transport:
-    def __init__(self, project, settings):
+    def __init__(self, project: str, settings: Path) -> None:
         self.project = project
         self.settings = settings
 
-    def compose(self, *args, timeout=300, input_text=None):
+    def compose(self, *args: str, timeout: int = 300, input_text: str | None = None) -> str:
         return command(
             [
                 "docker",
@@ -292,28 +850,30 @@ class Transport:
             input_text=input_text,
         )
 
-    def docker(self, *args):
+    def docker(self, *args: str) -> str:
         return command(["docker", *args], both=bool(args and args[0] == "logs"))
 
-    def evidence(self):
+    def evidence(self) -> None:
         e.compose = lambda project, settings, *args, input_text=None: self.compose(
             *args, input_text=input_text
         )
         e.docker = lambda *args: self.docker(*args)
 
 
-def postgres_health(t):
+def postgres_health(t: Transport) -> ContainerRecord:
     pg = e.container(t.project, t.settings, "postgres")
-    need(pg is not None and pg["running"], "DATABASE_UNHEALTHY")
+    if pg is None:
+        raise ReleaseError("DATABASE_UNHEALTHY")
+    need(pg["running"], "DATABASE_UNHEALTHY")
     status = t.docker("inspect", "--format", "{{.State.Health.Status}}", pg["id"]).strip()
-    need(status == "healthy" and pg["database_volume"], "DATABASE_UNHEALTHY")
+    need(status == "healthy" and bool(pg["database_volume"]), "DATABASE_UNHEALTHY")
     return pg
 
 
-def quiescent(t, *, require_prepare_idle=True):
+def quiescent(t: Transport, *, require_prepare_idle: bool = True) -> ContainerRecord:
+    bot = e.container(t.project, t.settings, "bot")
     need(
-        e.container(t.project, t.settings, "bot") is None
-        or not e.container(t.project, t.settings, "bot")["running"],
+        bot is None or not bot["running"],
         "BOT_RUNNING",
     )
     prepare = e.container(t.project, t.settings, "prepare")
@@ -321,8 +881,13 @@ def quiescent(t, *, require_prepare_idle=True):
     return postgres_health(t)
 
 
-def nonempty_history(db):
+def validated_database(db: object) -> JsonObject:
     e.validate_database(db)
+    return cast("JsonObject", db)
+
+
+def nonempty_history(db: object) -> None:
+    db = validated_database(db)
     need(
         any(
             db[name]
@@ -340,7 +905,7 @@ def nonempty_history(db):
     )
 
 
-def change_selection(original, bundle):
+def change_selection(original: bytes, bundle: Path) -> bytes:
     lines = original.decode().splitlines(keepends=True)
     need(sum(line.startswith("ARB_BUNDLE_DIR=") for line in lines) == 1, "UNSAFE_SETTINGS")
     return "".join(
@@ -349,7 +914,7 @@ def change_selection(original, bundle):
     ).encode()
 
 
-def setup_paths(data, lock):
+def setup_paths(data: Path, lock: ProfileLock) -> dict[str, Path]:
     base = data / "datasets" / lock["inputs"]["base"]["identity"].replace(":", "-")
     alias = data / "aliases" / lock["inputs"]["aliases"]["identity"].replace(":", "-")
     release = data / "releases" / lock["inputs"]["catalog_release"]["identity"].replace(":", "-")
@@ -368,7 +933,7 @@ def setup_paths(data, lock):
     }
 
 
-def builder_args(paths, lock):
+def builder_args(paths: dict[str, Path], lock: ProfileLock) -> list[str]:
     return [
         "--release-dir",
         "/data/" + str(paths["release"].relative_to(paths["data"])),
@@ -383,7 +948,7 @@ def builder_args(paths, lock):
     ]
 
 
-def probe_code():
+def probe_code() -> str:
     return """import hashlib,importlib.resources as r,json,platform,numpy,recsys
 names=('build.py','bundle.py','export.py','release.py','release_build.py')
 files={name:hashlib.sha256(r.files('recsys').joinpath(name).read_bytes()).hexdigest() for name in names}
@@ -392,19 +957,18 @@ registry=hashlib.sha256(r.files('recsys').joinpath('source_registry_glove_6b_300
 print(json.dumps({'python_version':platform.python_version(),'numpy_version':numpy.__version__,'package_version':recsys.__version__,'code_files_sha256':files,'lock_sha256':lock,'registry_sha256':registry},sort_keys=True))"""
 
 
-def check_probe(probe, profile):
+def check_probe(probe: object, profile: CurrentAcceptanceProfile) -> None:
     ref = profile.reference["producer"]
-    need(
-        type(probe) is dict
-        and set(probe)
-        == {
+    probe = record(
+        probe,
+        (
             "python_version",
             "numpy_version",
             "package_version",
             "code_files_sha256",
             "lock_sha256",
             "registry_sha256",
-        },
+        ),
         "BUILD_MISMATCH",
     )
     need(
@@ -418,13 +982,20 @@ def check_probe(probe, profile):
     )
 
 
-def check_report(report, report_raw, summary, profile, block):
+def check_report(
+    report: JsonObject,
+    report_raw: bytes,
+    summary: BundleSummaryView,
+    profile: CurrentAcceptanceProfile,
+    block: int,
+) -> str:
+    inputs = mapping(report.get("inputs"), "BUILD_MISMATCH")
+    glove = mapping(inputs.get("glove.6B.300d.txt"), "BUILD_MISMATCH")
     need(
         report.get("schema_version") == 2
         and report.get("kind") == "arb-release-build"
         and report.get("catalog_release_identity") == profile.inputs["catalog_release"]["identity"]
-        and report.get("inputs", {}).get("glove.6B.300d.txt", {}).get("sha256")
-        == profile.inputs["embeddings"]["text_sha256"]
+        and glove.get("sha256") == profile.inputs["embeddings"]["text_sha256"]
         and report.get("files")
         == {
             "catalog.json": {"sha256": summary.hashes["catalog.json"]},
@@ -433,7 +1004,7 @@ def check_report(report, report_raw, summary, profile, block):
         "BUILD_MISMATCH",
     )
     ref = profile.reference["producer"]
-    producer = report.get("producer", {})
+    producer = mapping(report.get("producer"), "BUILD_MISMATCH")
     need(
         all(
             producer.get(key) == ref[key]
@@ -443,7 +1014,7 @@ def check_report(report, report_raw, summary, profile, block):
         == {name: ref["code_files_sha256"][name] for name in ("build.py", "release_build.py")},
         "BUILD_MISMATCH",
     )
-    execution = report.get("execution", {})
+    execution = mapping(report.get("execution"), "BUILD_MISMATCH")
     need(
         type(execution.get("requested_block_rows")) is int
         and execution["requested_block_rows"] == block
@@ -451,14 +1022,17 @@ def check_report(report, report_raw, summary, profile, block):
         "BUILD_MISMATCH",
     )
     semantic = profile.expectations
-    coverage = report.get("coverage", {})
+    coverage = mapping(report.get("coverage"), "BUILD_MISMATCH")
     need(
         coverage.get("neighbor_count_histogram") == semantic["neighbor_count_histogram"]
         and coverage.get("vector_status_counts") == semantic["vector_status_counts"]
         and coverage.get("zero_vector_ids") == semantic["zero_vector_ids"],
         "BUILD_MISMATCH",
     )
-    details = report.get("anime", {})
+    details = {
+        key: mapping(item, "BUILD_MISMATCH")
+        for key, item in mapping(report.get("anime"), "BUILD_MISMATCH").items()
+    }
     need(
         type(details) is dict
         and set(details) == set(summary.neighbors)
@@ -486,14 +1060,14 @@ def check_report(report, report_raw, summary, profile, block):
     return sha(report_raw)
 
 
-def bundle_files(bundle):
+def bundle_files(bundle: Path) -> dict[str, PathDescriptor]:
     return {
         name: descriptor(bundle / name)
         for name in ("catalog.json", "neighbors.json", "manifest.json")
     }
 
 
-def check_retained(retained, old_path):
+def check_retained(retained: Retained, old_path: Path) -> None:
     need(
         retained["input_files"] == files_under(retained["input_paths"])
         and retained["old_files"] == bundle_files(old_path),
@@ -501,15 +1075,26 @@ def check_retained(retained, old_path):
     )
 
 
-def phase_time(previous_capture, started_at, captured_at):
+def phase_time(previous_capture: str, started_at: str, captured_at: str) -> None:
     need(e.utc(previous_capture) < e.utc(started_at) <= e.utc(captured_at), "PHASE_MISMATCH")
 
 
 def snapshot_phase(
-    t, evidence, label, settings, baseline, expected, previous_id, previous_capture, bot_image, pg0
-):
+    t: Transport,
+    evidence: Path,
+    label: str,
+    settings: Path,
+    baseline: SnapshotRecord,
+    expected: Selection,
+    previous_id: str | None,
+    previous_capture: str,
+    bot_image: str,
+    pg0: ContainerRecord,
+    switch_state: SwitchState,
+) -> tuple[PhaseEntry, str, str]:
     t.settings = settings
     quiescent(t)
+    switch_state["begun"] = True
     t.compose("up", "-d", "--no-deps", "--force-recreate", "prepare")
     current = None
     for _ in range(120):
@@ -517,7 +1102,8 @@ def snapshot_phase(
         if current is not None and current["status"] == "exited":
             break
         time.sleep(2)
-    need(current is not None and current["status"] == "exited", "PREPARE_TIMEOUT")
+    if current is None or current["status"] != "exited":
+        raise ReleaseError("PREPARE_TIMEOUT")
     need(
         current["exit_code"] == 0
         and current["id"] != previous_id
@@ -537,7 +1123,8 @@ def snapshot_phase(
     )
     shot = e.snapshot(t.project, settings)
     phase_time(previous_capture, current["started_at"], shot["captured_at"])
-    need(shot["runtime"]["bot"] is None or not shot["runtime"]["bot"]["running"], "BOT_RUNNING")
+    bot = shot["runtime"]["bot"]
+    need(bot is None or not bot["running"], "BOT_RUNNING")
     need(shot["database"] == baseline["database"], "DATABASE_HISTORY")
     e.validate_database(shot["database"])
     evidence_file = save_json(evidence / f"snapshot-{label}.json", shot)
@@ -554,21 +1141,21 @@ def snapshot_phase(
 
 
 def run_prepare_sequence(
-    t,
-    evidence,
-    settings,
-    original_state,
-    head,
-    baseline,
-    selected,
-    settings_by_label,
-    bot_image,
-    pg0,
-    retained,
-    old_path,
-    switch_state,
-):
-    sequence = []
+    t: Transport,
+    evidence: Path,
+    settings: Path,
+    original_state: tuple[str, int, int, int],
+    head: str,
+    baseline: SnapshotRecord,
+    selected: dict[str, Selection],
+    settings_by_label: dict[str, Path],
+    bot_image: str,
+    pg0: ContainerRecord,
+    retained: Retained,
+    old_path: Path,
+    switch_state: SwitchState,
+) -> list[PhaseEntry]:
+    sequence: list[PhaseEntry] = []
     previous = e.container(t.project, settings, "prepare")
     previous_id = previous["id"] if previous else None
     previous_capture = baseline["captured_at"]
@@ -588,7 +1175,6 @@ def run_prepare_sequence(
         )
         clean(head)
         check_retained(retained, old_path)
-        switch_state["begun"] = True
         entry, previous_id, previous_capture = snapshot_phase(
             t,
             evidence,
@@ -600,12 +1186,22 @@ def run_prepare_sequence(
             previous_capture,
             bot_image,
             pg0,
+            switch_state,
         )
         sequence.append(entry)
     return sequence
 
 
-def restore_old(t, settings, original_state, old_settings, old_path, old, pg0, retained):
+def restore_old(
+    t: Transport,
+    settings: Path,
+    original_state: tuple[str, int, int, int],
+    old_settings: Path,
+    old_path: Path,
+    old: BundleSummaryView,
+    pg0: ContainerRecord,
+    retained: Retained,
+) -> str:
     try:
         t.settings = settings
         need(
@@ -647,9 +1243,25 @@ def restore_old(t, settings, original_state, old_settings, old_path, old, pg0, r
         return "FAIL"
 
 
-def verify_record(evidence):
+def restore_after_failure(
+    switch_state: SwitchState,
+    t: Transport,
+    settings: Path,
+    original_state: tuple[str, int, int, int],
+    old_settings: Path | None,
+    old_path: Path,
+    old: BundleSummaryView,
+    pg0: ContainerRecord | None,
+    retained: Retained,
+) -> str:
+    if not switch_state["begun"] or old_settings is None or pg0 is None:
+        return "PENDING"
+    return restore_old(t, settings, original_state, old_settings, old_path, old, pg0, retained)
+
+
+def verify_record(evidence: Path) -> PreparationReport:
     evidence = guarded(evidence, directory=True)
-    report = saved_json(
+    raw_report = saved_json(
         evidence,
         {
             "file": "preparation-report.json",
@@ -657,7 +1269,7 @@ def verify_record(evidence):
         },
     )
     need(
-        set(report)
+        set(raw_report)
         == {
             "schema_version",
             "kind",
@@ -679,17 +1291,18 @@ def verify_record(evidence):
         "EVIDENCE_INVALID",
     )
     need(
-        type(report["schema_version"]) is int
-        and report["schema_version"] == 2
-        and report["kind"] == "arb-offline-release-acceptance"
-        and report["scope"] == "full-inputs-offline-compatibility"
-        and report["status"] == "PASS"
-        and report["reason"] == "PASS"
-        and report["live_acceptance"] == "PENDING"
-        and report["production_history_preservation"] == "PENDING"
-        and report["live_verifier"] == "REQUIRES_DATA06_V2",
+        type(raw_report["schema_version"]) is int
+        and raw_report["schema_version"] == 2
+        and raw_report["kind"] == "arb-offline-release-acceptance"
+        and raw_report["scope"] == "full-inputs-offline-compatibility"
+        and raw_report["status"] == "PASS"
+        and raw_report["reason"] == "PASS"
+        and raw_report["live_acceptance"] == "PENDING"
+        and raw_report["production_history_preservation"] == "PENDING"
+        and raw_report["live_verifier"] == "REQUIRES_DATA06_V2",
         "EVIDENCE_INVALID",
     )
+    report = report_shape(raw_report)
     records = report["saved_evidence"]
     need(
         set(records)
@@ -722,16 +1335,18 @@ def verify_record(evidence):
                 "bot": sha(saved(evidence, records["bot_dockerfile"])),
             },
         }
-        and re.fullmatch("[0-9a-f]{40}", report["source"]["commit"]),
+        and re.fullmatch("[0-9a-f]{40}", report["source"]["commit"]) is not None,
         "EVIDENCE_INVALID",
     )
     profile_raw = saved(evidence, records["profile"])
     lock_raw = saved(evidence, records["lock"])
-    profile = p.load_profile(NEW, _profile_bytes=profile_raw, _lock_bytes=lock_raw)
+    raw_profile = p.load_profile(NEW, _profile_bytes=profile_raw, _lock_bytes=lock_raw)
     need(
-        profile.sha256 == p.TRUSTED_NEW_PROFILE_SHA and profile.lock_sha256 == p.TRUSTED_LOCK_SHA,
+        raw_profile.sha256 == p.TRUSTED_NEW_PROFILE_SHA
+        and raw_profile.lock_sha256 == p.TRUSTED_LOCK_SHA,
         "EVIDENCE_INVALID",
     )
+    profile = current_profile(raw_profile, "EVIDENCE_INVALID")
     need(
         report["profile"]
         == {
@@ -781,17 +1396,21 @@ def verify_record(evidence):
         and probe.get("registry_sha256") == profile.inputs["embeddings"]["registry_sha256"],
         "EVIDENCE_INVALID",
     )
-    input_files = saved_json(evidence, records["input_files"])
-    layout = saved_json(evidence, records["input_layout"])
-    need(set(layout) == {"base", "aliases", "release", "alias_raw", "glove"}, "EVIDENCE_INVALID")
+    input_files_raw = saved_json(evidence, records["input_files"])
+    layout_raw = saved_json(evidence, records["input_layout"])
     need(
-        input_files
+        set(layout_raw) == {"base", "aliases", "release", "alias_raw", "glove"}, "EVIDENCE_INVALID"
+    )
+    layout = string_map(layout_raw, "EVIDENCE_INVALID")
+    need(
+        input_files_raw
         == files_under(
             [Path(layout[key]) for key in ("base", "aliases", "release", "alias_raw")]
             + [Path(layout["glove"]).parent]
         ),
         "INPUT_CHANGED",
     )
+    input_files = path_map(input_files_raw, "EVIDENCE_INVALID")
     for key, filename, identity in (
         ("base", "dataset-manifest.json", profile.inputs["base"]["identity"]),
         ("aliases", "alias-manifest.json", profile.inputs["aliases"]["identity"]),
@@ -825,9 +1444,12 @@ def verify_record(evidence):
         and report["inputs"]["embeddings_sha256"] == profile.inputs["embeddings"]["text_sha256"],
         "EVIDENCE_INVALID",
     )
-    bundle_records = saved_json(evidence, records["bundle_files"])
-    need(set(bundle_records) == {"old", "A", "B"}, "EVIDENCE_INVALID")
-    for label, files in bundle_records.items():
+    bundle_records_raw = saved_json(evidence, records["bundle_files"])
+    need(set(bundle_records_raw) == {"old", "A", "B"}, "EVIDENCE_INVALID")
+    bundle_records: dict[str, dict[str, PathDescriptor]] = {}
+    for label, raw_files in bundle_records_raw.items():
+        files = path_map(raw_files, "EVIDENCE_INVALID")
+        bundle_records[label] = files
         need(set(files) == {"catalog.json", "neighbors.json", "manifest.json"}, "EVIDENCE_INVALID")
         for item in files.values():
             check_descriptor(item)
@@ -842,8 +1464,8 @@ def verify_record(evidence):
     )
     builds = report["builds"]
     need(set(builds) == {"A", "B"}, "EVIDENCE_INVALID")
-    reports = {}
-    bundles = {}
+    reports: dict[str, JsonObject] = {}
+    bundles: dict[str, BundleSummaryView] = {}
     for label, block in (("A", 256), ("B", 128)):
         entry = builds[label]
         need(
@@ -883,15 +1505,17 @@ def verify_record(evidence):
             "EVIDENCE_INVALID",
         )
         manifest = p.canonical((Path(entry["path"]) / "manifest.json").read_bytes())
-        sources = {item["name"]: item for item in manifest["sources"]}
+        sources = manifest_sources(manifest, "EVIDENCE_INVALID")
+        report_metadata = mapping(sources["build_report"]["metadata"], "EVIDENCE_INVALID")
+        exporter_metadata = mapping(sources["bundle_exporter"]["metadata"], "EVIDENCE_INVALID")
         need(
             sources["build_report"]["sha256"] == entry["report_sha256"]
-            and sources["build_report"]["metadata"]["producer"] == reports[label]["producer"]
+            and report_metadata["producer"] == reports[label]["producer"]
             and sources["bundle_exporter"]["sha256"]
             == profile.reference["producer"]["code_files_sha256"]["release_build.py"]
-            and sources["bundle_exporter"]["metadata"]["export_sha256"]
+            and exporter_metadata["export_sha256"]
             == profile.reference["producer"]["code_files_sha256"]["export.py"]
-            and sources["bundle_exporter"]["metadata"]["bundle_sha256"]
+            and exporter_metadata["bundle_sha256"]
             == profile.reference["producer"]["code_files_sha256"]["bundle.py"],
             "EVIDENCE_INVALID",
         )
@@ -910,8 +1534,9 @@ def verify_record(evidence):
     del a["execution"]
     del b["execution"]
     need(a == b, "EVIDENCE_INVALID")
-    baseline = saved_json(evidence, records["baseline"])
-    nonempty_history(baseline["database"])
+    baseline_raw = saved_json(evidence, records["baseline"])
+    nonempty_history(baseline_raw["database"])
+    baseline = snapshot_shape(baseline_raw, "EVIDENCE_INVALID")
     runtime = report["runtime"]
     need(
         set(runtime)
@@ -949,6 +1574,8 @@ def verify_record(evidence):
         and (baseline["runtime"]["bot"] is None or not baseline["runtime"]["bot"]["running"]),
         "EVIDENCE_INVALID",
     )
+    if pg0 is None:
+        raise ReleaseError("EVIDENCE_INVALID")
     sequence = runtime["prepare_sequence"]
     need(
         type(sequence) is list
@@ -958,9 +1585,12 @@ def verify_record(evidence):
     )
     last_id = None
     previous_capture = baseline["captured_at"]
-    for item in sequence:
-        need(set(item) == {"label", "bundle_identity", "settings", "snapshot"}, "EVIDENCE_INVALID")
-        label = item["label"]
+    for phase_entry in sequence:
+        need(
+            set(phase_entry) == {"label", "bundle_identity", "settings", "snapshot"},
+            "EVIDENCE_INVALID",
+        )
+        label = phase_entry["label"]
         expected = (
             old_summary if label.startswith("old") else bundles["B" if label == "new-B" else "A"]
         )
@@ -969,11 +1599,11 @@ def verify_record(evidence):
             if label.startswith("old")
             else Path(builds["B" if label == "new-B" else "A"]["path"])
         )
-        need(item["bundle_identity"] == expected.identity, "EVIDENCE_INVALID")
-        phase_raw = saved(evidence, item["settings"])
+        need(phase_entry["bundle_identity"] == expected.identity, "EVIDENCE_INVALID")
+        phase_raw = saved(evidence, phase_entry["settings"])
         need(phase_raw == change_selection(original_raw, expected_path), "EVIDENCE_INVALID")
-        e.read_settings(evidence / item["settings"]["file"])
-        shot = saved_json(evidence, item["snapshot"])
+        e.read_settings(evidence / phase_entry["settings"]["file"])
+        shot = snapshot_shape(saved_json(evidence, phase_entry["snapshot"]), "EVIDENCE_INVALID")
         need(
             shot["schema_version"] == 1
             and shot["kind"] == "full"
@@ -983,7 +1613,7 @@ def verify_record(evidence):
             == {
                 "project": runtime["project"],
                 "compose_sha256": report["source"]["compose_sha256"],
-                "settings_sha256": item["settings"]["sha256"],
+                "settings_sha256": phase_entry["settings"]["sha256"],
             }
             and shot["database"] == baseline["database"],
             "EVIDENCE_INVALID",
@@ -992,6 +1622,8 @@ def verify_record(evidence):
         bot = shot["runtime"]["bot"]
         pg = shot["runtime"]["postgres"]
         prepare = shot["runtime"]["prepare"]
+        if prepare is None:
+            raise ReleaseError("EVIDENCE_INVALID")
         phase_time(previous_capture, prepare["started_at"], shot["captured_at"])
         need(
             (bot is None or not bot["running"])
@@ -1019,9 +1651,9 @@ def verify_record(evidence):
     return report
 
 
-def require_v1_reference_checkout():
+def require_v1_reference_checkout() -> CurrentAcceptanceProfile:
     """Reject a fresh v1 build from moved 0.2 source before any state mutation."""
-    profile = p.load_profile(NEW)
+    profile = current_profile(p.load_profile(NEW), "BUILD_MISMATCH")
     expected = profile.reference["producer"]["code_files_sha256"]
     source = ROOT / "src/recsys"
     if any(
@@ -1037,7 +1669,7 @@ def require_v1_reference_checkout():
     return profile
 
 
-def run(args):
+def run(args: argparse.Namespace) -> dict[str, object]:
     # The accepted production v1 procedure runs only from the pinned 1441573f
     # checkout with Python 3.12.14. This gate is read-only and precedes locks,
     # evidence creation, Docker, and dataset inspection.
@@ -1095,7 +1727,7 @@ def run(args):
         )
     old_path = guarded(Path(values["ARB_BUNDLE_DIR"]), directory=True)
     need(old_path.is_relative_to(data / "bundles"), "UNSAFE_SETTINGS")
-    profile = p.load_profile(NEW)
+    profile = current_profile(p.load_profile(NEW), "PROFILE_MISMATCH")
     old_profile = p.load_profile(p.LEGACY_RELEASE)
     old = p.check_profile_bundle(old_path, old_profile, expected_identity=args.old_identity)
     need(
@@ -1140,7 +1772,18 @@ def run(args):
         os.close(lock_fd)
 
 
-def _run_locked(args, head, data, settings, evidence, values, old_path, old, profile, paths):
+def _run_locked(
+    args: argparse.Namespace,
+    head: str,
+    data: Path,
+    settings: Path,
+    evidence: Path,
+    values: dict[str, str],
+    old_path: Path,
+    old: BundleSummaryView,
+    profile: CurrentAcceptanceProfile,
+    paths: dict[str, Path],
+) -> dict[str, object]:
     original_raw = settings.read_bytes()
     original_stat = settings.stat()
     original_state = (
@@ -1183,17 +1826,24 @@ def _run_locked(args, head, data, settings, evidence, values, old_path, old, pro
         {key: str(paths[key]) for key in ("base", "aliases", "release", "alias_raw", "glove")},
     )
     old_files = bundle_files(old_path)
-    retained = {"input_files": before_files, "input_paths": input_paths, "old_files": old_files}
+    retained: Retained = {
+        "input_files": before_files,
+        "input_paths": input_paths,
+        "old_files": old_files,
+    }
     t = Transport(args.project, settings)
     t.evidence()
-    switch_state = {"begun": False}
+    switch_state: SwitchState = {"begun": False}
     baseline = None
     old_settings = None
+    pg0: ContainerRecord | None = None
     try:
         quiescent(t)
         baseline = e.snapshot(args.project, settings)
         nonempty_history(baseline["database"])
         pg0 = baseline["runtime"]["postgres"]
+        if pg0 is None:
+            raise ReleaseError("DATABASE_UNHEALTHY")
         saved_records["baseline"] = save_json(evidence / "snapshot-baseline.json", baseline)
         t.compose("--profile", "tools", "build", "builder", "bot", timeout=7200)
         clean(head)
@@ -1203,7 +1853,7 @@ def _run_locked(args, head, data, settings, evidence, values, old_path, old, pro
         bot_image = t.docker(
             "image", "inspect", "--format", "{{.Id}}", args.project + "-bot:local"
         ).strip()
-        need(builder_image and bot_image, "BUILD_FAILED")
+        need(bool(builder_image and bot_image), "BUILD_FAILED")
         probe_text = t.compose(
             "--profile",
             "tools",
@@ -1247,9 +1897,9 @@ def _run_locked(args, head, data, settings, evidence, values, old_path, old, pro
         work.mkdir(mode=0o700)
         store = work / "export-store"
         store.mkdir(mode=0o700)
-        builds = {}
-        summaries = {}
-        report_values = {}
+        builds: dict[str, BuildRecord] = {}
+        summaries: dict[str, BundleSummaryView] = {}
+        report_values: dict[str, JsonObject] = {}
         for label, block in (("A", 256), ("B", 128)):
             output = work / ("build-" + label)
             build_out = "/data/" + str(output.relative_to(data))
@@ -1314,7 +1964,8 @@ def _run_locked(args, head, data, settings, evidence, values, old_path, old, pro
                 "count": summary.count,
                 "report_sha256": report_hash,
                 "file_sha256": summary.hashes,
-                "producer": report_value["producer"],
+                # canonical() has already validated the recursive JSON value.
+                "producer": cast("JsonObject", mapping(report_value["producer"], "BUILD_MISMATCH")),
                 "block_size": block,
                 "report": report_copy,
             }
@@ -1340,7 +1991,7 @@ def _run_locked(args, head, data, settings, evidence, values, old_path, old, pro
         )
         check_retained(retained, old_path)
         settings_by_label = {}
-        selected = {
+        selected: dict[str, Selection] = {
             "old": {"path": old_path, "identity": old.identity, "count": old.count},
             "new-A": {
                 "path": Path(builds["A"]["path"]),
@@ -1480,11 +2131,9 @@ def _run_locked(args, head, data, settings, evidence, values, old_path, old, pro
             if isinstance(exc, (ReleaseError, p.ProfileError, e.EvidenceError))
             else "BUILD_FAILED"
         )
-        restoration = "PENDING"
-        if switch_state["begun"] and old_settings is not None:
-            restoration = restore_old(
-                t, settings, original_state, old_settings, old_path, old, pg0, retained
-            )
+        restoration = restore_after_failure(
+            switch_state, t, settings, original_state, old_settings, old_path, old, pg0, retained
+        )
         try:
             save_json(
                 evidence / "failure-status.json",
@@ -1501,7 +2150,7 @@ def _run_locked(args, head, data, settings, evidence, values, old_path, old, pro
         raise ReleaseError(reason if reason in REASON else "BUILD_FAILED") from exc
 
 
-def parser():
+def parser() -> argparse.ArgumentParser:
     cli = argparse.ArgumentParser(description=__doc__)
     commands = cli.add_subparsers(dest="command", required=True)
     go = commands.add_parser("run")
@@ -1516,7 +2165,7 @@ def parser():
     return cli
 
 
-def main(argv=None):
+def main(argv: Sequence[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
         if args.command == "run":

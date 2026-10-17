@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import subprocess
 import sys
@@ -5,19 +7,21 @@ import textwrap
 import threading
 import unittest
 import weakref
+from collections.abc import Callable
 from unittest.mock import patch
 
 import numpy as np
+from numpy.typing import NDArray
 
 from recsys.research import gpu
 from recsys.research.protocol import ResearchError
 
 
 class FakeCuda:
-    instances = []
+    instances: list[FakeCuda] = []
     fail_next_upload = False
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.closed = False
         self.uploads = 0
         self.fail_upload = FakeCuda.fail_next_upload
@@ -32,7 +36,7 @@ class FakeCuda:
         self.peak_reserved = 0
         FakeCuda.instances.append(self)
 
-    def open(self):
+    def open(self) -> tuple[gpu.GpuMetadata, int]:
         return (
             {
                 "backend": "cupy",
@@ -50,10 +54,10 @@ class FakeCuda:
             256,
         )
 
-    def used_bytes(self):
+    def used_bytes(self) -> int:
         return self.current_used + self.base_used
 
-    def _track(self, value):
+    def _track(self, value: NDArray[np.float64]) -> NDArray[np.float64]:
         size = value.nbytes
         self.current_used += size
         self.reserved = max(self.reserved, self.used_bytes())
@@ -62,10 +66,10 @@ class FakeCuda:
         weakref.finalize(value, self._free, size)
         return value
 
-    def _free(self, size):
+    def _free(self, size: int) -> None:
         self.current_used -= size
 
-    def memory_usage(self):
+    def memory_usage(self) -> gpu.GpuMemory:
         return {
             "pool_used_bytes": self.used_bytes(),
             "pool_reserved_bytes": self.reserved,
@@ -74,7 +78,7 @@ class FakeCuda:
             "pool_peak_reserved_bytes": self.peak_reserved,
         }
 
-    def upload(self, value):
+    def upload(self, value: NDArray[np.float64]) -> NDArray[np.float64]:
         self.uploads += 1
         if self.oom:
             raise MemoryError("private CUDA out of memory")
@@ -82,24 +86,24 @@ class FakeCuda:
             raise RuntimeError("private CUDA failure")
         return self._track(value.copy())
 
-    def dot(self, left, right):
+    def dot(self, left: NDArray[np.float64], right: NDArray[np.float64]) -> NDArray[np.float64]:
         if self.oom:
             raise MemoryError("private CUDA out of memory")
         if self.fail_dot:
             raise RuntimeError("private CUDA failure")
         return self._track(left @ right.T)
 
-    def download(self, value):
+    def download(self, value: NDArray[np.float64]) -> NDArray[np.float64]:
         return value.copy()
 
-    def close(self):
+    def close(self) -> None:
         self.closed = True
         if self.fail_close:
             raise RuntimeError("private CUDA cleanup failure")
 
 
 class CoreTests(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.assertIsNone(gpu._SESSION)
         FakeCuda.instances.clear()
         FakeCuda.fail_next_upload = False
@@ -109,15 +113,15 @@ class CoreTests(unittest.TestCase):
         self.features = np.asarray([[1.0, 2.0], [2.0, 1.0]])
         self.left = np.asarray([[2.0, 1.0]])
 
-    def tearDown(self):
+    def tearDown(self) -> None:
         self.assertIsNone(gpu._SESSION)
 
-    def assert_code(self, code, callable_):
+    def assert_code(self, code: str, callable_: Callable[[], object]) -> None:
         with self.assertRaises(ResearchError) as caught:
             callable_()
         self.assertEqual(str(caught.exception), code)
 
-    def test_import_has_no_array_or_cuda_side_effects(self):
+    def test_import_has_no_array_or_cuda_side_effects(self) -> None:
         code = (
             "import os, sys; before = set(os.listdir('/proc/self/fd')); "
             "import recsys.research.gpu as gpu; "
@@ -129,13 +133,13 @@ class CoreTests(unittest.TestCase):
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
 
-    def test_missing_extra_and_platform_are_unavailable(self):
+    def test_missing_extra_and_platform_are_unavailable(self) -> None:
         with patch.object(gpu, "_new_adapter", side_effect=ModuleNotFoundError("cupy")):
             self.assert_code("research_gpu_unavailable", gpu.probe_gpu)
         with patch.object(gpu.sys, "platform", "darwin"):
             self.assert_code("research_gpu_unavailable", gpu.probe_gpu)
 
-    def test_memory_usage_tracks_short_lived_peak_and_resets(self):
+    def test_memory_usage_tracks_short_lived_peak_and_resets(self) -> None:
         self.assert_code("research_gpu_closed", gpu.gpu_memory_usage)
         with gpu.gpu_execution():
             first = gpu.gpu_memory_usage()
@@ -169,7 +173,7 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(gpu.gpu_memory_usage()["pool_peak_used_bytes"], 0)
         self.assertEqual(len(FakeCuda.instances), 2)
 
-    def test_metadata_copy_strict_expected_and_nested_probe(self):
+    def test_metadata_copy_strict_expected_and_nested_probe(self) -> None:
         with gpu.gpu_execution() as metadata:
             expected = dict(metadata)
             metadata["device_name"] = "tampered"
@@ -177,22 +181,24 @@ class CoreTests(unittest.TestCase):
                 self.assertEqual(nested, expected)
                 self.assertEqual(gpu.probe_gpu(), expected)
             self.assertEqual(len(FakeCuda.instances), 1)
-            for invalid in (
+            invalid_cases: tuple[object, ...] = (
                 {**expected, "query_batch_size": True},
                 {**expected, "device_name": "wrong"},
                 {**expected, "extra": 1},
                 [],
                 None,
-            ):
+            )
+            for invalid in invalid_cases:
                 if invalid is None:
                     continue
-                self.assert_code(
-                    "research_backend_mismatch",
-                    lambda invalid=invalid: gpu.gpu_execution(invalid).__enter__(),
-                )
+
+                def acquire_invalid() -> object:
+                    return gpu.gpu_execution(invalid).__enter__()
+
+                self.assert_code("research_backend_mismatch", acquire_invalid)
         self.assertTrue(FakeCuda.instances[0].closed)
 
-    def test_inputs_outputs_and_closed_state(self):
+    def test_inputs_outputs_and_closed_state(self) -> None:
         with gpu.CupyDenseDots(self.features) as dots:
             self.assertEqual(dots.dot(self.left).tolist(), [[4.0, 5.0]])
             for bad in (
@@ -203,32 +209,42 @@ class CoreTests(unittest.TestCase):
                 np.zeros((129, 2)),
                 [[1.0, 2.0]],
             ):
-                self.assert_code("research_gpu_input_invalid", lambda bad=bad: dots.dot(bad))
+
+                def dot_invalid() -> object:
+                    return dots.dot(bad)  # type: ignore[arg-type]  # Invalid matrix under test.
+
+                self.assert_code("research_gpu_input_invalid", dot_invalid)
             for bad in (
                 self.features.astype(np.float32),
                 np.asarray([[float("nan"), 1.0]]),
                 np.zeros((0, 2)),
                 self.features[:, ::-1],
             ):
-                self.assert_code(
-                    "research_gpu_input_invalid", lambda bad=bad: gpu.CupyDenseDots(bad)
-                )
+
+                def construct_invalid() -> object:
+                    return gpu.CupyDenseDots(bad)  # type: ignore[arg-type]  # Invalid matrix under test.
+
+                self.assert_code("research_gpu_input_invalid", construct_invalid)
         dots.close()
         self.assert_code("research_gpu_closed", lambda: dots.dot(self.left))
 
-    def test_two_dots_share_session_and_constructor_failure_unwinds(self):
+    def test_two_dots_share_session_and_constructor_failure_unwinds(self) -> None:
         first = gpu.CupyDenseDots(self.features)
         second = gpu.CupyDenseDots(self.features)
         try:
             self.assertEqual(len(FakeCuda.instances), 1)
-            self.assertEqual(gpu._SESSION.refs, 2)
+            session = gpu._SESSION
+            assert session is not None
+            self.assertEqual(session.refs, 2)
             first.close()
             self.assertEqual(second.dot(self.left).tolist(), [[4.0, 5.0]])
             FakeCuda.instances[0].base_used = 240
             self.assert_code(
                 "research_gpu_resource_limit", lambda: gpu.CupyDenseDots(self.features)
             )
-            self.assertEqual(gpu._SESSION.refs, 1)
+            session = gpu._SESSION
+            assert session is not None
+            self.assertEqual(session.refs, 1)
         finally:
             second.close()
         self.assertTrue(FakeCuda.instances[0].closed)
@@ -236,7 +252,7 @@ class CoreTests(unittest.TestCase):
         self.assert_code("research_gpu_execution_failed", lambda: gpu.CupyDenseDots(self.features))
         self.assertTrue(FakeCuda.instances[-1].closed)
 
-    def test_dot_failure_keeps_handle_reusable_and_releases(self):
+    def test_dot_failure_keeps_handle_reusable_and_releases(self) -> None:
         with gpu.CupyDenseDots(self.features) as dots:
             fake = FakeCuda.instances[-1]
             fake.fail_dot = True
@@ -245,7 +261,7 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(dots.dot(self.left).tolist(), [[4.0, 5.0]])
         self.assertTrue(fake.closed)
 
-    def test_out_of_memory_and_cleanup_error_release_session(self):
+    def test_out_of_memory_and_cleanup_error_release_session(self) -> None:
         with gpu.CupyDenseDots(self.features) as dots:
             fake = FakeCuda.instances[-1]
             fake.oom = True
@@ -259,7 +275,7 @@ class CoreTests(unittest.TestCase):
         with gpu.CupyDenseDots(self.features) as next_dots:
             self.assertEqual(next_dots.dot(self.left).tolist(), [[4.0, 5.0]])
 
-    def test_constructor_control_flow_preserved_after_cleanup(self):
+    def test_constructor_control_flow_preserved_after_cleanup(self) -> None:
         for interruption in (KeyboardInterrupt(), SystemExit(17)):
             with self.subTest(interruption=type(interruption).__name__):
                 with patch.object(FakeCuda, "upload", side_effect=interruption):
@@ -271,7 +287,7 @@ class CoreTests(unittest.TestCase):
                 with gpu.CupyDenseDots(self.features) as again:
                     self.assertEqual(again.dot(self.left).tolist(), [[4.0, 5.0]])
 
-    def test_release_control_flow_preserved_and_lease_freed(self):
+    def test_release_control_flow_preserved_and_lease_freed(self) -> None:
         for interruption in (KeyboardInterrupt(), SystemExit(23)):
             with self.subTest(interruption=type(interruption).__name__):
                 dots = gpu.CupyDenseDots(self.features)
@@ -284,7 +300,7 @@ class CoreTests(unittest.TestCase):
                 with gpu.CupyDenseDots(self.features) as again:
                     self.assertEqual(again.dot(self.left).tolist(), [[4.0, 5.0]])
 
-    def test_acquire_control_flow_preserved_after_cleanup(self):
+    def test_acquire_control_flow_preserved_after_cleanup(self) -> None:
         for interruption in (KeyboardInterrupt(), SystemExit(31)):
             with self.subTest(interruption=type(interruption).__name__):
                 with patch.object(FakeCuda, "open", side_effect=interruption):
@@ -296,7 +312,7 @@ class CoreTests(unittest.TestCase):
                 with gpu.gpu_execution():
                     self.assertIsNotNone(gpu._SESSION)
 
-    def test_real_fork_cannot_release_parent_lease(self):
+    def test_real_fork_cannot_release_parent_lease(self) -> None:
         # Fork before NumPy or CUDA initializes any worker threads.
         code = textwrap.dedent("""\
             import fcntl
@@ -334,11 +350,11 @@ class CoreTests(unittest.TestCase):
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
 
-    def test_thread_and_fork_pid_guards(self):
+    def test_thread_and_fork_pid_guards(self) -> None:
         with gpu.CupyDenseDots(self.features) as dots:
             found = []
 
-            def other_thread():
+            def other_thread() -> None:
                 for call in (
                     gpu.probe_gpu,
                     gpu.gpu_memory_usage,
@@ -364,12 +380,12 @@ class CoreTests(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get("ARB_RESEARCH_GPU_TEST") == "1", "GPU hardware opt-in")
 class HardwareTests(unittest.TestCase):
-    def assert_code(self, code, callable_):
+    def assert_code(self, code: str, callable_: Callable[[], object]) -> None:
         with self.assertRaises(ResearchError) as caught:
             callable_()
         self.assertEqual(str(caught.exception), code)
 
-    def test_float64_parity_shared_pool_and_cleanup(self):
+    def test_float64_parity_shared_pool_and_cleanup(self) -> None:
         metadata = gpu.probe_gpu()  # Opt-in missing hardware must fail.
         self.assert_code("research_gpu_closed", gpu.gpu_memory_usage)
         self.assertEqual(metadata["backend"], "cupy")
@@ -404,9 +420,12 @@ class HardwareTests(unittest.TestCase):
                     self.assertGreaterEqual(
                         measured["pool_peak_reserved_bytes"], measured["pool_reserved_bytes"]
                     )
-                    self.assertEqual(
-                        measured["pool_limit_bytes"], gpu._SESSION.adapter.pool.get_limit()
-                    )
+                    session = gpu._SESSION
+                    assert session is not None
+                    adapter = session.adapter
+                    assert isinstance(adapter, gpu._CudaAdapter)
+                    assert adapter.pool is not None
+                    self.assertEqual(measured["pool_limit_bytes"], adapter.pool.get_limit())
                     self.assertEqual(output.shape, (128, 128))
                     self.assertEqual(output.dtype, np.float64)
                     self.assertTrue(np.isfinite(output).all())
@@ -416,8 +435,8 @@ class HardwareTests(unittest.TestCase):
                         self.assertEqual(
                             ties.dot(np.asarray([[1.0, 0.0]])).tolist(), [[1.0, 1.0, 0.0]]
                         )
-                    self.assertLessEqual(gpu._SESSION.adapter.pool.get_limit(), gpu._POOL_MAX)
-                    self.assertLessEqual(gpu._SESSION.adapter.used_bytes(), gpu._SESSION.limit)
+                    self.assertLessEqual(adapter.pool.get_limit(), gpu._POOL_MAX)
+                    self.assertLessEqual(adapter.used_bytes(), session.limit)
                 finally:
                     second.close()
                     first.close()
@@ -434,7 +453,7 @@ class HardwareTests(unittest.TestCase):
             )
             self.assertEqual(again.dot(np.asarray([[2.0]])).tolist(), [[2.0]])
 
-    def test_other_process_busy_then_acquires(self):
+    def test_other_process_busy_then_acquires(self) -> None:
         gpu.probe_gpu()
         code = (
             "from recsys.research.gpu import probe_gpu; "

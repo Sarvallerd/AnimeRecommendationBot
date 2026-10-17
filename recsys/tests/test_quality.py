@@ -7,35 +7,72 @@ import tempfile
 import unittest
 from importlib import resources
 from pathlib import Path
+from typing import TypedDict, cast
 
-from recsys.historical.genre_baseline import QualityError, genre_neighbors, run_baseline
+from recsys.historical.genre_baseline import (
+    GenreAnime,
+    GenreQuery,
+    GenreSpec,
+    QualityError,
+    genre_neighbors,
+    run_baseline,
+)
 
 
-def canonical(value):
+class QualitySpec(GenreSpec):
+    source_provenance: dict[str, str]
+    registry_sha256: str
+
+
+class QualityCatalog(TypedDict):
+    schema_version: int
+    anime: dict[str, GenreAnime]
+
+
+class QualityBaselineQuery(TypedDict):
+    status: str
+    recommendations: list[dict[str, object]]
+
+
+class QualityBaseline(TypedDict):
+    queries: list[QualityBaselineQuery]
+    query_set_sha256: str
+
+
+class QualityTemplate(TypedDict):
+    judgments: list[dict[str, object]]
+    runs: list[dict[str, object]]
+
+
+def canonical(value: object) -> bytes:
     return (
         json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
     ).encode("utf-8")
 
 
 class QualityTests(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        self.catalog = {
+        self.catalog: QualityCatalog = {
             "schema_version": 1,
             "anime": {
                 str(mal_id): {"title": f"Title {mal_id}", "genres": ["Action"]}
                 for mal_id in range(1, 21)
             },
         }
-        self.spec = json.loads(
+        spec_value: object = json.loads(
             resources.files("recsys")
             .joinpath("resources/queries/quality_queries_v1.json")
             .read_bytes()
         )
+        assert isinstance(spec_value, dict)
+        assert isinstance(spec_value.get("queries"), list)
+        assert isinstance(spec_value.get("source_provenance"), dict)
+        self.spec = cast("QualitySpec", spec_value)
         self.spec["query_set_version"] = "fixture-v1"
-        self.spec["queries"] = [
+        queries: list[GenreQuery] = [
             {
                 "mal_id": mal_id,
                 "title": f"Title {mal_id}",
@@ -46,17 +83,18 @@ class QualityTests(unittest.TestCase):
             }
             for mal_id in range(1, 21)
         ]
+        self.spec["queries"] = queries
         self._save_catalog()
 
-    def _save_catalog(self):
+    def _save_catalog(self) -> None:
         raw = canonical(self.catalog)
         self.path = self.root / "catalog.json"
         self.path.write_bytes(raw)
         self.spec["catalog_sha256"] = hashlib.sha256(raw).hexdigest()
         self.spec["catalog_count"] = len(self.catalog["anime"])
 
-    def test_jaccard_fraction_ties_self_limit_and_distinct_duplicate_titles(self):
-        anime = {
+    def test_jaccard_fraction_ties_self_limit_and_distinct_duplicate_titles(self) -> None:
+        anime: dict[str, GenreAnime] = {
             "1": {"title": "Same", "genres": ["A", "B"]},
             "2": {"title": "Same", "genres": ["A"]},
             "10": {"title": "Ten", "genres": ["B"]},
@@ -85,7 +123,7 @@ class QualityTests(unittest.TestCase):
             [2, 10],
         )
 
-    def test_outputs_are_deterministic_linked_and_unjudged(self):
+    def test_outputs_are_deterministic_linked_and_unjudged(self) -> None:
         self.catalog["anime"]["2"]["title"] = "Title 1"
         self.spec["queries"][1]["title"] = "Title 1"
         self._save_catalog()
@@ -97,8 +135,14 @@ class QualityTests(unittest.TestCase):
         self.assertEqual(template_raw, (second.parent / "relevance-template.json").read_bytes())
         self.assertEqual(baseline_raw, canonical(json.loads(baseline_raw)))
         self.assertEqual(template_raw, canonical(json.loads(template_raw)))
-        baseline = json.loads(baseline_raw)
-        template = json.loads(template_raw)
+        baseline_value: object = json.loads(baseline_raw)
+        template_value: object = json.loads(template_raw)
+        assert isinstance(baseline_value, dict) and isinstance(baseline_value.get("queries"), list)
+        assert isinstance(template_value, dict) and isinstance(
+            template_value.get("judgments"), list
+        )
+        baseline = cast("QualityBaseline", baseline_value)
+        template = cast("QualityTemplate", template_value)
         self.assertEqual(len(baseline["queries"]), 20)
         self.assertEqual(sum(len(row["recommendations"]) for row in baseline["queries"]), 100)
         self.assertEqual(len(template["judgments"]), 100)
@@ -121,13 +165,19 @@ class QualityTests(unittest.TestCase):
             self.assertIsNone(row["rationale"])
         self.assertEqual(template["judgments"][0]["candidate_title"], "Title 1")
 
-    def test_empty_genres_and_no_positive_candidates_keep_short_lists(self):
+    def test_empty_genres_and_no_positive_candidates_keep_short_lists(self) -> None:
         self.catalog["anime"]["1"]["genres"] = []
         self.catalog["anime"]["2"]["genres"] = ["Mystery"]
         self._save_catalog()
         path = run_baseline(self.path, self.root / "short", query_set=self.spec)
-        baseline = json.loads(path.read_bytes())
-        template = json.loads((path.parent / "relevance-template.json").read_bytes())
+        baseline_value: object = json.loads(path.read_bytes())
+        template_value: object = json.loads((path.parent / "relevance-template.json").read_bytes())
+        assert isinstance(baseline_value, dict) and isinstance(baseline_value.get("queries"), list)
+        assert isinstance(template_value, dict) and isinstance(
+            template_value.get("judgments"), list
+        )
+        baseline = cast("QualityBaseline", baseline_value)
+        template = cast("QualityTemplate", template_value)
         self.assertEqual(baseline["queries"][0]["status"], "empty_genres")
         self.assertEqual(baseline["queries"][1]["status"], "no_positive_candidates")
         self.assertEqual(baseline["queries"][0]["recommendations"], [])
@@ -135,7 +185,7 @@ class QualityTests(unittest.TestCase):
         self.assertEqual(len(template["judgments"]), 90)
         self.assertTrue(all(len(row["recommendations"]) == 5 for row in baseline["queries"][2:]))
 
-    def test_invalid_specs_and_catalog_fail_before_writes(self):
+    def test_invalid_specs_and_catalog_fail_before_writes(self) -> None:
         cases = []
         duplicate = copy.deepcopy(self.spec)
         duplicate["queries"][1]["mal_id"] = 1
@@ -146,9 +196,10 @@ class QualityTests(unittest.TestCase):
         wrong_band = copy.deepcopy(self.spec)
         wrong_band["queries"][0]["popularity_band"] = "5001+"
         cases.append(wrong_band)
-        for invalid_band in ([], {}):
+        invalid_bands: tuple[object, ...] = ([], {})
+        for invalid_band in invalid_bands:
             wrong_band_type = copy.deepcopy(self.spec)
-            wrong_band_type["queries"][0]["popularity_band"] = invalid_band
+            wrong_band_type["queries"][0]["popularity_band"] = invalid_band  # type: ignore[typeddict-item]  # Invalid payload under test.
             cases.append(wrong_band_type)
         wrong_title = copy.deepcopy(self.spec)
         wrong_title["queries"][0]["title"] = "Another title"
@@ -168,13 +219,17 @@ class QualityTests(unittest.TestCase):
             run_baseline(self.path, self.root / "bad-hash", query_set=self.spec)
         self.assertFalse((self.root / "bad-hash").exists())
 
-    def test_packaged_spec_provenance_and_frozen_ids(self):
+    def test_packaged_spec_provenance_and_frozen_ids(self) -> None:
         raw = (
             resources.files("recsys")
             .joinpath("resources/queries/quality_queries_v1.json")
             .read_bytes()
         )
-        spec = json.loads(raw)
+        spec_value: object = json.loads(raw)
+        assert isinstance(spec_value, dict)
+        assert isinstance(spec_value.get("queries"), list)
+        assert isinstance(spec_value.get("source_provenance"), dict)
+        spec = cast("QualitySpec", spec_value)
         self.assertEqual(raw, canonical(spec))
         self.assertEqual(
             [row["mal_id"] for row in spec["queries"]],

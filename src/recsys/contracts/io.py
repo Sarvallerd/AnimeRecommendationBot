@@ -3,6 +3,7 @@
 import ctypes
 import os
 import zlib
+from collections.abc import Iterator
 from pathlib import Path
 
 
@@ -27,7 +28,7 @@ def publish_no_replace(stage: Path, target: Path) -> None:
     fsync_directory(target.parent)
 
 
-def iter_single_member_gzip(path: Path):
+def iter_single_member_gzip(path: Path) -> Iterator[bytes]:
     """Yield one gzip member's lines and refuse trailing members or bytes."""
     decompressor = zlib.decompressobj(31)
     pending = b""

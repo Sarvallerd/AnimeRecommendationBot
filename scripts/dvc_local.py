@@ -169,13 +169,13 @@ def _verify_ignores(repo: Path) -> None:
         "data/snapshots/sample.npz",
         "data/snapshots/glove.6B.300d.txt",
     ):
-        result = subprocess.run(
+        payload_check = subprocess.run(
             [sys.executable, "-m", "dvc", "check-ignore", item],
             cwd=repo,
             capture_output=True,
             text=True,
         )
-        if result.returncode != 1 or result.stdout.strip():
+        if payload_check.returncode != 1 or payload_check.stdout.strip():
             raise StorageError(f"DVC must allow snapshot payloads: {item}")
 
 

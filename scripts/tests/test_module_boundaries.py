@@ -9,10 +9,23 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import cast
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "scripts"))
 from check_module_boundaries import check_repository  # noqa: E402
+
+
+def _object(value: object) -> dict[str, object]:
+    if not isinstance(value, dict) or any(not isinstance(key, str) for key in value):
+        raise AssertionError("fixture policy must be an object with string keys")
+    return cast("dict[str, object]", value)
+
+
+def _items(value: object) -> list[object]:
+    if not isinstance(value, list):
+        raise AssertionError("fixture policy must contain a list")
+    return cast("list[object]", value)
 
 
 class BoundariesTest(unittest.TestCase):
@@ -38,10 +51,10 @@ class BoundariesTest(unittest.TestCase):
     def reset(self, module: str) -> None:
         self.source(module).write_bytes((REPO / "src/recsys" / f"{module}.py").read_bytes())
 
-    def policy(self) -> dict:
-        return json.loads((self.root / "scripts/module_boundaries.json").read_text())
+    def policy(self) -> dict[str, object]:
+        return _object(json.loads((self.root / "scripts/module_boundaries.json").read_text()))
 
-    def save_policy(self, policy: dict) -> None:
+    def save_policy(self, policy: dict[str, object]) -> None:
         (self.root / "scripts/module_boundaries.json").write_text(json.dumps(policy))
 
     def assert_category(self, category: str) -> None:
@@ -150,7 +163,7 @@ class BoundariesTest(unittest.TestCase):
         source.write_text(content)
         self.assert_category("dynamic_dispatch_changed")
         policy = self.policy()
-        policy["dynamic_dispatch"]["source_sha256"] = hashlib.sha256(
+        _object(policy["dynamic_dispatch"])["source_sha256"] = hashlib.sha256(
             source.read_bytes()
         ).hexdigest()
         self.save_policy(policy)
@@ -165,7 +178,7 @@ class BoundariesTest(unittest.TestCase):
         )
         source.write_text(content)
         policy = self.policy()
-        policy["dynamic_dispatch"]["source_sha256"] = hashlib.sha256(
+        _object(policy["dynamic_dispatch"])["source_sha256"] = hashlib.sha256(
             source.read_bytes()
         ).hexdigest()
         self.save_policy(policy)
@@ -194,12 +207,12 @@ class BoundariesTest(unittest.TestCase):
         self.assert_category("config_invalid")
         policy_path.write_bytes(original)
         policy = self.policy()
-        policy["subsystems"]["data"]["depends_on"].append("missing_group")
+        _items(_object(_object(policy["subsystems"])["data"])["depends_on"]).append("missing_group")
         self.save_policy(policy)
         self.assert_category("config_invalid")
         policy_path.write_bytes(original)
         policy = self.policy()
-        policy["exceptions"].append(
+        _items(policy["exceptions"]).append(
             {
                 "source": "recsys.release.catalog",
                 "target": "recsys.research.models.dispatch",
@@ -223,7 +236,9 @@ class BoundariesTest(unittest.TestCase):
         (package / "__init__.py").write_text("__version__ = '1'\nfrom . import child\n")
         (package / "child.py").write_text("from .. import __version__\n")
         policy = self.policy()
-        policy["subsystems"]["core"]["modules"].extend(["recsys.nested", "recsys.nested.child"])
+        _items(_object(_object(policy["subsystems"])["core"])["modules"]).extend(
+            ["recsys.nested", "recsys.nested.child"]
+        )
         self.save_policy(policy)
         self.assertEqual(check_repository(self.root), [])
 

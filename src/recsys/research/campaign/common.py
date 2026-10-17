@@ -14,6 +14,7 @@ import stat
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Never
 
 VARIANTS = (
     "popularity",
@@ -50,31 +51,31 @@ RSS_LIMIT_BYTES = 8 * 1024**3
 _SAFE_CODE = re.compile(r"research_[a-z0-9_]+\Z")
 
 
-def _fail(code="research_campaign_invalid"):
+def _fail(code: str = "research_campaign_invalid") -> Never:
     from recsys.research.protocol import fail
 
     fail(code)
 
 
-def _canonical(value):
+def _canonical(value: object) -> bytes:
     from recsys.contracts.bundle import canonical_bytes
 
     return canonical_bytes(value)
 
 
-def _digest(raw):
+def _digest(raw: bytes) -> str:
     return "sha256:" + hashlib.sha256(raw).hexdigest()
 
 
-def _now():
+def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _iso(value):
+def _iso(value: datetime) -> str:
     return value.isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
-def _parse_iso(value):
+def _parse_iso(value: object) -> datetime:
     if type(value) is not str or not value.endswith("Z"):
         _fail()
     try:
@@ -83,7 +84,7 @@ def _parse_iso(value):
         _fail()
 
 
-def _private_file(path, raw):
+def _private_file(path: str | Path, raw: bytes) -> None:
     path = Path(path)
     with open(path, "xb", opener=lambda name, flags: os.open(name, flags, 0o600)) as out:
         out.write(raw)
@@ -92,14 +93,15 @@ def _private_file(path, raw):
     _sync_dir(path.parent)
 
 
-def _replace_private(path, raw):
+def _replace_private(path: str | Path, raw: bytes) -> None:
+    path = Path(path)
     temporary = path.with_name("." + path.name + "." + uuid.uuid4().hex)
     _private_file(temporary, raw)
     os.replace(temporary, path)
     _sync_dir(path.parent)
 
 
-def _sync_dir(directory):
+def _sync_dir(directory: str | Path) -> None:
     fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
     try:
         os.fsync(fd)
@@ -107,7 +109,7 @@ def _sync_dir(directory):
         os.close(fd)
 
 
-def _read_private(path, *, limit=16 * 1024 * 1024):
+def _read_private(path: str | Path, *, limit: int = 16 * 1024 * 1024) -> tuple[object, bytes]:
     path = Path(path)
     if path.is_symlink() or not path.is_file():
         _fail()
@@ -124,7 +126,7 @@ def _read_private(path, *, limit=16 * 1024 * 1024):
     return value, raw
 
 
-def _touch_lock(path):
+def _touch_lock(path: Path) -> int:
     if path.is_symlink():
         _fail()
     fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
@@ -135,7 +137,7 @@ def _touch_lock(path):
     return fd
 
 
-def _ensure_private(directory):
+def _ensure_private(directory: str | Path) -> None:
     directory = Path(directory)
     if directory.exists():
         if directory.is_symlink() or not directory.is_dir() or directory.stat().st_mode & 0o077:
@@ -146,7 +148,7 @@ def _ensure_private(directory):
     _sync_dir(directory.parent)
 
 
-def _bytes_equal(left, right):
+def _bytes_equal(left: str | Path, right: str | Path) -> bool:
     with Path(left).open("rb") as one, Path(right).open("rb") as two:
         while True:
             a, b = one.read(1024 * 1024), two.read(1024 * 1024)

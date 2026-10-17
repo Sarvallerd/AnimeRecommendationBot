@@ -10,13 +10,30 @@ import urllib.error
 import urllib.request
 import zipfile
 import zlib
+from collections.abc import Iterable, Iterator
 from pathlib import Path
+from typing import Protocol, TypedDict
 
-from recsys.data.sources import SourceError, load_registry, validate_registry
+from recsys.data.sources import (
+    SourceDescriptor,
+    SourceError,
+    SourceRegistry,
+    load_registry,
+    validate_registry,
+)
 
 CHUNK_SIZE = 1024 * 1024
 TIMEOUT_SECONDS = 60
 MANIFEST_NAME = "source-manifest.json"
+
+
+class ExpectedFile(TypedDict):
+    size: int
+    sha256: str
+
+
+class ReadableBytes(Protocol):
+    def read(self, size: int) -> bytes: ...
 
 
 def _digest_file(path: Path) -> tuple[int, str]:
@@ -29,7 +46,7 @@ def _digest_file(path: Path) -> tuple[int, str]:
     return size, digest.hexdigest()
 
 
-def _verify_existing(path: Path, source: dict) -> bool:
+def _verify_existing(path: Path, source: ExpectedFile) -> bool:
     if path.is_symlink() or (path.exists() and not path.is_file()):
         raise SourceError(f"unsafe source target: {path}")
     if not path.exists():
@@ -44,7 +61,7 @@ def _verify_existing(path: Path, source: dict) -> bool:
     return True
 
 
-def _write_verified(path: Path, source: dict, chunks) -> None:
+def _write_verified(path: Path, source: ExpectedFile, chunks: Iterable[bytes]) -> None:
     """Stream to a sibling temp file, then install only the exact expected bytes."""
     temp_path = None
     try:
@@ -76,12 +93,12 @@ def _write_verified(path: Path, source: dict, chunks) -> None:
             temp_path.unlink(missing_ok=True)
 
 
-def _chunks(stream):
+def _chunks(stream: ReadableBytes) -> Iterator[bytes]:
     while chunk := stream.read(CHUNK_SIZE):
         yield chunk
 
 
-def _download(path: Path, source: dict) -> None:
+def _download(path: Path, source: SourceDescriptor) -> None:
     try:
         with urllib.request.urlopen(source["url"], timeout=TIMEOUT_SECONDS) as stream:
             _write_verified(path, source, _chunks(stream))
@@ -93,7 +110,7 @@ def _download(path: Path, source: dict) -> None:
         raise SourceError(f"download failed for {path}: {detail}") from exc
 
 
-def _extract(path: Path, source: dict, archive_path: Path) -> None:
+def _extract(path: Path, source: SourceDescriptor, archive_path: Path) -> None:
     try:
         with zipfile.ZipFile(archive_path) as archive:
             matches = [item for item in archive.infolist() if item.filename == source["member"]]
@@ -125,7 +142,7 @@ def _extract(path: Path, source: dict, archive_path: Path) -> None:
         raise SourceError(f"cannot extract {source['member']} from {archive_path}: {exc}") from exc
 
 
-def _check_existing_manifest(path: Path, expected: dict) -> None:
+def _check_existing_manifest(path: Path, expected: dict[str, object]) -> None:
     """A foreign or damaged success marker is evidence to preserve, not overwrite."""
     if path.is_symlink() or (path.exists() and not path.is_file()):
         raise SourceError(f"unsafe manifest target: {path}")
@@ -151,7 +168,7 @@ def obtain(
     *,
     offline: bool = False,
     snapshot: str | None = None,
-    registry: dict | None = None,
+    registry: SourceRegistry | None = None,
     registry_sha256: str | None = None,
 ) -> Path:
     """Install all registry sources and return the verified manifest path.
@@ -199,7 +216,7 @@ def obtain(
         else:
             archive = by_id[source["archive_id"]]
             _extract(path, source, data_dir / archive["filename"])
-    manifest_source = {
+    manifest_source: ExpectedFile = {
         "size": 0,
         "sha256": "",
     }

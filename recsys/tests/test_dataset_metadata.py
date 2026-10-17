@@ -5,17 +5,17 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from recsys.data.metadata import DETAIL_COLUMNS, normalize_metadata
+from recsys.data.metadata import DETAIL_COLUMNS, MetadataResult, normalize_metadata
 
 
-def row(mal, title, **values):
+def row(mal: str | int, title: str, **values: str) -> list[str]:
     result = {name: "" for name in DETAIL_COLUMNS}
     result.update(mal_id=str(mal), title=title, **values)
     return [result[name] for name in DETAIL_COLUMNS]
 
 
 class MetadataTests(unittest.TestCase):
-    def run_rows(self, rows):
+    def run_rows(self, rows: list[list[str]]) -> MetadataResult:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "details.csv"
             with path.open("w", encoding="utf-8", newline="") as stream:
@@ -24,7 +24,7 @@ class MetadataTests(unittest.TestCase):
                 writer.writerows(rows)
             return normalize_metadata(path)
 
-    def test_field_rules_and_untrusted_lists(self):
+    def test_field_rules_and_untrusted_lists(self) -> None:
         parsed = self.run_rows(
             [
                 row(
@@ -62,7 +62,7 @@ class MetadataTests(unittest.TestCase):
         self.assertEqual(parsed.qa["synopsis_boilerplate"], 1)
         self.assertEqual(parsed.qa["invalid_genres"], 1)
 
-    def test_empty_list_is_valid_and_nonempty_projection_keeps_order(self):
+    def test_empty_list_is_valid_and_nonempty_projection_keeps_order(self) -> None:
         parsed = self.run_rows(
             [row(1, "One", genres="[]"), row(2, "Two", genres="['Action', 'Drama', 'Action']")]
         )
@@ -70,7 +70,7 @@ class MetadataTests(unittest.TestCase):
         self.assertEqual(parsed.qa.get("invalid_genres", 0), 0)
         self.assertEqual(parsed.catalog["anime"]["2"]["genres"], ["Action", "Drama"])
 
-    def test_duplicate_normalized_ids_exclude_all_versions(self):
+    def test_duplicate_normalized_ids_exclude_all_versions(self) -> None:
         parsed = self.run_rows(
             [row("01", "First"), row("1", "Second"), row(2, ""), row(3, "Three")]
         )
@@ -78,7 +78,7 @@ class MetadataTests(unittest.TestCase):
         self.assertEqual(parsed.qa["duplicate_mal_ids"], 1)
         self.assertEqual(parsed.qa["missing_title"], 1)
 
-    def test_bad_header_and_extra_cell_fail_without_values(self):
+    def test_bad_header_and_extra_cell_fail_without_values(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "details.csv"
             path.write_text("wrong,header\nprivate-canary,1\n")

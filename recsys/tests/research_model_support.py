@@ -1,9 +1,11 @@
 """Small private-fixture helpers for the ML-02 model and prediction boundary."""
 
+from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
+from pathlib import Path
 from unittest.mock import patch
 
-from research_support import ResearchFixture
+from research_support import FixtureLock, ResearchFixture
 
 from recsys.research.artifacts import identity
 from recsys.research.models.package import fit_model
@@ -11,11 +13,11 @@ from recsys.research.predict import predict_validation
 
 
 class ModelFixture(ResearchFixture):
-    def make_prepared(self):
+    def make_prepared(self) -> tuple[Path, str]:
         prepared = self.prepare()
         return prepared, identity(prepared / "prepare-manifest.json")
 
-    def fit_popularity(self, prepared, prepared_identity, name="model"):
+    def fit_popularity(self, prepared: Path, prepared_identity: str, name: str = "model") -> Path:
         directory = self.root / name
         with patch_release_info(self.lock):
             fit_model(
@@ -27,7 +29,9 @@ class ModelFixture(ResearchFixture):
             )
         return directory
 
-    def predict(self, prepared, prepared_identity, model, name="prediction"):
+    def predict(
+        self, prepared: Path, prepared_identity: str, model: Path, name: str = "prediction"
+    ) -> Path:
         directory = self.root / name
         with patch_release_info(self.lock):
             predict_validation(
@@ -37,7 +41,7 @@ class ModelFixture(ResearchFixture):
 
 
 @contextmanager
-def patch_release_info(lock):
+def patch_release_info(lock: FixtureLock) -> Iterator[None]:
     """Inject a tiny lock at each direct source-contract import owner."""
     with ExitStack() as stack:
         for owner in (

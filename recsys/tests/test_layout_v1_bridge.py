@@ -7,16 +7,52 @@ import json
 import shutil
 import tempfile
 import unittest
+from collections.abc import Callable
 from pathlib import Path
+from typing import TypedDict, cast
 
 from recsys.contracts.bundle import canonical_bytes, check_bundle
 from recsys.contracts.provenance import LEGACY_V1_SOURCE_SHA256
-from recsys.data.aliases import AliasError, AliasSpec, validate_aliases
+from recsys.data.aliases import AliasError, AliasSpec, AliasSummary, validate_aliases
 from recsys.data.dataset import DatasetError, DatasetSpec, validate_dataset
-from recsys.release.catalog import ReleaseError, validate_release
+from recsys.release.catalog import ReleaseError, ReleaseSummary, validate_release
 from recsys.release.prepare import PrepareError, prepare_release
 
 FROZEN = Path(__file__).with_name("fixtures") / "layout_v1"
+
+
+class V1Identity(TypedDict):
+    identity: str
+
+
+class V1Inputs(TypedDict):
+    base: V1Identity
+    aliases: V1Identity
+    catalog_release: V1Identity
+
+
+class V1Reference(TypedDict):
+    bundle_identity: str
+
+
+class V1Lock(TypedDict):
+    inputs: V1Inputs
+    reference: V1Reference
+
+
+def _object_json(raw: bytes) -> dict[str, object]:
+    value: object = json.loads(raw)
+    assert isinstance(value, dict)
+    return cast("dict[str, object]", value)
+
+
+def _set_path(value: dict[str, object], path: tuple[str, ...], replacement: object) -> None:
+    current = value
+    for key in path[:-1]:
+        child = current[key]
+        assert isinstance(child, dict)
+        current = child
+    current[path[-1]] = replacement
 
 
 class LegacyLayoutBridgeTests(unittest.TestCase):
@@ -63,7 +99,10 @@ class LegacyLayoutBridgeTests(unittest.TestCase):
         )
         self.glove_registry = (specs / "glove-registry.json").read_bytes()
         self.lock_bytes = (FROZEN / "test-lock.json").read_bytes()
-        self.lock = json.loads(self.lock_bytes)
+        lock_value = _object_json(self.lock_bytes)
+        assert isinstance(lock_value.get("inputs"), dict)
+        assert isinstance(lock_value.get("reference"), dict)
+        self.lock = cast("V1Lock", lock_value)
         self.base = (
             self.root / "data/datasets" / self.lock["inputs"]["base"]["identity"].replace(":", "-")
         )
@@ -82,7 +121,7 @@ class LegacyLayoutBridgeTests(unittest.TestCase):
         )
         self.alias_data = self.root / "data/raw/nafiul-2026-v1"
 
-    def alias_summary(self):
+    def alias_summary(self) -> AliasSummary:
         return validate_aliases(
             self.aliases,
             data_dir=self.alias_data,
@@ -92,7 +131,7 @@ class LegacyLayoutBridgeTests(unittest.TestCase):
             _base_spec=self.base_spec,
         )
 
-    def release_summary(self):
+    def release_summary(self) -> ReleaseSummary:
         return validate_release(
             self.release,
             base_dir=self.base,
@@ -153,34 +192,32 @@ class LegacyLayoutBridgeTests(unittest.TestCase):
 
     def test_v1_dataset_source_keys_hash_version_and_package_are_authoritative(self) -> None:
         path = self.base / "dataset-manifest.json"
-        original = json.loads(path.read_bytes())
-        for mutate in (
-            lambda m: m["normalizer"]["code_files_sha256"].update({"dataset.py": "0" * 64}),
-            lambda m: m["normalizer"]["code_files_sha256"].update({"data/dataset.py": "0" * 64}),
-            lambda m: m["normalizer"].update(version="2"),
-            lambda m: m["producer"].update(package_version="0.2.0"),
-        ):
-            with self.subTest(mutate=mutate.__code__.co_firstlineno):
-                altered = json.loads(canonical_bytes(original))
-                mutate(altered)
+        original = _object_json(path.read_bytes())
+        mutations: tuple[tuple[tuple[str, ...], object], ...] = (
+            (("normalizer", "code_files_sha256", "dataset.py"), "0" * 64),
+            (("normalizer", "code_files_sha256", "data/dataset.py"), "0" * 64),
+            (("normalizer", "version"), "2"),
+            (("producer", "package_version"), "0.2.0"),
+        )
+        for field_path, replacement in mutations:
+            with self.subTest(field_path=field_path):
+                altered = _object_json(canonical_bytes(original))
+                _set_path(altered, field_path, replacement)
                 path.write_bytes(canonical_bytes(altered))
                 with self.assertRaisesRegex(DatasetError, "dataset_integrity_error"):
                     validate_dataset(self.base, _spec=self.base_spec)
         path.write_bytes(canonical_bytes(original))
 
     def test_v1_lock_rejects_rewritten_source_hash_key_and_package(self) -> None:
-        for mutate in (
-            lambda lock: lock["reference"]["producer"]["code_files_sha256"].update(
-                {"build.py": "0" * 64}
-            ),
-            lambda lock: lock["reference"]["producer"]["code_files_sha256"].update(
-                {"release/build.py": "0" * 64}
-            ),
-            lambda lock: lock["reference"]["producer"].update(package_version="0.2.0"),
-        ):
-            with self.subTest(mutate=mutate.__code__.co_firstlineno):
-                altered = json.loads(self.lock_bytes)
-                mutate(altered)
+        mutations: tuple[tuple[tuple[str, ...], object], ...] = (
+            (("reference", "producer", "code_files_sha256", "build.py"), "0" * 64),
+            (("reference", "producer", "code_files_sha256", "release/build.py"), "0" * 64),
+            (("reference", "producer", "package_version"), "0.2.0"),
+        )
+        for field_path, replacement in mutations:
+            with self.subTest(field_path=field_path):
+                altered = _object_json(self.lock_bytes)
+                _set_path(altered, field_path, replacement)
                 with self.assertRaisesRegex(PrepareError, "release_lock_invalid"):
                     prepare_release(
                         self.root / "data",
@@ -191,7 +228,7 @@ class LegacyLayoutBridgeTests(unittest.TestCase):
                     )
 
     def test_v1_alias_and_release_source_hashes_are_authoritative(self) -> None:
-        for path, key, validate, error in (
+        cases: tuple[tuple[Path, str, Callable[[], object], type[Exception]], ...] = (
             (self.aliases / "alias-manifest.json", "aliases.py", self.alias_summary, AliasError),
             (
                 self.release / "release-manifest.json",
@@ -199,16 +236,18 @@ class LegacyLayoutBridgeTests(unittest.TestCase):
                 self.release_summary,
                 ReleaseError,
             ),
-        ):
-            original = json.loads(path.read_bytes())
-            for mutator in (
-                lambda m: m["normalizer"]["code_files_sha256"].update({key: "0" * 64}),
-                lambda m: m["normalizer"].update(version="2"),
-                lambda m: m["producer"].update(package_version="0.2.0"),
-            ):
-                with self.subTest(path=path.name, mutation=mutator.__code__.co_firstlineno):
-                    altered = json.loads(canonical_bytes(original))
-                    mutator(altered)
+        )
+        for path, key, validate, error in cases:
+            original = _object_json(path.read_bytes())
+            mutations: tuple[tuple[tuple[str, ...], object], ...] = (
+                (("normalizer", "code_files_sha256", key), "0" * 64),
+                (("normalizer", "version"), "2"),
+                (("producer", "package_version"), "0.2.0"),
+            )
+            for field_path, replacement in mutations:
+                with self.subTest(path=path.name, field_path=field_path):
+                    altered = _object_json(canonical_bytes(original))
+                    _set_path(altered, field_path, replacement)
                     path.write_bytes(canonical_bytes(altered))
                     with self.assertRaises(error):
                         validate()

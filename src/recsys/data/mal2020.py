@@ -9,10 +9,19 @@ import os
 import re
 import tempfile
 from collections import Counter, defaultdict
+from collections.abc import Iterable
 from datetime import date
 from pathlib import Path
+from typing import TypedDict, cast
 
-from recsys.data.sources import SourceError, load_registry, validate_registry
+from recsys.contracts.bundle import AnimeRecord
+from recsys.data.sources import (
+    SourceDescriptor,
+    SourceError,
+    SourceRegistry,
+    load_registry,
+    validate_registry,
+)
 
 NORMALIZER_VERSION = "1"
 MAX_ID = 2_147_483_647
@@ -49,7 +58,31 @@ DURATION = re.compile(
 ASCII_INTEGER = re.compile(r"[0-9]+\Z")
 
 
-def _canonical(value):
+class DurationRecord(TypedDict):
+    duration_seconds: int | None
+    scope: str | None
+
+
+class NormalizationException(TypedDict):
+    source: str
+    row: int
+    id: int
+    field: str
+    reason: str
+    raw: object
+    normalized: object
+
+
+class NormalizationExclusion(TypedDict):
+    source: str
+    row: int
+    field: str
+    raw_id: str
+    parsed_id: int | None
+    reason: str
+
+
+def _canonical(value: object) -> bytes:
     return (
         json.dumps(
             value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
@@ -58,11 +91,11 @@ def _canonical(value):
     ).encode("utf-8")
 
 
-def _missing(value):
+def _missing(value: str) -> bool:
     return value.strip() in ("", "Unknown")
 
 
-def _id(raw):
+def _id(raw: str) -> int | None:
     value = raw.strip()
     if not ASCII_INTEGER.fullmatch(value):
         return None
@@ -72,7 +105,9 @@ def _id(raw):
     return int(canonical)
 
 
-def _read_csv(path, descriptor, columns):
+def _read_csv(
+    path: Path, descriptor: SourceDescriptor, columns: tuple[str, ...]
+) -> list[tuple[int, dict[str, str]]]:
     """Verify one raw read, then parse only those verified bytes."""
     raw = path.read_bytes()
     digest = hashlib.sha256(raw).hexdigest()
@@ -101,15 +136,15 @@ def _read_csv(path, descriptor, columns):
     return rows
 
 
-def _ordered_unique(values):
-    result = []
+def _ordered_unique(values: Iterable[str]) -> list[str]:
+    result: list[str] = []
     for value in values:
         if value and value not in result:
             result.append(value)
     return result
 
 
-def _year(value, premiered=False):
+def _year(value: str, premiered: bool = False) -> int | None:
     if _missing(value):
         return None
     value = value.strip()
@@ -146,14 +181,14 @@ def _year(value, premiered=False):
     return year
 
 
-def _decimal(value):
+def _decimal(value: str) -> int:
     digits = value.lstrip("0") or "0"
     if len(digits) > 4000:
         raise ValueError("decimal integer exceeds supported length")
     return int(digits)
 
 
-def _duration(value):
+def _duration(value: str) -> tuple[int | None, str | None]:
     if _missing(value):
         return None, None
     match = DURATION.fullmatch(value.strip())
@@ -178,7 +213,9 @@ def _duration(value):
     return seconds, scope
 
 
-def _validate_artifacts(anime, durations):
+def _validate_artifacts(
+    anime: dict[str, AnimeRecord], durations: dict[str, DurationRecord]
+) -> None:
     """Check v1 catalog and duration invariants before installing any file."""
     if not anime or set(anime) != set(durations):
         raise SourceError("catalog and durations need the same nonempty MAL_ID set")
@@ -186,6 +223,7 @@ def _validate_artifacts(anime, durations):
     for key, entry in anime.items():
         if _id(key) is None or str(_id(key)) != key or set(entry) != fields:
             raise SourceError(f"invalid catalog entry {key}")
+        entry_values = cast("dict[str, object]", entry)  # Inspect dynamic field names below.
         if not isinstance(entry["title"], str) or not entry["title"].strip():
             raise SourceError(f"invalid title for MAL_ID {key}")
         for field in ("aliases", "genres"):
@@ -202,13 +240,13 @@ def _validate_artifacts(anime, durations):
         ):
             raise SourceError(f"invalid score for MAL_ID {key}")
         for field, maximum in (("year", 9999), ("episodes", None)):
-            value = entry[field]
+            value = entry_values[field]
             if value is not None and (
                 type(value) is not int or value < 1 or (maximum is not None and value > maximum)
             ):
                 raise SourceError(f"invalid {field} for MAL_ID {key}")
         for field in ("type", "synopsis"):
-            value = entry[field]
+            value = entry_values[field]
             if value is not None and (not isinstance(value, str) or not value.strip()):
                 raise SourceError(f"invalid {field} for MAL_ID {key}")
         duration = durations[key]
@@ -228,7 +266,7 @@ def _validate_artifacts(anime, durations):
             raise SourceError(f"invalid duration for MAL_ID {key}")
 
 
-def _write_atomic(path, content):
+def _write_atomic(path: Path, content: bytes) -> None:
     temp = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -249,7 +287,7 @@ def normalize(
     synopsis_csv: Path,
     output_dir: Path,
     *,
-    registry: dict | None = None,
+    registry: SourceRegistry | None = None,
     registry_sha256: str | None = None,
 ) -> Path:
     """Write catalog, durations and report from verified MAL inputs; return report path."""
@@ -264,11 +302,19 @@ def normalize(
         raise SourceError("registry needs mal_anime and mal_synopsis sources")
     anime_rows = _read_csv(Path(anime_csv), descriptors["mal_anime"], ANIME_COLUMNS)
     synopsis_rows = _read_csv(Path(synopsis_csv), descriptors["mal_synopsis"], SYNOPSIS_COLUMNS)
-    exclusions = []
-    exceptions = []
-    counts = Counter()
+    exclusions: list[NormalizationExclusion] = []
+    exceptions: list[NormalizationException] = []
+    counts: Counter[str] = Counter()
 
-    def exception(source, row, mal_id, field, reason, raw, normalized=None):
+    def exception(
+        source: str,
+        row: int,
+        mal_id: int,
+        field: str,
+        reason: str,
+        raw: object,
+        normalized: object = None,
+    ) -> None:
         exceptions.append(
             {
                 "source": source,
@@ -281,8 +327,10 @@ def normalize(
             }
         )
 
-    def indexed(rows, source):
-        index = {}
+    def indexed(
+        rows: list[tuple[int, dict[str, str]]], source: str
+    ) -> dict[int, tuple[int, dict[str, str]]]:
+        index: dict[int, tuple[int, dict[str, str]]] = {}
         for row_number, row in rows:
             raw = row["MAL_ID"]
             number = _id(raw)
@@ -309,9 +357,9 @@ def normalize(
 
     anime_index = indexed(anime_rows, "mal_anime")
     synopsis_index = indexed(synopsis_rows, "mal_synopsis")
-    anime = {}
-    durations = {}
-    title_ids = defaultdict(list)
+    anime: dict[str, AnimeRecord] = {}
+    durations: dict[str, DurationRecord] = {}
+    title_ids: defaultdict[str, list[int]] = defaultdict(list)
     matched = 0
     for mal_id in sorted(anime_index):
         row_number, row = anime_index[mal_id]
@@ -424,7 +472,7 @@ def normalize(
         }
         durations[str(mal_id)] = {"duration_seconds": duration_seconds, "scope": scope}
         title_ids[title].append(mal_id)
-        for field, value in (
+        for field, field_value in (
             ("score", score),
             ("episodes", episodes),
             ("year", year),
@@ -432,7 +480,7 @@ def normalize(
             ("duration", duration_seconds),
             ("synopsis", synopsis),
         ):
-            if value is None:
+            if field_value is None:
                 counts[f"missing_{field}"] += 1
         if not genres:
             counts["missing_genres"] += 1

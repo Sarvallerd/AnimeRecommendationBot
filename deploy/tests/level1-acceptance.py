@@ -11,6 +11,7 @@ import signal
 import subprocess
 import sys
 from pathlib import Path
+from types import FrameType
 
 ROOT = Path(__file__).resolve().parents[2]
 OUTPUT = ROOT / "target" / "level1"
@@ -53,7 +54,7 @@ SECRET_NAMES = {"TELOXIDE_TOKEN", "DATABASE_URL", "ARTIFACTS_DIR", "BOT_TOKEN"}
 
 
 def require_cases(text: str, required: set[str]) -> None:
-    seen = {}
+    seen: dict[str, list[str]] = {}
     for name, status in CASE_RE.findall(text):
         if name in required:
             seen.setdefault(name, []).append(status)
@@ -74,7 +75,7 @@ class Interrupted(RuntimeError):
 
 
 class Runner:
-    def __init__(self, scope: str):
+    def __init__(self, scope: str) -> None:
         self.scope = scope
         self.run_id = (
             dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + secrets.token_hex(5)
@@ -92,18 +93,25 @@ class Runner:
         self.empty_env = self.directory / "empty.env"
         self.empty_env.touch(mode=0o600)
         self.compose_file = ROOT / "deploy/tests/compose.level1.yaml"
-        self.active = None
-        self.cases = {}
+        self.active: subprocess.Popen[str] | None = None
+        self.cases: dict[str, dict[str, str | int]] = {}
         self.cleanup_ok = True
         self.started_pg = False
 
-    def command(self, name, argv, timeout, extra_env=None, check=True):
+    def command(
+        self,
+        name: str,
+        argv: list[str],
+        timeout: float,
+        extra_env: dict[str, str] | None = None,
+        check: bool = True,
+    ) -> str:
         env = self.env.copy()
         if extra_env:
             env.update(extra_env)
         log = self.directory / f"{name}.log"
         with log.open("w", encoding="utf-8") as output:
-            self.active = subprocess.Popen(
+            process = subprocess.Popen(
                 argv,
                 cwd=ROOT,
                 env=env,
@@ -112,22 +120,23 @@ class Runner:
                 start_new_session=True,
                 text=True,
             )
+            self.active = process
             try:
-                code = self.active.wait(timeout=timeout)
+                code = process.wait(timeout=timeout)
             except BaseException:
                 try:
-                    os.killpg(self.active.pid, signal.SIGTERM)
+                    os.killpg(process.pid, signal.SIGTERM)
                 except ProcessLookupError:
                     pass
                 try:
                     # The shell phase traps TERM and needs time for scoped Docker cleanup.
-                    self.active.wait(timeout=45)
+                    process.wait(timeout=45)
                 except subprocess.TimeoutExpired:
                     try:
-                        os.killpg(self.active.pid, signal.SIGKILL)
+                        os.killpg(process.pid, signal.SIGKILL)
                     except ProcessLookupError:
                         pass
-                    self.active.wait(timeout=5)
+                    process.wait(timeout=5)
                 raise
             finally:
                 self.active = None
@@ -136,7 +145,7 @@ class Runner:
             raise RuntimeError(f"{name} exited {code}; see {log}")
         return content
 
-    def compose(self, name, args, timeout=120):
+    def compose(self, name: str, args: list[str], timeout: float = 120) -> str:
         cmd = [
             "docker",
             "compose",
@@ -152,7 +161,7 @@ class Runner:
         ]
         return self.command(name, cmd, timeout)
 
-    def dialogue(self):
+    def dialogue(self) -> None:
         self.command("rust-ordinary", ["cargo", "+1.95.0", "test", "--locked"], 1200)
         self.started_pg = True
         self.compose("pg-up", ["up", "--wait", "-d", "postgres"], 180)
@@ -182,7 +191,7 @@ class Runner:
             "required_tests": len(PG_TESTS | LEVEL1_TESTS),
         }
 
-    def synthetic_compose(self):
+    def synthetic_compose(self) -> None:
         # The shell harness owns its separate project and removes it before printing the final marker.
         result = self.command(
             "compose",
@@ -201,7 +210,7 @@ class Runner:
             "source": "synthetic A-B-A Compose and full database snapshots",
         }
 
-    def cleanup(self):
+    def cleanup(self) -> None:
         if not self.started_pg:
             return
         try:
@@ -220,7 +229,7 @@ class Runner:
             self.cleanup_ok = False
             self.cases["cleanup"] = {"status": "FAIL", "reason": str(error)}
 
-    def report(self, status):
+    def report(self, status: str) -> None:
         source = self.command("source-head", ["git", "rev-parse", "HEAD"], 10).strip()
         dirty = bool(self.command("source-status", ["git", "status", "--porcelain"], 10).strip())
         report = {
@@ -244,8 +253,8 @@ class Runner:
         print(f"{status}: {self.directory / 'report.json'}")
 
 
-def main():
-    def interrupted(signum, _frame):
+def main() -> int:
+    def interrupted(signum: int, _frame: FrameType | None) -> None:
         raise Interrupted(f"interrupted by signal {signum}")
 
     signal.signal(signal.SIGTERM, interrupted)

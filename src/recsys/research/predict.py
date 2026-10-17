@@ -10,15 +10,17 @@ import statistics
 import struct
 import tempfile
 import zlib
-from contextlib import nullcontext
+from contextlib import AbstractContextManager, nullcontext
 from itertools import chain, islice
 from pathlib import Path
 from time import perf_counter_ns
+from typing import TYPE_CHECKING, TypedDict, cast
 
 from recsys.contracts.bundle import canonical_bytes
 from recsys.research.artifacts import (
     MAX_LINE,
     MAX_STREAM,
+    StreamDescriptor,
     cleanup,
     open_stage,
     publish,
@@ -28,17 +30,41 @@ from recsys.research.artifacts import (
     stream_jsonl,
     write_json,
 )
-from recsys.research.models.dispatch import _backend
+from recsys.research.models.dispatch import StandardBackend, _backend
 from recsys.research.models.inputs import read_scoring_inputs
+from recsys.research.models.manifest import ModelManifest
 from recsys.research.models.package import load_model
-from recsys.research.models.types import ScoreVector
-from recsys.research.protocol import exact, fail, load_protocol, sha
+from recsys.research.models.types import (
+    BatchScorer,
+    CloseableScorer,
+    Scorer,
+    ScoreVector,
+    ScoringInputs,
+)
+from recsys.research.protocol import ProtocolSpec, exact, fail, load_protocol, sha
+
+if TYPE_CHECKING:
+    import numpy as np
+    from numpy.typing import NDArray
+
+
+class PredictionQuery(TypedDict):
+    query_id: str
+    cohort: str
+    seed_policy: str
+    order: str
+    n: int
+    seed_mal_ids: list[int]
+
+
+type EncodedScores = list[list[int | None]]
+type ValidatedQuery = tuple[PredictionQuery, tuple[int, ...]]
 
 
 class GzipOneWriter:
     """Level-1 single gzip member with the frozen ML-01 header and bounded rows."""
 
-    def __init__(self, path):
+    def __init__(self, path: Path) -> None:
         self.file = open(path, "xb", opener=lambda name, flags: os.open(name, flags, 0o600))
         self.compressor = zlib.compressobj(level=1, wbits=-15)
         self.compressed_hash = hashlib.sha256()
@@ -49,14 +75,14 @@ class GzipOneWriter:
         self.crc = 0
         self._emit(bytes.fromhex("1f8b08000000000000ff"))
 
-    def _emit(self, raw):
+    def _emit(self, raw: bytes) -> None:
         self.file.write(raw)
         self.compressed_hash.update(raw)
         self.compressed_bytes += len(raw)
         if self.compressed_bytes > MAX_STREAM:
             fail("research_resource_limit")
 
-    def write_json(self, row):
+    def write_json(self, row: object) -> None:
         raw = canonical_bytes(row)
         if len(raw) > MAX_LINE or self.plain_bytes + len(raw) > MAX_STREAM:
             fail("research_resource_limit")
@@ -66,7 +92,7 @@ class GzipOneWriter:
         self.crc = zlib.crc32(raw, self.crc)
         self.rows += 1
 
-    def close(self):
+    def close(self) -> StreamDescriptor:
         self._emit(self.compressor.flush())
         self._emit(struct.pack("<II", self.crc & 0xFFFFFFFF, self.plain_bytes & 0xFFFFFFFF))
         self.file.flush()
@@ -80,13 +106,14 @@ class GzipOneWriter:
             "canonical_sha256": self.plain_hash.hexdigest(),
         }
 
-    def abort(self):
+    def abort(self) -> None:
         if not self.file.closed:
             self.file.close()
 
 
-def _query(query, ids, seen, protocol):
+def _query(query: object, ids: set[int], seen: set[str], protocol: ProtocolSpec) -> tuple[int, ...]:
     exact(query, {"query_id", "cohort", "seed_policy", "order", "n", "seed_mal_ids"})
+    query = cast("PredictionQuery", query)
     qid, n, seeds = query["query_id"], query["n"], query["seed_mal_ids"]
     if (
         type(qid) is not str
@@ -110,7 +137,7 @@ def _query(query, ids, seen, protocol):
     return tuple(seeds)
 
 
-def _encode_vector(vector, n, ids):
+def _encode_vector(vector: object, n: int, ids: tuple[int, ...]) -> EncodedScores:
     import numpy as np
 
     if (
@@ -135,13 +162,12 @@ def _encode_vector(vector, n, ids):
     ]
 
 
-def _vectors(scorer, seed_sets):
+def _vectors(scorer: Scorer, seed_sets: tuple[tuple[int, ...], ...]) -> tuple[ScoreVector, ...]:
     if not seed_sets:
         return ()
-    many = getattr(scorer, "score_many", None)
     rows = (
-        many(tuple(seed_sets))
-        if callable(many)
+        scorer.score_many(seed_sets)
+        if isinstance(scorer, BatchScorer)
         else tuple(scorer.score(seeds) for seeds in seed_sets)
     )
     if type(rows) is not tuple or len(rows) != len(seed_sets):
@@ -149,24 +175,38 @@ def _vectors(scorer, seed_sets):
     return rows
 
 
-def _rank(vector, encoded, seeds, ids):
+def _rank(
+    vector: ScoreVector,
+    encoded: EncodedScores,
+    seeds: tuple[int, ...],
+    ids: tuple[int, ...],
+) -> NDArray[np.intp]:
     import numpy as np
 
     excluded = set(seeds)
     candidates = np.flatnonzero(
         vector.available & np.asarray([item not in excluded for item in ids], dtype=np.bool_)
     )
-    values = np.asarray([encoded[index][1] for index in candidates], dtype=np.int64)
+    values = np.asarray([cast("int", encoded[index][1]) for index in candidates], dtype=np.int64)
     order = np.lexsort((np.asarray(ids, dtype=np.int64)[candidates], -values))
     return candidates[order]
 
 
-def _admit_gpu(first, model_dir, model, gpu_scorer, inputs, query_desc):
+def _admit_gpu(
+    first: tuple[ValidatedQuery, ...],
+    model_dir: Path,
+    model: ModelManifest,
+    gpu_scorer: Scorer,
+    inputs: ScoringInputs,
+    query_desc: StreamDescriptor,
+) -> dict[str, object]:
     """Compare complete candidate masks and rankings using the same validated payload."""
     import numpy as np
 
     variant = model["variant_id"]
-    reference = _backend(variant).load(model_dir, model, inputs, backend="cpu")
+    reference = cast("StandardBackend", _backend(variant)).load(
+        model_dir, model, inputs, backend="cpu"
+    )
     compared = differences = 0
     max_abs = 0.0
     try:
@@ -190,9 +230,8 @@ def _admit_gpu(first, model_dir, model, gpu_scorer, inputs, query_desc):
             max_abs = max(max_abs, float(np.max(np.abs(cpu.values - gpu.values))))
             compared += 1
     finally:
-        close = getattr(reference, "close", None)
-        if callable(close):
-            close()
+        if isinstance(reference, CloseableScorer):
+            reference.close()
     if compared == 0:
         fail("research_gpu_parity_failed")
     return {
@@ -212,15 +251,15 @@ def _admit_gpu(first, model_dir, model, gpu_scorer, inputs, query_desc):
 
 
 def predict_validation(
-    prepared_dir,
-    model_dir,
-    output_dir,
+    prepared_dir: str | Path,
+    model_dir: str | Path,
+    output_dir: str | Path,
     *,
-    expected_prepared_identity,
-    backend="cpu",
-    measurements=None,
-    measurement_output=None,
-):
+    expected_prepared_identity: str,
+    backend: str = "cpu",
+    measurements: dict[str, object] | None = None,
+    measurement_output: str | Path | None = None,
+) -> Path:
     prepared_dir, model_dir, output_dir = map(Path, (prepared_dir, model_dir, output_dir))
     separate(prepared_dir, model_dir, output_dir)
     if measurement_output is not None:
@@ -239,21 +278,23 @@ def predict_validation(
     from recsys.research.models.spec import _model_backend
 
     preview, _ = read_json(safe_path(model_dir, directory=True) / "model-manifest.json")
+    if not isinstance(preview, dict) or not isinstance(preview.get("variant_id"), str):
+        fail("research_model_invalid")
     _model_backend(preview["variant_id"], backend)
     if measurements is not None and (type(measurements) is not dict or measurements):
         fail("research_prediction_invalid")
     start = perf_counter_ns()
-    stage = None
-    writer = None
-    scorer = None
+    stage: Path | None = None
+    writer: GzipOneWriter | None = None
+    scorer: Scorer | None = None
     published = False
     scoring_ns = writing_ns = query_count = score_count = 0
-    info = {"backend": backend}
+    info: dict[str, object] = {"backend": backend}
     try:
         if backend == "gpu":
             from recsys.research.gpu import gpu_execution, gpu_memory_usage
 
-            session = gpu_execution()
+            session: AbstractContextManager[object] = gpu_execution()
         else:
             session = nullcontext()
         with session:
@@ -269,16 +310,21 @@ def predict_validation(
             info["input_model_init_upload_seconds"] = (perf_counter_ns() - start) / 1e9
             try:
                 prep, _ = read_json(prepared_dir / "prepare-manifest.json")
-                query_desc = prep["files"]["development/queries.jsonl.gz"]
+                if not isinstance(prep, dict) or not isinstance(prep.get("files"), dict):
+                    fail("research_prediction_invalid")
+                query_desc = cast("StreamDescriptor", prep["files"]["development/queries.jsonl.gz"])
                 ids = inputs.mal_ids
                 id_set = set(ids)
                 protocol = load_protocol()
                 popularity = [
                     [item, inputs.train_stats["items"][str(item)]["positive_users"]] for item in ids
                 ]
-                seen = set()
+                seen: set[str] = set()
                 source = stream_jsonl(prepared_dir / "development/queries.jsonl.gz", query_desc)
-                validated = ((query, _query(query, id_set, seen, protocol)) for query in source)
+                validated = (
+                    (cast("PredictionQuery", query), _query(query, id_set, seen, protocol))
+                    for query in source
+                )
                 first = tuple(islice(validated, 128)) if backend == "gpu" else ()
                 if backend == "gpu":
                     admission_start = perf_counter_ns()
@@ -334,9 +380,8 @@ def predict_validation(
                     writer.abort()
                     writer = None
                 if scorer is not None:
-                    close = getattr(scorer, "close", None)
-                    if callable(close):
-                        close()
+                    if isinstance(scorer, CloseableScorer):
+                        scorer.close()
         info.update(
             {
                 "queries": query_count,
@@ -346,6 +391,8 @@ def predict_validation(
                 "staging_wall_seconds": (perf_counter_ns() - start) / 1e9,
             }
         )
+        if stage is None:
+            fail("research_prediction_invalid")
         publish(stage, output_dir)
         published = True
         info.update(
@@ -376,7 +423,13 @@ def predict_validation(
         raise
 
 
-def gpu_preflight(prepared_dir, model_dir, output_dir, *, expected_prepared_identity):
+def gpu_preflight(
+    prepared_dir: str | Path,
+    model_dir: str | Path,
+    output_dir: str | Path,
+    *,
+    expected_prepared_identity: str,
+) -> Path:
     """Private, label-free GPU parity and comparable single/batch timing evidence."""
     from contextlib import ExitStack
 
@@ -387,8 +440,10 @@ def gpu_preflight(prepared_dir, model_dir, output_dir, *, expected_prepared_iden
     from recsys.research.models.spec import _model_backend
 
     preview, _ = read_json(safe_path(model_dir, directory=True) / "model-manifest.json")
+    if not isinstance(preview, dict) or not isinstance(preview.get("variant_id"), str):
+        fail("research_model_invalid")
     _model_backend(preview["variant_id"], "gpu")
-    stage = None
+    stage: Path | None = None
     try:
         started = perf_counter_ns()
         with ExitStack() as stack:
@@ -402,13 +457,18 @@ def gpu_preflight(prepared_dir, model_dir, output_dir, *, expected_prepared_iden
             stack.callback(scorer.close)
             initial_upload = (perf_counter_ns() - tick) / 1e9
             prep, _ = read_json(prepared_dir / "prepare-manifest.json")
-            descriptor = prep["files"]["development/queries.jsonl.gz"]
-            seen = set()
+            if not isinstance(prep, dict) or not isinstance(prep.get("files"), dict):
+                fail("research_prediction_invalid")
+            descriptor = cast("StreamDescriptor", prep["files"]["development/queries.jsonl.gz"])
+            seen: set[str] = set()
             protocol = load_protocol()
             ids = inputs.mal_ids
             id_set = set(ids)
             source = stream_jsonl(prepared_dir / "development/queries.jsonl.gz", descriptor)
-            validated = ((query, _query(query, id_set, seen, protocol)) for query in source)
+            validated = (
+                (cast("PredictionQuery", query), _query(query, id_set, seen, protocol))
+                for query in source
+            )
             first = tuple(islice(validated, 128))
             admission = _admit_gpu(first, model_dir, model, scorer, inputs, descriptor)
             total = len(first)
@@ -418,12 +478,11 @@ def gpu_preflight(prepared_dir, model_dir, output_dir, *, expected_prepared_iden
             single = cpu_single = batch = None
             if sample:
                 tick = perf_counter_ns()
-                cpu_scorer = _backend(model["variant_id"]).load(
+                cpu_scorer = cast("StandardBackend", _backend(model["variant_id"])).load(
                     model_dir, model, inputs, backend="cpu"
                 )
-                cpu_close = getattr(cpu_scorer, "close", None)
-                if callable(cpu_close):
-                    stack.callback(cpu_close)
+                if isinstance(cpu_scorer, CloseableScorer):
+                    stack.callback(cpu_scorer.close)
                 cpu_init = (perf_counter_ns() - tick) / 1e9
                 cpu_traces = []
                 for _ in range(2):
