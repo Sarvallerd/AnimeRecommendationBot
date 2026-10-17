@@ -44,6 +44,7 @@ MAX_WEIGHTS = 512 * 1024 * 1024
 BLOCK = 1024 * 1024
 _IDENTITY = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _REVISION = re.compile(r"[0-9a-f]{40}\Z")
+_FORBIDDEN_WEIGHTS_EXTENSIONS = frozenset({"pt", "pth", "pkl", "pickle", "zip", "npz"})
 
 
 class TrainingData(TypedDict):
@@ -364,6 +365,10 @@ def publish_training_artifact(
         _fail()
     target = Path(output_dir)
     source = Path(weights_path)
+    if source.suffix != ".safetensors" or any(
+        part.lower() in _FORBIDDEN_WEIGHTS_EXTENSIONS for part in source.name.split(".")[1:-1]
+    ):
+        _fail()
     try:
         safe_path(target.parent, directory=True)
         safe_path(source, directory=False)

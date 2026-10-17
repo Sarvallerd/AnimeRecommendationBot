@@ -120,6 +120,47 @@ class TrainingArtifactTests(unittest.TestCase):
         self.assertEqual(self.target.stat().st_mode & 0o777, 0o700)
         self.assertEqual(verified.weights_path.stat().st_mode & 0o777, 0o600)
 
+    def test_reject_non_safetensors_source_names_before_staging(self) -> None:
+        forbidden = ("pt", "pth", "pkl", "pickle", "zip", "npz")
+        names = ["arbitrary.pkl", "weights", "weights.bin", "weights.SAFETENSORS"]
+        for extension in forbidden:
+            names.extend(
+                (
+                    f"weights.{extension}.safetensors",
+                    f"weights.{extension.upper()}.safetensors",
+                    f"weights.{extension}",
+                )
+            )
+        names.append(".pkl.safetensors")
+        for name in names:
+            with self.subTest(name=name):
+                source = self.root / name
+                original = (
+                    b"not-a-safe-container" if name == "arbitrary.pkl" else _tiny_safetensors()
+                )
+                source.write_bytes(original)
+                parent_entries = {entry.name for entry in self.root.iterdir()}
+                with (
+                    patch(
+                        "recsys.research.training.artifacts.open_stage",
+                        side_effect=AssertionError("stage creation attempted"),
+                    ),
+                    self.assertRaisesRegex(ResearchError, "^training_artifact_invalid$"),
+                ):
+                    publish_training_artifact(
+                        self.target,
+                        spec=self.spec,
+                        inputs=self.inputs,
+                        weights_path=source,
+                        supported_mal_ids=(1,),
+                        code_revision="a" * 40,
+                        framework_version="2.0.0",
+                    )
+                self.assertEqual(source.read_bytes(), original)
+                self.assertEqual({entry.name for entry in self.root.iterdir()}, parent_entries)
+                self.assertFalse(self.target.exists())
+                source.unlink()
+
     def test_tamper_extra_symlink_and_input_mismatch(self) -> None:
         identity = self.publish()
         wrong = _identity(b"wrong")
