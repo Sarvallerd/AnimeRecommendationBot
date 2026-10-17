@@ -15,7 +15,8 @@ import tempfile
 import time
 import unittest
 import uuid
-from contextlib import redirect_stdout
+from collections.abc import Iterator
+from contextlib import contextmanager, redirect_stdout
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -127,6 +128,64 @@ def _stable_utc_clock() -> Callable[[], datetime]:
     # Isolated workers and ResourceSupervisor retain their real clocks.
     start_utc, start_mono = datetime.now(timezone.utc), time.monotonic()
     return lambda: start_utc + timedelta(seconds=time.monotonic() - start_mono)
+
+
+@contextmanager
+def _stable_campaign_clock() -> Iterator[Callable[[], datetime]]:
+    clock = _stable_utc_clock()
+    with (
+        patch("recsys.research.campaign.runner._now", new=clock),
+        patch("recsys.research.campaign.journal._now", new=clock),
+    ):
+        yield clock
+
+
+class CampaignClockFixtureTests(unittest.TestCase):
+    def test_controller_and_journal_share_monotonic_utc(self) -> None:
+        import recsys.research.campaign.journal as journal_module
+        import recsys.research.campaign.runner as runner_module
+
+        original_runner_now = runner_module._now
+        original_journal_now = journal_module._now
+        real_datetime = datetime
+        anchor = real_datetime(2025, 1, 2, 3, 4, 5, 678901, tzinfo=timezone.utc)
+        monotonic_value = 100.0
+
+        def monotonic() -> float:
+            return monotonic_value
+
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch(f"{__name__}.datetime", wraps=real_datetime) as fixture_datetime,
+            patch(f"{__name__}.time", new=SimpleNamespace(monotonic=monotonic)),
+            patch(
+                "recsys.research.campaign.common.datetime", wraps=real_datetime
+            ) as common_datetime,
+        ):
+            fixture_datetime.now.return_value = anchor
+            with _stable_campaign_clock() as clock:
+                fixture_datetime.now.assert_called_once_with(timezone.utc)
+                fixture_datetime.now.side_effect = AssertionError("fixture reread wall UTC")
+                common_datetime.now.side_effect = AssertionError("journal read wall UTC")
+                self.assertIs(runner_module._now, clock)
+                self.assertIs(journal_module._now, clock)
+
+                journal = _Journal(Path(temporary) / "journal.jsonl")
+                self.assertEqual(runner_module._now(), anchor)
+                first = journal.append("run_started", generation="g")
+                self.assertEqual(first["utc"], "2025-01-02T03:04:05.678901Z")
+
+                monotonic_value = 102.0
+                self.assertEqual(runner_module._now(), anchor + timedelta(seconds=2))
+                second = journal.append("run_started", generation="later")
+                self.assertEqual(second["utc"], "2025-01-02T03:04:07.678901Z")
+                self.assertEqual(
+                    [event["utc"] for event in _Journal(journal.path).events],
+                    [first["utc"], second["utc"]],
+                )
+                common_datetime.now.assert_not_called()
+            self.assertIs(runner_module._now, original_runner_now)
+            self.assertIs(journal_module._now, original_journal_now)
 
 
 class _Supervisor:
@@ -266,9 +325,7 @@ class CampaignCliTests(unittest.TestCase):
 
 class CampaignTests(unittest.TestCase):
     def setUp(self) -> None:
-        clock = patch("recsys.research.campaign.runner._now", side_effect=_stable_utc_clock())
-        clock.start()
-        self.addCleanup(clock.stop)
+        self._clock = self.enterContext(_stable_campaign_clock())
 
     def test_malformed_private_worker_request_rejects_before_path_or_science(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -758,7 +815,7 @@ class CampaignTests(unittest.TestCase):
     def test_shared_auxiliary_fit_budget_and_journal_clock_regression(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             journal = _Journal(Path(temporary) / "journal.jsonl")
-            first = datetime.now(timezone.utc) - timedelta(seconds=10)
+            first = self._clock() - timedelta(seconds=10)
             with patch("recsys.research.campaign.journal._now", return_value=first):
                 journal.append("run_started", generation="g")
             original = journal.path.read_bytes()
@@ -1201,7 +1258,7 @@ class RealProcessCampaignTests(unittest.TestCase):
             with (
                 patch_release_info(fixture.lock),
                 patch("recsys.research.campaign.runner.sys.executable", str(executable)),
-                patch("recsys.research.campaign.runner._now", side_effect=_stable_utc_clock()),
+                _stable_campaign_clock(),
                 patch.dict(os.environ, {"ARB_TEST_LOCK_JSON": str(lock_path)}),
             ):
                 manifest_path = run_campaign(
@@ -1270,9 +1327,7 @@ class RealProcessCampaignTests(unittest.TestCase):
 @unittest.skipUnless(os.getenv("ARB_RESEARCH_GPU_TEST") == "1", "hardware opt-in")
 class GPUCampaignTests(unittest.TestCase):
     def setUp(self) -> None:
-        clock = patch("recsys.research.campaign.runner._now", side_effect=_stable_utc_clock())
-        clock.start()
-        self.addCleanup(clock.stop)
+        self.enterContext(_stable_campaign_clock())
 
     def test_four_gpu_variants_two_cpu_auxiliary_fits_and_cpu_hybrid(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
