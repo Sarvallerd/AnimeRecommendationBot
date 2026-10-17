@@ -179,6 +179,18 @@
         "research_evaluation"
       ]
     },
+    "research_training": {
+      "modules": [
+        "recsys.research.training",
+        "recsys.research.training.artifacts",
+        "recsys.research.training.spec"
+      ],
+      "depends_on": [
+        "core",
+        "research_support",
+        "research_model_contract"
+      ]
+    },
     "entrypoints": {
       "modules": [
         "recsys.__main__",
@@ -199,7 +211,8 @@
         "research_backends",
         "research_models",
         "research_evaluation",
-        "research_campaign"
+        "research_campaign",
+        "research_training"
       ]
     }
   },

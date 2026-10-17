@@ -180,6 +180,11 @@ def build_parser() -> argparse.ArgumentParser:
     research_validate = research_commands.add_parser("validate")
     research_validate.add_argument("prepared_dir")
     research_validate.add_argument("--expected-identity", required=True)
+    training_verify = research_commands.add_parser(
+        "training-verify", help="verify integrity of a versioned training artifact"
+    )
+    training_verify.add_argument("model_dir")
+    training_verify.add_argument("--expected-identity", required=True)
     model_fit = research_commands.add_parser("model-fit", help="fit a frozen ML-02 variant")
     for flag in (
         "prepared-dir",

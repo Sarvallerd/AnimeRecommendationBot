@@ -11,6 +11,8 @@ from recsys.contracts.provenance import SOURCE_FILES, SOURCE_LAYOUT
 
 ROOT = Path(__file__).resolve().parents[2]
 RECORD = ROOT / "docs/migrations/arb054-recsys-layout-v2.json"
+TRAINING_RECORD = ROOT / "docs/migrations/arb058-training-artifacts-v1.json"
+LEGACY_RECORD_SHA256 = "27dd3f274a4cee02b0d6e7cf43fa9f4fcfbfe755e04d0c43d68d6c319ced5016"
 LOCK = ROOT / "src/recsys/resources/releases/release_neelagiri_2025_nafiul_2026_v1.json"
 SOURCE_BASELINE = "1441573fbbbffc4693c7e1100aaae4458d9e88d4"
 TASK_BASELINE = "b385bfae9ad128f257784aec61e541296b648e31"
@@ -19,6 +21,30 @@ LOCK_SHA256 = "46f3ffd60239675b802026025016ee6719cb0525325e088fbfa248012db3de9b"
 
 
 class MigrationRecordTests(unittest.TestCase):
+    def test_training_record_preserves_historical_authority(self) -> None:
+        self.assertEqual(hashlib.sha256(RECORD.read_bytes()).hexdigest(), LEGACY_RECORD_SHA256)
+        legacy = json.loads(RECORD.read_bytes())
+        current = json.loads(TRAINING_RECORD.read_bytes())
+        self.assertEqual(current["migration_id"], "arb058-training-artifacts-v1")
+        self.assertEqual(
+            current["task_baseline_commit"], "fa983eaeeeeb41b41ac893b7de9827a40c25d27d"
+        )
+        self.assertEqual(
+            (current["package_version_from"], current["package_version_to"]),
+            ("0.2.0", "0.2.1"),
+        )
+        self.assertEqual(current["source_layout"], SOURCE_LAYOUT)
+        self.assertEqual(current["source_inventory"], list(SOURCE_FILES))
+        self.assertEqual(current["previous_artifact_versions"], legacy["artifact_versions"])
+        self.assertEqual(
+            current["preserved_resource_sha256"],
+            {item["to"]: item["sha256"] for item in legacy["resource_moves"]},
+        )
+        self.assertEqual(
+            current["acceptance"],
+            {"full_ml02": False, "model_quality": False, "release_accepted": False},
+        )
+
     def test_durable_layout_recovery_and_release_authority(self) -> None:
         record = json.loads(RECORD.read_bytes())
         self.assertEqual(record["schema_version"], 1)
@@ -40,7 +66,13 @@ class MigrationRecordTests(unittest.TestCase):
             record["task_notion_url"],
             "https://app.notion.com/p/3fb3908d6b1f81acade0cc2247d1980a",
         )
-        self.assertEqual(set(record["source_inventory"]), set(SOURCE_FILES))
+        added = {
+            "research/training/__init__.py",
+            "research/training/artifacts.py",
+            "research/training/spec.py",
+        }
+        self.assertTrue(added.isdisjoint(record["source_inventory"]))
+        self.assertEqual(set(record["source_inventory"]) | added, set(SOURCE_FILES))
         self.assertEqual(len(record["module_moves"]), 33)
         self.assertEqual(len(record["resource_moves"]), 11)
         for item in record["resource_moves"]:
