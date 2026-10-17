@@ -15,12 +15,15 @@ import sys
 
 sys.argv = ["recsys", "--invalid"]
 before = set(pathlib.Path.cwd().iterdir())
-for name in ("recsys", "recsys.cli.main", "recsys.__main__", "recsys.data.sources", "recsys.data.obtain", "recsys.data.mal2020", "recsys.data.dataset", "recsys.data.metadata", "recsys.data.interactions", "recsys.data.aliases", "recsys.release.catalog", "recsys.release.build", "recsys.release.prepare", "recsys.content.glove", "recsys.contracts.bundle", "recsys.release.export", "recsys.historical.legacy_vectors", "recsys.historical.comparison", "recsys.historical.assessment", "recsys.research.protocol", "recsys.research.artifacts", "recsys.research.prepare", "recsys.research.evaluation.evaluate", "recsys.research.evaluation.compare", "recsys.research.evaluation.finalize", "recsys.research.models.package", "recsys.research.predict", "recsys.research.models.popularity", "recsys.research.gpu"):
+for name in ("recsys", "recsys.cli.main", "recsys.__main__", "recsys.data.sources", "recsys.data.obtain", "recsys.data.mal2020", "recsys.data.dataset", "recsys.data.metadata", "recsys.data.interactions", "recsys.data.aliases", "recsys.release.catalog", "recsys.release.build", "recsys.release.prepare", "recsys.content.glove", "recsys.contracts.bundle", "recsys.release.export", "recsys.historical.legacy_vectors", "recsys.historical.comparison", "recsys.historical.assessment", "recsys.research.protocol", "recsys.research.artifacts", "recsys.research.prepare", "recsys.research.evaluation.evaluate", "recsys.research.evaluation.compare", "recsys.research.evaluation.finalize", "recsys.research.models.package", "recsys.research.predict", "recsys.research.models.popularity", "recsys.research.gpu", "recsys.research.training", "recsys.research.training.spec", "recsys.research.training.artifacts"):
     importlib.import_module(name)
 assert set(pathlib.Path.cwd().iterdir()) == before
 assert not any(name == "numpy" or name.startswith("numpy.") for name in sys.modules)
 assert not any(name == "sklearn" or name.startswith("sklearn.") for name in sys.modules)
 assert not any(name == "cupy" or name.startswith("cupy.") for name in sys.modules)
+assert not any(name == "torch" or name.startswith("torch.") for name in sys.modules)
+assert not any(name == "catboost" or name.startswith("catboost.") for name in sys.modules)
+assert not any(name == "safetensors" or name.startswith("safetensors.") for name in sys.modules)
 assert not any(name == "threadpoolctl" for name in sys.modules)
 assert not any(name == "pandas" or name.startswith("pandas.") for name in sys.modules)
 assert not any(name == "duckdb" or name.startswith("duckdb.") for name in sys.modules)

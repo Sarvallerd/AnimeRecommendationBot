@@ -254,6 +254,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                     Path(parsed.prepared_dir), expected_identity=parsed.expected_identity
                 )
                 result = Path(parsed.prepared_dir) / "prepare-manifest.json"
+            elif parsed.research_command == "training-verify":
+                from recsys.research.training.artifacts import verify_training_artifact
+
+                verified = verify_training_artifact(
+                    Path(parsed.model_dir), expected_identity=parsed.expected_identity
+                )
+                result = (
+                    f"{verified.identity} integrity_verified family={verified.spec.family} "
+                    f"framework={verified.spec.framework} "
+                    f"weights_format={verified.spec.weights_format}"
+                )
             elif parsed.research_command == "model-fit":
                 from recsys.research.models.package import fit_model
 

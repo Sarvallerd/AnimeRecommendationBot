@@ -1,0 +1,186 @@
+{
+  "schema_version": 1,
+  "kind": "arb-training-artifact-migration",
+  "migration_id": "arb058-training-artifacts-v1",
+  "task_id": "ARB-058",
+  "task_notion_url": "https://app.notion.com/p/3fc3908d6b1f81468fbbeee7a65d5a82",
+  "task_baseline_commit": "fa983eaeeeeb41b41ac893b7de9827a40c25d27d",
+  "original_producer_recovery_commit": "1441573fbbbffc4693c7e1100aaae4458d9e88d4",
+  "package_version_from": "0.2.0",
+  "package_version_to": "0.2.1",
+  "source_layout": "arb054-recsys-layout-v2",
+  "added_sources": [
+    "research/training/__init__.py",
+    "research/training/artifacts.py",
+    "research/training/spec.py"
+  ],
+  "source_inventory": [
+    "__init__.py",
+    "__main__.py",
+    "cli/__init__.py",
+    "cli/main.py",
+    "cli/parser.py",
+    "content/__init__.py",
+    "content/glove.py",
+    "contracts/__init__.py",
+    "contracts/bundle.py",
+    "contracts/io.py",
+    "contracts/provenance.py",
+    "contracts/resources.py",
+    "data/__init__.py",
+    "data/aliases.py",
+    "data/dataset.py",
+    "data/interactions.py",
+    "data/mal2020.py",
+    "data/metadata.py",
+    "data/obtain.py",
+    "data/sources.py",
+    "historical/__init__.py",
+    "historical/assessment.py",
+    "historical/comparison.py",
+    "historical/genre_baseline.py",
+    "historical/legacy_vectors.py",
+    "release/__init__.py",
+    "release/build.py",
+    "release/catalog.py",
+    "release/export.py",
+    "release/lock.py",
+    "release/prepare.py",
+    "research/__init__.py",
+    "research/artifacts.py",
+    "research/campaign/__init__.py",
+    "research/campaign/artifacts.py",
+    "research/campaign/common.py",
+    "research/campaign/journal.py",
+    "research/campaign/plan.py",
+    "research/campaign/report.py",
+    "research/campaign/runner.py",
+    "research/campaign/worker.py",
+    "research/evaluation/__init__.py",
+    "research/evaluation/compare.py",
+    "research/evaluation/evaluate.py",
+    "research/evaluation/finalize.py",
+    "research/evaluation/selection.py",
+    "research/gpu.py",
+    "research/models/__init__.py",
+    "research/models/collaborative.py",
+    "research/models/content.py",
+    "research/models/dispatch.py",
+    "research/models/hybrid.py",
+    "research/models/inputs.py",
+    "research/models/manifest.py",
+    "research/models/package.py",
+    "research/models/popularity.py",
+    "research/models/spec.py",
+    "research/models/types.py",
+    "research/predict.py",
+    "research/prepare.py",
+    "research/protocol.py",
+    "research/resources.py",
+    "research/training/__init__.py",
+    "research/training/artifacts.py",
+    "research/training/spec.py",
+    "resources/campaigns/research_campaign_v1.json",
+    "resources/expectations/nafiul_2026_v1_alias_expectations.json",
+    "resources/expectations/neelagiri_2025_v1_expectations.json",
+    "resources/prompts/assessment_prompt_v1.md",
+    "resources/protocols/research_protocol_v1.json",
+    "resources/queries/quality_queries_v1.json",
+    "resources/registries/source_registry.json",
+    "resources/registries/source_registry_glove_6b_300d_v1.json",
+    "resources/registries/source_registry_nafiul_2026_v1.json",
+    "resources/registries/source_registry_neelagiri_2025_v1.json",
+    "resources/releases/release_neelagiri_2025_nafiul_2026_v1.json"
+  ],
+  "training_config": {
+    "schema_version": 1,
+    "kind": "arb-training-spec"
+  },
+  "training_artifact": {
+    "schema_version": 1,
+    "kind": "arb-training-artifact",
+    "files": [
+      "training-manifest.json",
+      "items.json",
+      "weights.safetensors"
+    ],
+    "verification": "integrity-and-declared-provenance-only; native safetensors decoding reserved for ARB-060"
+  },
+  "previous_artifact_versions": {
+    "alias_manifest": {
+      "legacy_normalizer_version": "1",
+      "new_normalizer_version": "2",
+      "schema_version": 1
+    },
+    "catalog_release_manifest": {
+      "legacy_normalizer_version": "1",
+      "new_normalizer_version": "2",
+      "schema_version": 1
+    },
+    "composite_build_report": {
+      "legacy_schema_version": 2,
+      "new_builder_version": "arb031-v2",
+      "new_schema_version": 3
+    },
+    "dataset_manifest": {
+      "legacy_normalizer_version": "1",
+      "new_normalizer_version": "2",
+      "schema_version": 1
+    },
+    "historical_comparison": {
+      "legacy_handling": "original-checkout-only",
+      "new_schema_version": 2
+    },
+    "mal_build_report": {
+      "legacy_handling": "original-checkout-only",
+      "new_schema_version": 2
+    },
+    "named_release_lock": {
+      "accepted_schema_version": 1,
+      "new_schema_authority": "tiny-fixture-only",
+      "new_schema_version": 2
+    },
+    "predictions_and_evaluation": {
+      "policy": "existing-payload-schema-bound-to-preparation-model-plan-identities"
+    },
+    "research_campaign_plan": {
+      "legacy_handling": "reject-before-workers",
+      "legacy_schema_version": 1,
+      "new_schema_version": 2
+    },
+    "research_model": {
+      "legacy_handling": "reject-before-payloads",
+      "legacy_schema_version": 1,
+      "new_schema_version": 2
+    },
+    "research_preparation": {
+      "legacy_handling": "reject-before-streams",
+      "legacy_schema_version": 1,
+      "new_schema_version": 2
+    },
+    "runtime_bundle": {
+      "algorithm_version": "arb009-v1",
+      "legacy_schema_version": 1,
+      "new_schema_version": 1
+    }
+  },
+  "preserved_resource_sha256": {
+    "src/recsys/resources/prompts/assessment_prompt_v1.md": "3612c73634b0d687210ed6030c4ca0846b37aebeb645af71076fe8d1741dbada",
+    "src/recsys/resources/expectations/nafiul_2026_v1_alias_expectations.json": "d511b8014deb172f534007dd6e8abb3b4372341e6ecc137ecc04ea9678f97bf2",
+    "src/recsys/resources/expectations/neelagiri_2025_v1_expectations.json": "9e246049ac968ea5a95c11d90935f482f5d383b54166fab92b06952cd08cdbbd",
+    "src/recsys/resources/queries/quality_queries_v1.json": "6a05478fb76027dfb5169afca6913df35796ee8d7d25432313d8ee70d4860153",
+    "src/recsys/resources/releases/release_neelagiri_2025_nafiul_2026_v1.json": "46f3ffd60239675b802026025016ee6719cb0525325e088fbfa248012db3de9b",
+    "src/recsys/resources/campaigns/research_campaign_v1.json": "87dabe5ae826b2134ddb18de3beba100d9f7764873f2d91e9e4ba06ec4ea7bfd",
+    "src/recsys/resources/protocols/research_protocol_v1.json": "f570cc1e37a80b946802798f8f042e190662359e563ae2660cd2a19e7d27194f",
+    "src/recsys/resources/registries/source_registry.json": "49bb399935f0ac7ec649fe2f4bd7715444c09c8513704866fa90b9bea29d182f",
+    "src/recsys/resources/registries/source_registry_glove_6b_300d_v1.json": "48c875afd573174629606e83c8ab699e602f634de046163e3ad1e0f78d75fcda",
+    "src/recsys/resources/registries/source_registry_nafiul_2026_v1.json": "56383b6fca667d1352ff9df7034b2d01415ef3a08aad1a82734f537defb26879",
+    "src/recsys/resources/registries/source_registry_neelagiri_2025_v1.json": "e55b9aa6d1c49e82c198af8e58bb2cb5dcbd4439615c31890e77e301f299b9ab"
+  },
+  "legacy_policy": "Old artifacts require their recorded producer checkout; historical identities are not rewritten.",
+  "acceptance": {
+    "full_ml02": false,
+    "model_quality": false,
+    "release_accepted": false
+  }
+}
