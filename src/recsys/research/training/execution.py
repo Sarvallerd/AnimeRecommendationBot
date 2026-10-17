@@ -124,7 +124,7 @@ def _private_attempt(target: Path) -> Path:
     return path
 
 
-def _worker_env() -> dict[str, str]:
+def _worker_env(device: DeviceSpec) -> dict[str, str]:
     environment = dict(os.environ)
     environment.pop("PYTHONPATH", None)
     environment.pop("PYTHONHOME", None)
@@ -139,10 +139,14 @@ def _worker_env() -> dict[str, str]:
     ):
         environment[key] = "1"
     environment["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+    if device.kind == "cpu":
+        environment["CUDA_VISIBLE_DEVICES"] = ""
     return environment
 
 
-def _supervised(attempt: Path, cancel_requested: Callable[[], bool] | None) -> ProcessResult:
+def _supervised(
+    attempt: Path, cancel_requested: Callable[[], bool] | None, *, device: DeviceSpec
+) -> ProcessResult:
     supervisor = ResourceSupervisor(rss_limit_bytes=_RSS)
     with supervisor:
         # Preserve the venv executable symlink so isolated mode retains its site-packages.
@@ -157,7 +161,7 @@ def _supervised(attempt: Path, cancel_requested: Callable[[], bool] | None) -> P
             cwd=attempt,
             log_dir=attempt / "logs",
             remaining_seconds=_TIMEOUT,
-            env=_worker_env(),
+            env=_worker_env(device),
         )
         cancelled = False
         while True:
@@ -514,7 +518,7 @@ def fit_training_model(
     cleanup_allowed = False
     try:
         request_identity = write_worker_request(attempt / "request.json", request)
-        process = _supervised(attempt, cancel_requested)
+        process = _supervised(attempt, cancel_requested, device=spec.train_device)
         cleanup_allowed = process.cleanup_complete
         result = _complete_result(attempt, request_identity, process, "fit")
         if result["operation"] != "fit":
@@ -573,7 +577,7 @@ def predict_training_model(
     cleanup_allowed = False
     try:
         request_identity = write_worker_request(attempt / "request.json", request)
-        process = _supervised(attempt, cancel_requested)
+        process = _supervised(attempt, cancel_requested, device=effective)
         cleanup_allowed = process.cleanup_complete
         result = _complete_result(attempt, request_identity, process, "predict")
         if result["operation"] != "predict":

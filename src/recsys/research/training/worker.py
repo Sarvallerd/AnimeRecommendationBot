@@ -93,7 +93,12 @@ def _fit(request: FitWorkerRequest, directory: Path, request_identity: str) -> F
         > _MAX_ARTIFACT
     ):
         raise ResearchError("training_artifact_invalid")
-    scorer = load_native(model, expected_identity=identity, inputs=inputs)
+    scorer = load_native(
+        model,
+        expected_identity=identity,
+        inputs=inputs,
+        inference_device=DeviceSpec("cpu", None),
+    )
     scorer.close()
     epochs: list[EpochMetricsWire] = [
         {

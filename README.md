@@ -25,7 +25,7 @@ uv run --locked recsys --help
 uv run --locked check_bundle tests/fixtures/bundle
 UV_PROJECT_ENVIRONMENT=.tools/lint-venv uv run --locked --only-group lint ruff check .
 UV_PROJECT_ENVIRONMENT=.tools/lint-venv uv run --locked --only-group lint ruff format --check .
-UV_PROJECT_ENVIRONMENT=.tools/typing-venv uv sync --locked --no-install-project --no-default-groups --group typing --extra quality
+UV_PROJECT_ENVIRONMENT=.tools/typing-venv uv sync --locked --no-install-project --no-default-groups --group typing --extra quality --extra torch-cpu
 UV_PROJECT_ENVIRONMENT=.tools/typing-venv uv run --locked --no-sync python -m mypy
 uv run --locked --no-editable --extra quality python -m unittest discover -s recsys/tests -p 'test_*.py'
 cargo test --locked
@@ -50,7 +50,7 @@ uv run --locked --no-editable --extra quality --extra torch-cpu recsys research 
   --seed-mal-id 1 --seed-mal-id 2 --limit 5
 ```
 
-Команды возвращают путь к опубликованному `run.json`; model identity — SHA-256 байтов `model/training-manifest.json` с префиксом `sha256:`. Для CUDA training укажите `--train-device cuda:0` в отдельном окружении `--extra torch-cuda`; CPU inference доступен через `--inference-device cpu`. Один worker имеет фиксированные пределы 300 секунд, 4 GiB наблюдаемого RSS и 64 MiB артефакта, без автоматического перехода на CPU. CUDA admission требует 2 GiB свободной VRAM. Полное ML-02, реальные данные, выбор N, публикация бота и rollout остаются отдельными задачами. Новые identities и сохранённые исторические hashes описаны в [миграции ARB-060](docs/migrations/arb060-native-pytorch-training-v1.json).
+Команды возвращают путь к опубликованному `run.json`; model identity — SHA-256 байтов `model/training-manifest.json` с префиксом `sha256:`. Для CUDA training укажите `--train-device cuda:0` в отдельном окружении `--extra torch-cuda`; CPU inference доступен через `--inference-device cpu`. Для CPU-операции отдельный worker запускается с пустым `CUDA_VISIBLE_DEVICES`, не меняя окружение родительского процесса; даже с CUDA-сборкой PyTorch его внутренний оптимизатор может проверять доступность CUDA, но приложение не запрашивает CUDA и не инициализирует её. Этот режим не гарантирует отсутствия обращения к драйверу; прямой вызов native API внутри уже запущенного процесса не изолирует его окружение. Один worker имеет фиксированные пределы 300 секунд, 4 GiB наблюдаемого RSS и 64 MiB артефакта, без автоматического перехода на CPU. CUDA admission требует 2 GiB свободной VRAM. Полное ML-02, реальные данные, выбор N, публикация бота и rollout остаются отдельными задачами. Новые identities и сохранённые исторические hashes описаны в [миграции ARB-060](docs/migrations/arb060-native-pytorch-training-v1.json).
 
 Пакет 0.3.0 сохраняет семь ML-02 моделей как CPU baselines. Параметр `--backend cpu` (по умолчанию) поддерживается для `research model-fit`, `predict-validation` и `campaign-run`; прежний `--backend gpu` возвращает `research_gpu_scoring_retired` без чтения входов и подготовки выходов. Команда `research gpu-preflight` также возвращает этот код и принимает прежние флаги только для диагностики. Для восстановления прежнего CuPy scoring используйте отдельный закреплённый checkout `fa983eaeeeeb41b41ac893b7de9827a40c25d27d`. Форматы новых CPU campaign plan/report — 3/2; старые артефакты не преобразуются. Точные связи версий и исходных файлов записаны в [миграции ARB-059](docs/migrations/arb059-cupy-scoring-retirement.json).
 

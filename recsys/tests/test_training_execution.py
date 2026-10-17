@@ -9,6 +9,7 @@ import os
 import platform
 import subprocess
 import tempfile
+import textwrap
 import unittest
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -157,6 +158,20 @@ class TrainingExecutionTests(unittest.TestCase):
         self.prepared.mkdir()
         self.output = self.root / "new-run"
 
+    def test_worker_environment_isolates_cpu_without_mutating_parent(self) -> None:
+        with patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": "0"}):
+            cpu = execution._worker_env(DeviceSpec("cpu", None))
+            cuda = execution._worker_env(DeviceSpec("cuda", 0))
+            self.assertEqual(cpu["CUDA_VISIBLE_DEVICES"], "")
+            self.assertEqual(cuda["CUDA_VISIBLE_DEVICES"], "0")
+            self.assertEqual(os.environ["CUDA_VISIBLE_DEVICES"], "0")
+        with patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": ""}):
+            self.assertEqual(
+                execution._worker_env(DeviceSpec("cuda", 0))["CUDA_VISIBLE_DEVICES"], ""
+            )
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertNotIn("CUDA_VISIBLE_DEVICES", execution._worker_env(DeviceSpec("cuda", 0)))
+
     def _fit(self) -> Path:
         return fit_training_model(
             self.prepared,
@@ -255,7 +270,8 @@ class TrainingExecutionTests(unittest.TestCase):
         ):
             with self.subTest(request_identity=request_identity):
 
-                def worker(attempt: Path, _cancel: object) -> ProcessResult:
+                def worker(attempt: Path, _cancel: object, *, device: DeviceSpec) -> ProcessResult:
+                    self.assertEqual(device, DeviceSpec("cpu", None))
                     raw = (attempt / "request.json").read_bytes()
                     actual = "sha256:" + hashlib.sha256(raw).hexdigest()
                     execution.write_json(
@@ -291,7 +307,8 @@ class TrainingExecutionTests(unittest.TestCase):
         ):
             with self.subTest(content=content):
 
-                def worker(attempt: Path, _cancel: object) -> ProcessResult:
+                def worker(attempt: Path, _cancel: object, *, device: DeviceSpec) -> ProcessResult:
+                    self.assertEqual(device, DeviceSpec("cpu", None))
                     path = attempt / "result.json"
                     if content == "oversized":
                         path.write_bytes(b"x" * 65537)
@@ -523,6 +540,282 @@ class SupervisedCpuTrainingTests(unittest.TestCase):
                 {path.name for path in prediction_run.iterdir()}, {"prediction.json", "run.json"}
             )
         self.assertFalse(list(fixture.root.glob(".*.attempt.*")))
+
+
+@unittest.skipUnless(
+    os.environ.get("ARB_TEST_TORCH_CUDA_CPU") == "1", "opt-in CUDA wheel CPU-only path"
+)
+class CudaBuildCpuExecutionTests(unittest.TestCase):
+    def test_cpu_worker_isolation_with_cuda_build_and_stored_cuda_inference(self) -> None:
+        import torch
+
+        self.assertEqual(torch.__version__, "2.13.0+cu129")
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        fixture = SeedTrainingFixture(temporary.name)
+        prepared, prepared_identity = fixture.make_prepared()
+        lock_path = fixture.root / "fixture-lock.json"
+        lock_path.write_text(json.dumps(fixture.lock), encoding="utf-8")
+        wrapper = fixture.root / "cpu-only-cuda-build-worker.py"
+        wrapper.write_text(
+            textwrap.dedent(
+                """\
+                import inspect
+                import json
+                import os
+                import sys
+                from contextlib import ExitStack
+                from pathlib import Path
+                from unittest.mock import patch
+
+                assert 'torch' not in sys.modules
+                assert os.environ.get('CUDA_VISIBLE_DEVICES') == ''
+                assert os.environ.get('PYTORCH_NVML_BASED_CUDA_CHECK') in (None, '', '0')
+                request = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
+                operation = request['operation']
+                import torch
+                original_available = torch.cuda.is_available
+                availability_results = []
+                initialized_before = torch.cuda.is_initialized()
+                assert not initialized_before
+                sys.path.insert(0, sys.argv[3])
+                from research_model_support import patch_release_info
+                from recsys.research.training import worker
+
+                def spy_available():
+                    frames = [
+                        (frame.function, frame.filename.replace('\\\\', '/'))
+                        for frame in inspect.stack()[1:]
+                        if '/unittest/mock.py' not in frame.filename
+                    ]
+                    names = [name for name, _ in reversed(frames)]
+                    expected = (
+                        'step', '_accelerator_graph_capture_health_check',
+                        'current_accelerator', 'is_available',
+                    )
+                    offsets = []
+                    cursor = 0
+                    for name in expected:
+                        try:
+                            cursor = names.index(name, cursor)
+                        except ValueError as exc:
+                            raise AssertionError(('unexpected CUDA availability chain', names)) from exc
+                        offsets.append(cursor)
+                        cursor += 1
+                    ordered = list(reversed(frames))
+                    paths = [ordered[offset][1] for offset in offsets]
+                    assert '/torch/optim/adam.py' in paths[0], paths
+                    assert '/torch/optim/optimizer.py' in paths[1], paths
+                    assert '/torch/accelerator/__init__.py' in paths[2], paths
+                    assert '/torch/accelerator/__init__.py' in paths[3], paths
+                    result = original_available()
+                    availability_results.append(result)
+                    return result
+
+                def forbidden(*_args, **_kwargs):
+                    raise AssertionError('CUDA application or stream probe')
+
+                with ExitStack() as stack:
+                    stack.enter_context(patch.object(torch.cuda, 'is_available', side_effect=spy_available))
+                    for name in (
+                        'device_count', 'mem_get_info', 'get_device_name',
+                        'reset_peak_memory_stats', 'max_memory_allocated',
+                        'max_memory_reserved', 'current_device', 'current_stream',
+                        'set_device', 'synchronize', 'init', '_lazy_init',
+                    ):
+                        stack.enter_context(patch.object(torch.cuda, name, side_effect=forbidden))
+                    for name in ('current_stream', 'current_device_index'):
+                        if hasattr(torch.accelerator, name):
+                            stack.enter_context(
+                                patch.object(torch.accelerator, name, side_effect=forbidden)
+                            )
+                    stack.enter_context(
+                        patch_release_info(json.loads(Path(sys.argv[2]).read_text()))
+                    )
+                    code = worker.main([sys.argv[1]])
+                    initialized_after = torch.cuda.is_initialized()
+                evidence = {
+                    'operation': operation,
+                    'visibility_empty_before_torch_import': True,
+                    'availability_calls': len(availability_results),
+                    'availability_results': availability_results,
+                    'application_cuda_calls': 0,
+                    'accelerator_stream_calls': 0,
+                    'pytorch_cuda_initialized_before_after': [
+                        initialized_before, initialized_after,
+                    ],
+                }
+                print('ARB060_CPU_BOUNDARY=' + json.dumps(evidence, sort_keys=True), flush=True)
+                assert code == 0, code
+                assert availability_results == ([False] * 3 if operation == 'fit' else [])
+                assert not initialized_after
+                raise SystemExit(code)
+                """
+            ),
+            encoding="utf-8",
+        )
+        original_start = ResourceSupervisor.start
+        tests_dir = str(Path(__file__).resolve().parent)
+        log_dirs: list[Path] = []
+
+        def fixture_start(
+            supervisor: ResourceSupervisor,
+            argv: Sequence[str],
+            *,
+            cwd: Path,
+            log_dir: Path,
+            remaining_seconds: float,
+            env: Mapping[str, str] | None = None,
+        ) -> JobHandle:
+            self.assertEqual(argv[1:4], ["-I", "-m", "recsys.research.training.worker"])
+            self.assertEqual(env["CUDA_VISIBLE_DEVICES"] if env is not None else None, "")
+            self.assertEqual(os.environ["CUDA_VISIBLE_DEVICES"], "0")
+            retained = fixture.root / f"worker-logs-{len(log_dirs)}"
+            log_dirs.append(retained)
+            return original_start(
+                supervisor,
+                [argv[0], "-I", str(wrapper), argv[4], str(lock_path), tests_dir],
+                cwd=cwd,
+                log_dir=retained,
+                remaining_seconds=remaining_seconds,
+                env=env,
+            )
+
+        revision = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).resolve().parents[2],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        model_run = fixture.root / "model-run"
+        supported_run = fixture.root / "supported-prediction-run"
+        empty_run = fixture.root / "empty-prediction-run"
+        with (
+            patch.dict(
+                os.environ,
+                {"CUDA_VISIBLE_DEVICES": "0", "PYTORCH_NVML_BASED_CUDA_CHECK": "0"},
+            ),
+            patch_release_info(fixture.lock),
+            patch.object(ResourceSupervisor, "start", new=fixture_start),
+            patch(
+                "recsys.research.training.execution.subprocess.run",
+                side_effect=AssertionError("CUDA admission"),
+            ),
+        ):
+            receipt_path = fit_training_model(
+                prepared,
+                model_run,
+                expected_prepared_identity=prepared_identity,
+                candidate_id="item-seed-mean-bpr-v1",
+                code_revision=revision,
+                train_device=DeviceSpec("cpu", None),
+                inference_device=DeviceSpec("cuda", 0),
+            )
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+            self.assertEqual(receipt["training"]["examples"], 9)
+            self.assertEqual(receipt["training"]["optimizer_steps"], 3)
+            self.assertEqual(receipt["training"]["supported_items"], 6)
+            self.assertTrue(receipt["training"]["changed_weights"])
+            self.assertNotEqual(
+                receipt["training"]["initial_weights_sha256"],
+                receipt["training"]["final_weights_sha256"],
+            )
+            self.assertEqual(
+                json.loads((model_run / "model" / "training-manifest.json").read_text())["config"][
+                    "inference_device"
+                ],
+                {"kind": "cuda", "index": 0},
+            )
+            for output, seeds, limit in (
+                (supported_run, (1, 9), 5),
+                (empty_run, (), 20),
+            ):
+                prediction_path = execution.predict_training_model(
+                    prepared,
+                    model_run / "model",
+                    output,
+                    expected_prepared_identity=prepared_identity,
+                    expected_model_identity=receipt["model"]["identity"],
+                    seed_mal_ids=seeds,
+                    code_revision=revision,
+                    limit=limit,
+                    inference_device=DeviceSpec("cpu", None),
+                )
+                prediction_receipt = json.loads(prediction_path.read_text(encoding="utf-8"))
+                prediction = json.loads((output / "prediction.json").read_text(encoding="utf-8"))
+                self.assertEqual(prediction_receipt["model_identity"], receipt["model"]["identity"])
+                self.assertEqual(prediction["model_identity"], receipt["model"]["identity"])
+                self.assertEqual(prediction["prepared_identity"], prepared_identity)
+                self.assertEqual(
+                    prediction_receipt["stored_inference_device"], {"kind": "cuda", "index": 0}
+                )
+                self.assertEqual(
+                    prediction_receipt["requested_inference_device"], {"kind": "cpu", "index": None}
+                )
+                self.assertEqual(
+                    prediction_receipt["effective_inference_device"], {"kind": "cpu", "index": None}
+                )
+                self.assertEqual(
+                    {path.name for path in output.iterdir()}, {"prediction.json", "run.json"}
+                )
+                if seeds:
+                    self.assertEqual(prediction["supported_seed_mal_ids"], [1])
+                    self.assertEqual(prediction["skipped_seed_mal_ids"], [9])
+                    self.assertEqual(
+                        (prediction["status"], prediction["source"]), ("ok", "seed-embedding")
+                    )
+                else:
+                    self.assertEqual(
+                        (prediction["status"], prediction["source"]), ("ok", "train-popularity")
+                    )
+                    self.assertEqual(len(prediction["recommendations"]), 20)
+                    self.assertEqual(
+                        [
+                            row["mal_id"]
+                            for row in prediction["recommendations"]
+                            if row["score"] == 0.0
+                        ],
+                        list(range(9, 21)),
+                    )
+                self._assert_cpu_runtime(prediction_receipt)
+                self.assertTrue(prediction_receipt["process"]["cleanup_complete"])
+        self._assert_cpu_runtime(receipt)
+        self.assertTrue(receipt["process"]["cleanup_complete"])
+        self.assertEqual({path.name for path in model_run.iterdir()}, {"model", "run.json"})
+        self.assertFalse(list(fixture.root.glob(".*.attempt.*")))
+        self.assertEqual(len(log_dirs), 3)
+        for index, path in enumerate(log_dirs):
+            records = [
+                json.loads(line.removeprefix("ARB060_CPU_BOUNDARY="))
+                for line in (path / "stdout.log").read_text(encoding="utf-8").splitlines()
+                if line.startswith("ARB060_CPU_BOUNDARY=")
+            ]
+            self.assertEqual(len(records), 1)
+            record = records[0]
+            self.assertEqual(record["operation"], "fit" if index == 0 else "predict")
+            self.assertTrue(record["visibility_empty_before_torch_import"])
+            self.assertEqual(record["availability_results"], [False] * 3 if index == 0 else [])
+            self.assertEqual(record["application_cuda_calls"], 0)
+            self.assertEqual(record["accelerator_stream_calls"], 0)
+            self.assertEqual(record["pytorch_cuda_initialized_before_after"], [False, False])
+            print("ARB060_CPU_BOUNDARY=" + json.dumps(record, sort_keys=True), flush=True)
+
+    def _assert_cpu_runtime(self, receipt: dict[str, object]) -> None:
+        runtime = cast("dict[str, object]", receipt["runtime"])
+        self.assertEqual(runtime["framework_version"], "2.13.0+cu129")
+        self.assertEqual(runtime["device"], {"kind": "cpu", "index": None})
+        self.assertTrue(
+            all(
+                runtime[key] is None
+                for key in (
+                    "torch_cuda_version",
+                    "device_name",
+                    "cuda_peak_allocated_bytes",
+                    "cuda_peak_reserved_bytes",
+                )
+            )
+        )
 
 
 if __name__ == "__main__":

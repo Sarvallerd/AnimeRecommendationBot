@@ -76,7 +76,6 @@ def predict_one(
         ranked = [
             PredictionRow(item, float(inputs.train_stats["items"][str(item)]["positive_users"]))
             for item in inputs.mal_ids
-            if inputs.train_stats["items"][str(item)]["positive_users"] > 0
         ]
         recommendations = _ranked(ranked, count)
     elif not used:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import unittest
 from dataclasses import replace
 
@@ -67,6 +68,35 @@ class TrainingPredictTests(unittest.TestCase):
         )
         self.assertEqual(doc["source"], "train-popularity")
         self.assertEqual([row["mal_id"] for row in doc["recommendations"]], [1, 2])
+
+    def test_empty_query_fills_limit_with_zero_count_catalog_tail(self) -> None:
+        extended = replace(
+            self.inputs, mal_ids=(1, 2, 3, 4, 5), train_stats=copy.deepcopy(self.inputs.train_stats)
+        )
+        extended.train_stats["items"]["5"] = {
+            "completed_users": 0,
+            "positive_users": 0,
+            "rating_sum": 0,
+            "rating_count": 0,
+            "band": "cold",
+        }
+        model_identity = "sha256:" + "b" * 64
+        doc = predict_one(
+            extended,
+            self.scorer,
+            model_identity=model_identity,
+            seed_mal_ids=(),
+            limit=5,
+        )
+        self.assertEqual(doc["model_identity"], model_identity)
+        self.assertEqual(doc["prepared_identity"], extended.prepared_identity)
+        self.assertEqual(
+            (doc["status"], doc["source"], doc["limit"]), ("ok", "train-popularity", 5)
+        )
+        self.assertEqual([row["mal_id"] for row in doc["recommendations"]], [1, 2, 3, 4, 5])
+        self.assertEqual(
+            [row["score"] for row in doc["recommendations"]], [2.0, 2.0, 1.0, 0.0, 0.0]
+        )
 
     def test_mixed_seed_skips_unsupported_and_masks_seed_and_cold(self) -> None:
         doc = predict_one(

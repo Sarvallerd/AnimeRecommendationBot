@@ -125,6 +125,101 @@ def _process() -> dict[str, object]:
 
 
 class ReceiptTests(unittest.TestCase):
+    def test_cpu_runtime_accepts_either_pinned_torch_build_with_null_cuda_metadata(self) -> None:
+        identity = "sha256:" + "a" * 64
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "result.json"
+            for framework in ("2.13.0+cpu", "2.13.0+cu129"):
+                for operation, template, kind, validate in (
+                    ("fit", _fit_result, "arb-native-training-run", validate_training_receipt),
+                    (
+                        "predict",
+                        _predict_result,
+                        "arb-native-prediction-run",
+                        validate_prediction_receipt,
+                    ),
+                ):
+                    with self.subTest(framework=framework, operation=operation):
+                        result = template(identity)
+                        runtime = cast("dict[str, object]", result["runtime"])
+                        runtime["framework_version"] = framework
+                        self.assertEqual(runtime["device"], {"kind": "cpu", "index": None})
+                        self.assertTrue(
+                            all(
+                                runtime[key] is None
+                                for key in (
+                                    "torch_cuda_version",
+                                    "device_name",
+                                    "cuda_peak_allocated_bytes",
+                                    "cuda_peak_reserved_bytes",
+                                )
+                            )
+                        )
+                        path.write_bytes(canonical_bytes(result))
+                        self.assertEqual(
+                            read_worker_result(path, expected_request_identity=identity), result
+                        )
+                        receipt = {
+                            key: value
+                            for key, value in result.items()
+                            if key not in ("operation", "status")
+                        }
+                        receipt.update(kind=kind, limits=_limits(), process=_process())
+                        self.assertEqual(validate(receipt), receipt)
+
+    def test_cuda_runtime_rejects_cpu_build_and_malformed_cuda_metadata(self) -> None:
+        identity = "sha256:" + "a" * 64
+        valid = _fit_result(identity)
+        runtime = cast("dict[str, object]", valid["runtime"])
+        runtime.update(
+            framework_version="2.13.0+cu129",
+            device={"kind": "cuda", "index": 0},
+            torch_cuda_version="12.9",
+            device_name="fixture CUDA device",
+            cuda_peak_allocated_bytes=1024,
+            cuda_peak_reserved_bytes=2048,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "result.json"
+            path.write_bytes(canonical_bytes(valid))
+            self.assertEqual(read_worker_result(path, expected_request_identity=identity), valid)
+            receipt = {
+                key: value for key, value in valid.items() if key not in ("operation", "status")
+            }
+            receipt.update(kind="arb-native-training-run", limits=_limits(), process=_process())
+            self.assertEqual(validate_training_receipt(receipt), receipt)
+            for key, value in (
+                ("framework_version", "2.13.0+cpu"),
+                ("torch_cuda_version", None),
+                ("device_name", ""),
+                ("cuda_peak_allocated_bytes", None),
+                ("cuda_peak_allocated_bytes", True),
+                ("cuda_peak_reserved_bytes", -1),
+            ):
+                with self.subTest(key=key, value=value):
+                    bad = copy.deepcopy(valid)
+                    cast("dict[str, object]", bad["runtime"])[key] = value
+                    path.write_bytes(canonical_bytes(bad))
+                    with self.assertRaisesRegex(ResearchError, "training_worker_result_invalid"):
+                        read_worker_result(path, expected_request_identity=identity)
+                    bad_receipt = {
+                        field: entry
+                        for field, entry in bad.items()
+                        if field not in ("operation", "status")
+                    }
+                    bad_receipt.update(
+                        kind="arb-native-training-run", limits=_limits(), process=_process()
+                    )
+                    with self.assertRaisesRegex(ResearchError, "training_receipt_invalid"):
+                        validate_training_receipt(bad_receipt)
+            cpu_with_cuda_fields = _fit_result(identity)
+            cast("dict[str, object]", cpu_with_cuda_fields["runtime"]).update(
+                framework_version="2.13.0+cu129", cuda_peak_allocated_bytes=1
+            )
+            path.write_bytes(canonical_bytes(cpu_with_cuda_fields))
+            with self.assertRaisesRegex(ResearchError, "training_worker_result_invalid"):
+                read_worker_result(path, expected_request_identity=identity)
+
     def test_request_roundtrip_and_bounds(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

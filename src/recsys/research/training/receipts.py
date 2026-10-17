@@ -142,8 +142,9 @@ def _runtime(value: object, code: str) -> None:
     for key in ("framework_version", "python_version", "numpy_version", "safetensors_version"):
         _text(runtime[key], code)
     kind = _device(runtime["device"], code)
+    framework = runtime["framework_version"]
     if (
-        runtime["framework_version"] != ("2.13.0+cpu" if kind == "cpu" else "2.13.0+cu129")
+        framework not in ({"2.13.0+cpu", "2.13.0+cu129"} if kind == "cpu" else {"2.13.0+cu129"})
         or runtime["numpy_version"] != "2.5.3"
         or runtime["safetensors_version"] != "0.8.0"
     ):
