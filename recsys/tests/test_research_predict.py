@@ -25,6 +25,98 @@ class PredictionTests(unittest.TestCase):
         self.prepared, self.prepared_identity = self.fixture.make_prepared()
         self.model = self.fixture.fit_popularity(self.prepared, self.prepared_identity)
 
+    def test_publication_failure_writes_failed_measurement_without_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = ModelFixture(directory)
+            prepared, identity = fixture.make_prepared()
+            model = fixture.fit_popularity(prepared, identity)
+            evidence = fixture.root / "evidence"
+            evidence.mkdir(mode=0o700)
+            measurement = evidence / "measure.json"
+            output = fixture.root / "prediction"
+            measured: dict[str, object] = {}
+            with (
+                patch_release_info(fixture.lock),
+                patch(
+                    "recsys.research.predict.publish",
+                    side_effect=OSError("injected publication failure"),
+                ),
+            ):
+                with self.assertRaises(OSError):
+                    predict_validation(
+                        prepared,
+                        model,
+                        output,
+                        expected_prepared_identity=identity,
+                        measurements=measured,
+                        measurement_output=measurement,
+                    )
+            self.assertFalse(output.exists())
+            self.assertFalse(list(fixture.root.glob(".prediction.*")))
+            self.assertEqual(measured["status"], "failed")
+            self.assertEqual(read_json(measurement)[0], measured)
+            self.assertEqual(measurement.stat().st_mode & 0o777, 0o600)
+
+    def test_measurement_write_failure_keeps_published_output_honest(self) -> None:
+        from recsys.research.predict import write_json as original_write
+
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = ModelFixture(directory)
+            prepared, identity = fixture.make_prepared()
+            model = fixture.fit_popularity(prepared, identity)
+            evidence = fixture.root / "evidence"
+            evidence.mkdir(mode=0o700)
+            measurement = evidence / "measure.json"
+            output = fixture.root / "prediction"
+            measured: dict[str, object] = {}
+            failures = 0
+
+            def fail_once(path: Path, body: object) -> None:
+                nonlocal failures
+                if path == measurement and failures == 0:
+                    failures += 1
+                    raise OSError("injected measurement failure")
+                original_write(path, body)
+
+            with (
+                patch_release_info(fixture.lock),
+                patch("recsys.research.predict.write_json", side_effect=fail_once),
+            ):
+                with self.assertRaises(OSError):
+                    predict_validation(
+                        prepared,
+                        model,
+                        output,
+                        expected_prepared_identity=identity,
+                        measurements=measured,
+                        measurement_output=measurement,
+                    )
+            self.assertTrue((output / "prediction-manifest.json").exists())
+            self.assertEqual(measured["status"], "published_measurement_failed")
+            self.assertEqual(read_json(measurement)[0], measured)
+
+    def test_measurement_output_is_private_separate_and_no_replace(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = ModelFixture(directory)
+            prepared, identity = fixture.make_prepared()
+            model = fixture.fit_popularity(prepared, identity)
+            evidence = fixture.root / "evidence"
+            evidence.mkdir(mode=0o700)
+            measurement = evidence / "measure.json"
+            measurement.write_text("existing", encoding="utf-8")
+            output = fixture.root / "prediction"
+            with patch_release_info(fixture.lock):
+                with self.assertRaisesRegex(ResearchError, "research_unsafe_path"):
+                    predict_validation(
+                        prepared,
+                        model,
+                        output,
+                        expected_prepared_identity=identity,
+                        measurement_output=measurement,
+                    )
+            self.assertFalse(output.exists())
+            self.assertEqual(measurement.read_text(encoding="utf-8"), "existing")
+
     def test_predict_evaluate_compare_and_repeat_bytes(self) -> None:
         source_open = Path.open
 

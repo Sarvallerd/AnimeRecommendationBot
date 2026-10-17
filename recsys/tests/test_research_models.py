@@ -13,6 +13,7 @@ from research_model_support import ModelFixture, patch_release_info
 from research_support import FixtureLock
 
 from recsys.contracts.bundle import JSONValue, canonical_bytes
+from recsys.contracts.provenance import SOURCE_FILES
 from recsys.research.artifacts import FileDescriptor, identity, read_json
 from recsys.research.models.inputs import iter_training_rows
 from recsys.research.models.manifest import ModelManifest, _external, _validate_manifest
@@ -45,6 +46,26 @@ class ModelTests(unittest.TestCase):
             return read_scoring_inputs(
                 self.prepared, expected_prepared_identity=self.prepared_identity
             )
+
+    def test_cpu_manifest_keeps_original_execution_shape(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = ModelFixture(directory)
+            prepared, identity = fixture.make_prepared()
+            model = fixture.fit_popularity(prepared, identity)
+            manifest, _ = read_json(model / "model-manifest.json")
+            assert isinstance(manifest, dict)
+            producer = manifest["producer"]
+            assert isinstance(producer, dict)
+            self.assertEqual(
+                producer["execution"],
+                {"backend": "cpu", "dtype": "float64", "blas_threads": 1},
+            )
+            hashes = producer["code_files_sha256"]
+            assert isinstance(hashes, dict)
+            self.assertEqual(set(hashes), set(SOURCE_FILES))
+            self.assertNotIn("research_gpu.py", hashes)
+            self.assertNotIn("gpu.py", hashes)
+            self.assertNotIn("research/gpu.py", hashes)
 
     def test_old_preparation_is_rejected_before_payload_or_publication(self) -> None:
         path = self.prepared / "prepare-manifest.json"

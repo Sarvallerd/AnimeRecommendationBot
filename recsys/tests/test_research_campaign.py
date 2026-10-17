@@ -14,7 +14,6 @@ import sys
 import tempfile
 import time
 import unittest
-import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager, redirect_stdout
 from datetime import datetime, timedelta, timezone
@@ -30,8 +29,7 @@ from test_research_model_content import _glove
 
 import recsys
 from recsys.research.artifacts import StreamDescriptor, StreamWriter, read_json, stream_jsonl
-from recsys.research.campaign.artifacts import _read_receipt, _validate_gpu_measurement
-from recsys.research.campaign.common import _read_private
+from recsys.research.campaign.artifacts import _read_receipt
 from recsys.research.campaign.plan import CampaignPlan, _validate_plan_structure
 from recsys.research.campaign.report import validate_campaign
 from recsys.research.campaign.runner import (
@@ -67,13 +65,11 @@ class _Paired(TypedDict):
 class _Variant(TypedDict):
     backend: str
     evaluation_replay_bytes_equal: bool
-    predict_measurement: object | None
 
 
 class _Report(TypedDict):
     status: str
     variants: list[_Variant]
-    auxiliary_fits: list[object]
     execution_config_count: int
     planned_nodes: int
     actual_completed_model_packages: int
@@ -84,7 +80,6 @@ class _Report(TypedDict):
     paired_vs_popularity: dict[str, _Paired] | None
     small_cohort_suppressed: bool
     diagnostics: dict[str, object]
-    hybrid_admission: dict[str, object]
 
 
 def _object(path: Path) -> dict[str, object]:
@@ -117,9 +112,7 @@ def _report(prepared: Path, output: Path, identity: str, plan_identity: str) -> 
         expected_campaign_identity=plan_identity,
     )
     assert isinstance(value.get("variants"), list)
-    assert isinstance(value.get("auxiliary_fits"), list)
     assert isinstance(value.get("diagnostics"), dict)
-    assert isinstance(value.get("hybrid_admission"), dict)
     return cast("_Report", value)
 
 
@@ -473,10 +466,8 @@ class CampaignTests(unittest.TestCase):
             fixture.lock["inputs"]["embeddings"] = _glove(glove)
             prepared, identity = fixture.make_prepared()
             with patch_release_info(fixture.lock):
-                valid = _plan(
-                    prepared, identity, "a" * 40, glove, "cpu", 2, datetime.now(timezone.utc)
-                )
-            self.assertEqual(_validate_plan_structure(valid), "cpu")
+                valid = _plan(prepared, identity, "a" * 40, glove, 2, datetime.now(timezone.utc))
+            _validate_plan_structure(valid)
             malformed: tuple[tuple[str, object], ...] = (
                 ("variants", [0] * 7),
                 ("variants", [{"variant_id": "popularity", "backend": "cpu"}] * 7),
@@ -492,7 +483,6 @@ class CampaignTests(unittest.TestCase):
                     "producer",
                     {**valid["producer"], "code_files_sha256": {"file": True}},
                 ),
-                ("auxiliary_fits", [0]),
                 ("execution_config_count", True),
                 ("assets", {"glove": []}),
                 ("budgets", {"fit_seconds_per_variant": True}),
@@ -506,6 +496,31 @@ class CampaignTests(unittest.TestCase):
                     cast("dict[str, object]", record)[field] = invalid
                     with self.assertRaisesRegex(ResearchError, "research_campaign_plan_mismatch"):
                         _validate_plan_structure(record)
+            legacy: tuple[tuple[str, object], ...] = (
+                ("auxiliary_fits", []),
+                ("scheduling", {**valid["scheduling"], "gpu_workers": 1}),
+                ("scheduling", {**valid["scheduling"], "gpu_optional_benchmark": "not_scheduled"}),
+                ("variants", [{**valid["variants"][0], "backend": "gpu"}, *valid["variants"][1:]]),
+                (
+                    "variants",
+                    [
+                        *valid["variants"][:-1],
+                        {
+                            **valid["variants"][-1],
+                            "components": [
+                                {"variant_id": "content-mean", "phase": "fit_cpu_component"},
+                                {"variant_id": "puresvd", "phase": "fit"},
+                            ],
+                        },
+                    ],
+                ),
+            )
+            for field, invalid in legacy:
+                with self.subTest(legacy=field, value=invalid):
+                    record = copy.deepcopy(valid)
+                    cast("dict[str, object]", record)[field] = invalid
+                    with self.assertRaisesRegex(ResearchError, "research_campaign_plan_mismatch"):
+                        _validate_plan_structure(record)
 
     def test_worker_rejects_rehashed_malformed_plan_before_variant_lookup(self) -> None:
         from recsys.contracts.provenance import SOURCE_LAYOUT
@@ -513,7 +528,7 @@ class CampaignTests(unittest.TestCase):
 
         _, campaign_sha = campaign()
         malformed = {
-            "schema_version": 2,
+            "schema_version": 3,
             "kind": "arb-ml02-campaign-plan",
             "producer": {"source_layout": SOURCE_LAYOUT},
             "campaign_spec_sha256": campaign_sha,
@@ -548,76 +563,6 @@ class CampaignTests(unittest.TestCase):
             self.assertEqual(receipt["status"], "failed")
             self.assertEqual(receipt["code"], "research_campaign_plan_mismatch")
 
-    def test_malformed_retained_gpu_measurements_have_fixed_error(self) -> None:
-        valid: dict[str, object] = {
-            "backend": "gpu",
-            "status": "published",
-            "gpu_admission": {
-                "purpose": "parity-only-gpu-admission",
-                "canonical_queries": 1,
-                "nonempty_queries": 1,
-                "raw_atol": 1e-12,
-                "raw_rtol": 1e-12,
-                "raw_max_abs_difference": 0.0,
-                "encoded_score_differences": 0,
-                "complete_available_rankings_equal": True,
-                "model_sha256": "a" * 64,
-                "query_sha256": "b" * 64,
-                "scoring_provenance": {"backend": "cupy"},
-                "code_files_sha256": {"research_gpu.py": "c" * 64},
-            },
-            "dedicated_pool_session_including_admission": {
-                "pool_used_bytes": 0,
-                "pool_reserved_bytes": 0,
-                "pool_limit_bytes": 256,
-                "pool_peak_used_bytes": 0,
-                "pool_peak_reserved_bytes": 0,
-            },
-            "memory_scope": "dedicated-pool-only-excludes-context-and-cublas",
-            "queries": 1,
-            "score_pairs": 1,
-            "session_acquire_seconds": 0.0,
-            "input_validation_seconds": 0.0,
-            "model_validation_upload_seconds": 0.0,
-            "input_model_init_upload_seconds": 0.0,
-            "gpu_admission_seconds": 0.0,
-            "synchronized_scoring_seconds": 0.0,
-            "encoding_gzip_write_seconds": 0.0,
-            "staging_wall_seconds": 0.0,
-            "publication_wall_seconds": 0.0,
-        }
-        _validate_gpu_measurement(valid)
-        malformed: list[object] = [None, [], {}, {**valid, "gpu_admission": None}]
-        for missing in ("queries", "gpu_admission_seconds"):
-            altered = dict(valid)
-            del altered[missing]
-            malformed.append(altered)
-        malformed.extend(
-            (
-                {**valid, "queries": True},
-                {**valid, "gpu_admission_seconds": "zero"},
-                {**valid, "gpu_admission": {}},
-                {
-                    **valid,
-                    "gpu_admission": {
-                        **cast("dict[str, object]", valid["gpu_admission"]),
-                        "canonical_queries": True,
-                    },
-                },
-                {**valid, "dedicated_pool_session_including_admission": []},
-            )
-        )
-        with tempfile.TemporaryDirectory() as temporary:
-            measurement = Path(temporary) / "measurement.json"
-            for record in malformed:
-                with self.subTest(record=record):
-                    _private_file(measurement, _canonical(record))
-                    retained, _ = _read_private(measurement)
-                    with self.assertRaises(ResearchError) as caught:
-                        _validate_gpu_measurement(retained)
-                    self.assertEqual(str(caught.exception), "research_campaign_admission_invalid")
-                    measurement.unlink()
-
     def test_old_campaign_plan_rejects_before_science(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             fixture = ModelFixture(temporary)
@@ -625,16 +570,54 @@ class CampaignTests(unittest.TestCase):
             fixture.lock["inputs"]["embeddings"] = _glove(glove)
             prepared, identity = fixture.make_prepared()
             with patch_release_info(fixture.lock):
-                plan = _plan(
-                    prepared, identity, "a" * 40, glove, "cpu", 2, datetime.now(timezone.utc)
-                )
-            plan["schema_version"] = 1
-            cast("dict[str, object]", plan["producer"]).pop("source_layout")
+                plan = _plan(prepared, identity, "a" * 40, glove, 2, datetime.now(timezone.utc))
             with patch(
                 "recsys.research.models.spec.campaign", side_effect=AssertionError("science loaded")
             ):
-                with self.assertRaisesRegex(ResearchError, "research_source_layout_unsupported"):
-                    _validate_plan_structure(plan)
+                for schema in (1, 2):
+                    old = copy.deepcopy(plan)
+                    old["schema_version"] = schema
+                    with self.subTest(schema=schema):
+                        with self.assertRaisesRegex(
+                            ResearchError, "research_source_layout_unsupported"
+                        ):
+                            _validate_plan_structure(old)
+
+    def test_journal_and_worker_reject_auxiliary_phase(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "campaign"
+            root.mkdir(mode=0o700)
+            journal = _Journal(root / "journal.jsonl")
+            with self.assertRaises(ResearchError):
+                journal.append(
+                    "attempt_started",
+                    generation="g",
+                    variant="content-mean",
+                    phase="fit_cpu_component",
+                    attempt=1,
+                )
+            self.assertFalse(journal.path.exists())
+            request = _worker_request(
+                root,
+                "sha256:" + "a" * 64,
+                "g",
+                "content-mean",
+                "fit_cpu_component",
+                1,
+                root / "prepared",
+                root / "glove.txt",
+                None,
+                None,
+                None,
+                None,
+            )
+            attempt = root / "variants" / "content-mean" / "attempts" / "fit_cpu_component" / "1"
+            attempt.mkdir(parents=True, mode=0o700)
+            path = attempt / "request.json"
+            _private_file(path, _canonical(request))
+            with self.assertRaises(ResearchError):
+                _worker_main(path)
+            self.assertFalse((attempt / "artifact").exists())
 
     def test_published_orphan_without_success_event_blocks_resume(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -812,7 +795,7 @@ class CampaignTests(unittest.TestCase):
             for private_key in ("user_key", "query_id", "seed_mal_ids", "ranking"):
                 self.assertNotIn(private_key, public)
 
-    def test_shared_auxiliary_fit_budget_and_journal_clock_regression(self) -> None:
+    def test_retry_fit_budget_and_journal_clock_regression(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             journal = _Journal(Path(temporary) / "journal.jsonl")
             first = self._clock() - timedelta(seconds=10)
@@ -852,48 +835,59 @@ class CampaignTests(unittest.TestCase):
                 remaining_seconds=FIT_SECONDS - 300,
             )
             journal.append(
-                "attempt_finished",
+                "attempt_interrupted",
                 generation="h",
                 variant="content-mean",
                 phase="fit",
                 attempt=2,
                 charged_seconds=500.0,
-                status="success",
                 resources={"cleanup_complete": True},
-                output_identity="sha256:" + "a" * 64,
             )
             journal.append(
                 "attempt_started",
                 generation="h",
                 variant="content-mean",
-                phase="fit_cpu_component",
-                attempt=1,
+                phase="fit",
+                attempt=3,
                 remaining_seconds=FIT_SECONDS - 800,
             )
             journal.append(
-                "attempt_interrupted",
+                "attempt_finished",
                 generation="h",
                 variant="content-mean",
-                phase="fit_cpu_component",
-                attempt=1,
+                phase="fit",
+                attempt=3,
                 charged_seconds=400.0,
+                status="success",
                 resources={"cleanup_complete": True},
+                output_identity="sha256:" + "a" * 64,
             )
             successes, attempts, charged, starts, failed = _successes(journal.events)
             self.assertFalse(starts)
             self.assertFalse(failed)
-            self.assertEqual(attempts[("content-mean", "fit")], 2)
+            self.assertEqual(attempts[("content-mean", "fit")], 3)
+            self.assertEqual(charged[("content-mean", "fit")], 1200.0)
             self.assertIn(("content-mean", "fit"), successes)
             fixture = ModelFixture(temporary)
             glove = Path(temporary) / "glove.txt"
             fixture.lock["inputs"]["embeddings"] = _glove(glove)
             prepared, identity = fixture.make_prepared()
             with patch_release_info(fixture.lock):
-                plan = _plan(prepared, identity, "a" * 40, glove, "cpu", 2, first)
+                plan = _plan(prepared, identity, "a" * 40, glove, 2, first)
             plan["deadline_utc"] = (first + timedelta(days=1)).isoformat().replace("+00:00", "Z")
             self.assertAlmostEqual(
-                _remaining(plan, charged, "content-mean", "fit_cpu_component"),
+                _remaining(plan, charged, "content-mean", "fit"),
                 FIT_SECONDS - 1200,
+                delta=10,
+            )
+            evaluation_charges = {
+                ("content-mean", "predict"): 200.0,
+                ("content-mean", "evaluate"): 300.0,
+                ("content-mean", "replay"): 400.0,
+            }
+            self.assertAlmostEqual(
+                _remaining(plan, evaluation_charges, "content-mean", "replay"),
+                3600.0 - 900.0,
                 delta=10,
             )
 
@@ -956,6 +950,8 @@ class CampaignTests(unittest.TestCase):
                     _report(prepared, output, identity, plan_identity)["status"], "complete"
                 )
 
+                original_report = _object(output / "campaign-report.json")
+                original_variants = cast("list[dict[str, object]]", original_report["variants"])
                 malformed = _canonical([])
                 (output / "campaign-report.json").write_bytes(malformed)
                 report_manifest = output / "campaign-report-manifest.json"
@@ -972,6 +968,35 @@ class CampaignTests(unittest.TestCase):
                         expected_prepared_identity=identity,
                         expected_campaign_identity=plan_identity,
                     )
+                legacy_fields: tuple[dict[str, object], ...] = (
+                    {"auxiliary_fits": []},
+                    {"hybrid_admission": {"status": "not_applicable"}},
+                    {
+                        "variants": [
+                            {**original_variants[0], "predict_measurement": None},
+                            *original_variants[1:],
+                        ]
+                    },
+                )
+                for extra in legacy_fields:
+                    with self.subTest(extra=extra):
+                        tampered = {**original_report, **extra}
+                        raw = _canonical(tampered)
+                        (output / "campaign-report.json").write_bytes(raw)
+                        bound["report"] = {
+                            "bytes": len(raw),
+                            "sha256": hashlib.sha256(raw).hexdigest(),
+                        }
+                        report_manifest.write_bytes(_canonical(bound))
+                        with self.assertRaisesRegex(
+                            ResearchError, "research_campaign_report_invalid"
+                        ):
+                            validate_campaign(
+                                prepared,
+                                output,
+                                expected_prepared_identity=identity,
+                                expected_campaign_identity=plan_identity,
+                            )
 
     def test_seven_real_variants_replay_public_suppression_and_resume_binding(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -996,12 +1021,15 @@ class CampaignTests(unittest.TestCase):
                 manifest = _manifest(manifest_path)
                 plan = _plan_file(output / "campaign-plan.json")
                 self.assertEqual(manifest["status"], "complete")
+                self.assertEqual(plan["schema_version"], 3)
                 self.assertEqual(plan["execution_config_count"], 7)
-                self.assertEqual(plan["auxiliary_fits"], [])
-                self.assertEqual(len(_expected_nodes(plan)), 28)
+                self.assertNotIn("auxiliary_fits", plan)
+                self.assertEqual(plan["scheduling"], {"cpu_workers": 2, "blas_threads": 1})
+                self.assertEqual(len(_expected_nodes()), 28)
                 self.assertEqual(len(list((output / "variants").iterdir())), 7)
                 report = _report(prepared, output, identity, manifest["plan_identity"])
                 self.assertEqual(report["status"], "complete")
+                self.assertEqual(_object(output / "campaign-report.json")["schema_version"], 2)
                 self.assertEqual(len(report["variants"]), 7)
                 self.assertEqual(report["planned_nodes"], 28)
                 self.assertEqual(report["actual_completed_model_packages"], 7)
@@ -1149,7 +1177,6 @@ class CampaignTests(unittest.TestCase):
                     identity,
                     "a" * 40,
                     glove,
-                    "cpu",
                     1,
                     __import__("datetime").datetime.now(__import__("datetime").timezone.utc),
                 )
@@ -1246,7 +1273,7 @@ def _isolated_fixture_python(root: Path, lock: FixtureLock) -> tuple[Path, Path]
 
 
 class RealProcessCampaignTests(unittest.TestCase):
-    def _run(self, backend: str) -> None:
+    def _run(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             fixture = ModelFixture(temporary)
             root = Path(temporary)
@@ -1254,7 +1281,7 @@ class RealProcessCampaignTests(unittest.TestCase):
             fixture.lock["inputs"]["embeddings"] = _glove(glove)
             prepared, identity = fixture.make_prepared()
             executable, lock_path = _isolated_fixture_python(root, fixture.lock)
-            output = root / f"{backend}-real-campaign"
+            output = root / "cpu-real-campaign"
             with (
                 patch_release_info(fixture.lock),
                 patch("recsys.research.campaign.runner.sys.executable", str(executable)),
@@ -1267,14 +1294,14 @@ class RealProcessCampaignTests(unittest.TestCase):
                     expected_prepared_identity=identity,
                     code_revision="a" * 40,
                     glove=glove,
-                    backend=backend,
+                    backend="cpu",
                     cpu_workers=2,
                 )
                 manifest = _manifest(manifest_path)
                 if manifest["status"] != "complete":
                     retention = os.getenv("ARB_RESEARCH_FAILURE_DIR")
                     if retention:
-                        target = Path(retention) / ("gpu-fixture-" + uuid.uuid4().hex)
+                        target = Path(retention) / ("cpu-fixture-" + os.urandom(8).hex())
                         shutil.copytree(root, target, symlinks=True)
                     events = _Journal(output / "journal.jsonl").events
                     safe: list[object] = [
@@ -1299,74 +1326,15 @@ class RealProcessCampaignTests(unittest.TestCase):
                 report = _report(prepared, output, identity, manifest["plan_identity"])
             self.assertEqual(len(report["variants"]), 7)
             self.assertTrue(all(row["evaluation_replay_bytes_equal"] for row in report["variants"]))
-            self.assertEqual(report["execution_config_count"], 9 if backend == "gpu" else 7)
-            self.assertEqual(report["planned_nodes"], 30 if backend == "gpu" else 28)
-            self.assertEqual(
-                report["actual_completed_model_packages"], 9 if backend == "gpu" else 7
-            )
+            self.assertEqual(report["execution_config_count"], 7)
+            self.assertEqual(report["planned_nodes"], 28)
+            self.assertEqual(report["actual_completed_model_packages"], 7)
             self.assertEqual(report["actual_attempts_started"], report["planned_nodes"])
             self.assertEqual(report["actual_attempts_completed"], report["planned_nodes"])
-            self.assertEqual(len(report["auxiliary_fits"]), 2 if backend == "gpu" else 0)
-            self.assertEqual(
-                sum(row["backend"] == "gpu" for row in report["variants"]),
-                4 if backend == "gpu" else 0,
-            )
-            self.assertEqual(
-                sum(row["predict_measurement"] is not None for row in report["variants"]),
-                4 if backend == "gpu" else 0,
-            )
+            self.assertNotIn("auxiliary_fits", report)
+            self.assertNotIn("hybrid_admission", report)
+            self.assertTrue(all(row["backend"] == "cpu" for row in report["variants"]))
+            self.assertTrue(all("predict_measurement" not in row for row in report["variants"]))
 
     def test_cpu_seven_variant_real_supervised_workers(self) -> None:
-        self._run("cpu")
-
-    @unittest.skipUnless(os.getenv("ARB_RESEARCH_GPU_TEST") == "1", "hardware opt-in")
-    def test_gpu_seven_variant_real_supervised_workers(self) -> None:
-        self._run("gpu")
-
-
-@unittest.skipUnless(os.getenv("ARB_RESEARCH_GPU_TEST") == "1", "hardware opt-in")
-class GPUCampaignTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.enterContext(_stable_campaign_clock())
-
-    def test_four_gpu_variants_two_cpu_auxiliary_fits_and_cpu_hybrid(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            fixture = ModelFixture(temporary)
-            glove = Path(temporary) / "glove.txt"
-            fixture.lock["inputs"]["embeddings"] = _glove(glove)
-            prepared, identity = fixture.make_prepared()
-            output = Path(temporary) / "gpu-campaign"
-            with (
-                patch_release_info(fixture.lock),
-                patch("recsys.research.resources.ResourceSupervisor", _Supervisor),
-            ):
-                path = run_campaign(
-                    prepared,
-                    output,
-                    expected_prepared_identity=identity,
-                    code_revision="a" * 40,
-                    glove=glove,
-                    backend="gpu",
-                    cpu_workers=2,
-                )
-                manifest = _manifest(path)
-                plan = _plan_file(output / "campaign-plan.json")
-                self.assertEqual(manifest["status"], "complete")
-                self.assertEqual(plan["execution_config_count"], 9)
-                self.assertEqual(len(_expected_nodes(plan)), 30)
-                self.assertEqual(
-                    [entry["variant_id"] for entry in plan["auxiliary_fits"]],
-                    ["content-mean", "puresvd"],
-                )
-                report = _report(prepared, output, identity, manifest["plan_identity"])
-                self.assertEqual(len(report["variants"]), 7)
-                self.assertEqual(len(report["auxiliary_fits"]), 2)
-                self.assertEqual(
-                    report["hybrid_admission"],
-                    {"status": "not_applicable", "reason": "declared_cpu_execution"},
-                )
-                self.assertEqual(report["variants"][-1]["backend"], "cpu")
-                self.assertEqual(
-                    [row["backend"] for row in report["variants"]],
-                    ["cpu", "gpu", "gpu", "gpu", "cpu", "gpu", "cpu"],
-                )
+        self._run()

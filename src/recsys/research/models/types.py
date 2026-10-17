@@ -69,5 +69,5 @@ class CloseableScorer(Protocol):
 
 
 @runtime_checkable
-class SupportedBatchScorer(Scorer, BatchScorer, CloseableScorer, Protocol):
+class SupportedBatchScorer(Scorer, BatchScorer, Protocol):
     def supported_seed_ids(self, seed_mal_ids: tuple[int, ...]) -> frozenset[int]: ...

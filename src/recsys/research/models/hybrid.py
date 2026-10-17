@@ -12,9 +12,8 @@ from recsys.research.artifacts import descriptor, file_descriptor, read_json, sa
 from recsys.research.models.collaborative import load as load_collaborative
 from recsys.research.models.content import load as load_content
 from recsys.research.models.manifest import ModelManifest, _read_model_package, _validate_manifest
-from recsys.research.models.spec import EXPECTED_VARIANTS
+from recsys.research.models.spec import EXPECTED_VARIANTS, require_cpu_backend
 from recsys.research.models.types import (
-    CloseableScorer,
     ScoreVector,
     ScoringInputs,
     SupportedBatchScorer,
@@ -79,8 +78,7 @@ def fit(
     backend: str,
 ) -> dict[str, object]:
     """Embed already fitted packages; this operation never opens train rows."""
-    if backend != "cpu":
-        fail("research_backend_unsupported")
+    require_cpu_backend(backend)
     _parameters(parameters)
     if type(assets) is not dict or set(assets) != {"content_model", "puresvd_model"}:
         fail("research_model_invalid")
@@ -89,12 +87,9 @@ def fit(
         source = safe_path(assets[asset], directory=True)
         manifest, raw = _component_manifest(source, inputs, backend, code_revision, variant)
         # A source package is semantically checked before its immutable bytes are copied.
-        scorer = (load_content if variant == "content-mean" else load_collaborative)(
+        (load_content if variant == "content-mean" else load_collaborative)(
             source, manifest, inputs, backend="cpu"
         )
-        close = getattr(scorer, "close", None)
-        if callable(close):
-            close()
         target_name = name + "_manifest.json"
         with open(
             stage / target_name, "xb", opener=lambda path, flags: os.open(path, flags, 0o600)
@@ -249,16 +244,6 @@ class HybridScorer:
         self.content = content
         self.svd = svd
 
-    def close(self) -> None:
-        try:
-            close = getattr(self.svd, "close", None)
-            if callable(close):
-                close()
-        finally:
-            close = getattr(self.content, "close", None)
-            if callable(close):
-                close()
-
     def score_many(self, seed_sets: tuple[tuple[int, ...], ...]) -> tuple[ScoreVector, ...]:
         return _fusion(seed_sets, self.ids, self.content, self.svd)
 
@@ -270,36 +255,23 @@ def load(
     model_dir: Path, manifest: ModelManifest, inputs: ScoringInputs, *, backend: str = "cpu"
 ) -> HybridScorer:
     """Load the two embedded CPU components without their source directories."""
-    if backend != "cpu":
-        fail("research_backend_unsupported")
+    require_cpu_backend(backend)
     _parameters(manifest["parameters"])
     embedded = _embedded(model_dir, manifest, inputs, backend)
-    loaded: list[CloseableScorer] = []
     content_scorer: SupportedBatchScorer | None = None
     svd_scorer: SupportedBatchScorer | None = None
-    try:
-        for name, _, variant, prefix in _PARTS:
-            if variant == "content-mean":
-                content_loaded = load_content(
+    for name, _, variant, prefix in _PARTS:
+        if variant == "content-mean":
+            content_scorer = load_content(
+                model_dir, embedded[name], inputs, backend="cpu", payload_prefix=prefix
+            )
+        else:
+            svd_scorer = cast(
+                "SupportedBatchScorer",
+                load_collaborative(
                     model_dir, embedded[name], inputs, backend="cpu", payload_prefix=prefix
-                )
-                content_scorer = content_loaded
-                loaded.append(content_loaded)
-            else:
-                svd_loaded = cast(
-                    "SupportedBatchScorer",
-                    load_collaborative(
-                        model_dir, embedded[name], inputs, backend="cpu", payload_prefix=prefix
-                    ),
-                )
-                svd_scorer = svd_loaded
-                loaded.append(svd_loaded)
-        if content_scorer is None or svd_scorer is None:
-            fail("research_model_invalid")
-        return HybridScorer(inputs.mal_ids, content_scorer, svd_scorer)
-    except BaseException:
-        for scorer in reversed(loaded):
-            close = getattr(scorer, "close", None)
-            if callable(close):
-                close()
-        raise
+                ),
+            )
+    if content_scorer is None or svd_scorer is None:
+        fail("research_model_invalid")
+    return HybridScorer(inputs.mal_ids, content_scorer, svd_scorer)

@@ -6,15 +6,12 @@ import hashlib
 import os
 import re
 import stat
-import statistics
 import struct
-import tempfile
 import zlib
-from contextlib import AbstractContextManager, nullcontext
-from itertools import chain, islice
+from itertools import islice
 from pathlib import Path
 from time import perf_counter_ns
-from typing import TYPE_CHECKING, TypedDict, cast
+from typing import TypedDict, cast
 
 from recsys.contracts.bundle import canonical_bytes
 from recsys.research.artifacts import (
@@ -30,22 +27,16 @@ from recsys.research.artifacts import (
     stream_jsonl,
     write_json,
 )
-from recsys.research.models.dispatch import StandardBackend, _backend
 from recsys.research.models.inputs import read_scoring_inputs
-from recsys.research.models.manifest import ModelManifest
 from recsys.research.models.package import load_model
+from recsys.research.models.spec import require_cpu_backend
 from recsys.research.models.types import (
     BatchScorer,
     CloseableScorer,
     Scorer,
     ScoreVector,
-    ScoringInputs,
 )
 from recsys.research.protocol import ProtocolSpec, exact, fail, load_protocol, sha
-
-if TYPE_CHECKING:
-    import numpy as np
-    from numpy.typing import NDArray
 
 
 class PredictionQuery(TypedDict):
@@ -175,81 +166,6 @@ def _vectors(scorer: Scorer, seed_sets: tuple[tuple[int, ...], ...]) -> tuple[Sc
     return rows
 
 
-def _rank(
-    vector: ScoreVector,
-    encoded: EncodedScores,
-    seeds: tuple[int, ...],
-    ids: tuple[int, ...],
-) -> NDArray[np.intp]:
-    import numpy as np
-
-    excluded = set(seeds)
-    candidates = np.flatnonzero(
-        vector.available & np.asarray([item not in excluded for item in ids], dtype=np.bool_)
-    )
-    values = np.asarray([cast("int", encoded[index][1]) for index in candidates], dtype=np.int64)
-    order = np.lexsort((np.asarray(ids, dtype=np.int64)[candidates], -values))
-    return candidates[order]
-
-
-def _admit_gpu(
-    first: tuple[ValidatedQuery, ...],
-    model_dir: Path,
-    model: ModelManifest,
-    gpu_scorer: Scorer,
-    inputs: ScoringInputs,
-    query_desc: StreamDescriptor,
-) -> dict[str, object]:
-    """Compare complete candidate masks and rankings using the same validated payload."""
-    import numpy as np
-
-    variant = model["variant_id"]
-    reference = cast("StandardBackend", _backend(variant)).load(
-        model_dir, model, inputs, backend="cpu"
-    )
-    compared = differences = 0
-    max_abs = 0.0
-    try:
-        seeds = tuple(group for _, group in first if group)
-        cpu_rows = _vectors(reference, seeds)
-        gpu_rows = _vectors(gpu_scorer, seeds)
-        for group, cpu, gpu in zip(seeds, cpu_rows, gpu_rows, strict=True):
-            cpu_encoded = _encode_vector(cpu, len(group), inputs.mal_ids)
-            gpu_encoded = _encode_vector(gpu, len(group), inputs.mal_ids)
-            if (
-                cpu.supported_seeds != gpu.supported_seeds
-                or not np.array_equal(cpu.available, gpu.available)
-                or not np.isclose(cpu.values, gpu.values, atol=1e-12, rtol=1e-12).all()
-                or not np.array_equal(
-                    _rank(cpu, cpu_encoded, group, inputs.mal_ids),
-                    _rank(gpu, gpu_encoded, group, inputs.mal_ids),
-                )
-            ):
-                fail("research_gpu_parity_failed")
-            differences += sum(a[1] != b[1] for a, b in zip(cpu_encoded, gpu_encoded, strict=True))
-            max_abs = max(max_abs, float(np.max(np.abs(cpu.values - gpu.values))))
-            compared += 1
-    finally:
-        if isinstance(reference, CloseableScorer):
-            reference.close()
-    if compared == 0:
-        fail("research_gpu_parity_failed")
-    return {
-        "purpose": "parity-only-gpu-admission",
-        "canonical_queries": len(first),
-        "nonempty_queries": compared,
-        "raw_atol": 1e-12,
-        "raw_rtol": 1e-12,
-        "raw_max_abs_difference": max_abs,
-        "encoded_score_differences": differences,
-        "complete_available_rankings_equal": True,
-        "model_sha256": sha(canonical_bytes(model)),
-        "query_sha256": query_desc["sha256"],
-        "scoring_provenance": model["producer"]["execution"]["scoring"],
-        "code_files_sha256": model["producer"]["code_files_sha256"],
-    }
-
-
 def predict_validation(
     prepared_dir: str | Path,
     model_dir: str | Path,
@@ -260,6 +176,7 @@ def predict_validation(
     measurements: dict[str, object] | None = None,
     measurement_output: str | Path | None = None,
 ) -> Path:
+    require_cpu_backend(backend)
     prepared_dir, model_dir, output_dir = map(Path, (prepared_dir, model_dir, output_dir))
     separate(prepared_dir, model_dir, output_dir)
     if measurement_output is not None:
@@ -273,14 +190,6 @@ def predict_validation(
             or stat.S_IMODE(parent.stat().st_mode) != 0o700
         ):
             fail("research_unsafe_path")
-    if backend not in ("cpu", "gpu") or type(backend) is not str:
-        fail("research_backend_unsupported")
-    from recsys.research.models.spec import _model_backend
-
-    preview, _ = read_json(safe_path(model_dir, directory=True) / "model-manifest.json")
-    if not isinstance(preview, dict) or not isinstance(preview.get("variant_id"), str):
-        fail("research_model_invalid")
-    _model_backend(preview["variant_id"], backend)
     if measurements is not None and (type(measurements) is not dict or measurements):
         fail("research_prediction_invalid")
     start = perf_counter_ns()
@@ -291,97 +200,79 @@ def predict_validation(
     scoring_ns = writing_ns = query_count = score_count = 0
     info: dict[str, object] = {"backend": backend}
     try:
-        if backend == "gpu":
-            from recsys.research.gpu import gpu_execution, gpu_memory_usage
-
-            session: AbstractContextManager[object] = gpu_execution()
-        else:
-            session = nullcontext()
-        with session:
-            info["session_acquire_seconds"] = (perf_counter_ns() - start) / 1e9
-            tick = perf_counter_ns()
-            inputs = read_scoring_inputs(
-                prepared_dir, expected_prepared_identity=expected_prepared_identity
+        info["session_acquire_seconds"] = (perf_counter_ns() - start) / 1e9
+        tick = perf_counter_ns()
+        inputs = read_scoring_inputs(
+            prepared_dir, expected_prepared_identity=expected_prepared_identity
+        )
+        info["input_validation_seconds"] = (perf_counter_ns() - tick) / 1e9
+        tick = perf_counter_ns()
+        model, scorer = load_model(model_dir, inputs=inputs, backend=backend)
+        info["model_validation_upload_seconds"] = (perf_counter_ns() - tick) / 1e9
+        info["input_model_init_upload_seconds"] = (perf_counter_ns() - start) / 1e9
+        try:
+            prep, _ = read_json(prepared_dir / "prepare-manifest.json")
+            if not isinstance(prep, dict) or not isinstance(prep.get("files"), dict):
+                fail("research_prediction_invalid")
+            query_desc = cast("StreamDescriptor", prep["files"]["development/queries.jsonl.gz"])
+            ids = inputs.mal_ids
+            id_set = set(ids)
+            protocol = load_protocol()
+            popularity = [
+                [item, inputs.train_stats["items"][str(item)]["positive_users"]] for item in ids
+            ]
+            seen: set[str] = set()
+            source = stream_jsonl(prepared_dir / "development/queries.jsonl.gz", query_desc)
+            validated = (
+                (cast("PredictionQuery", query), _query(query, id_set, seen, protocol))
+                for query in source
             )
-            info["input_validation_seconds"] = (perf_counter_ns() - tick) / 1e9
-            tick = perf_counter_ns()
-            model, scorer = load_model(model_dir, inputs=inputs, backend=backend)
-            info["model_validation_upload_seconds"] = (perf_counter_ns() - tick) / 1e9
-            info["input_model_init_upload_seconds"] = (perf_counter_ns() - start) / 1e9
-            try:
-                prep, _ = read_json(prepared_dir / "prepare-manifest.json")
-                if not isinstance(prep, dict) or not isinstance(prep.get("files"), dict):
-                    fail("research_prediction_invalid")
-                query_desc = cast("StreamDescriptor", prep["files"]["development/queries.jsonl.gz"])
-                ids = inputs.mal_ids
-                id_set = set(ids)
-                protocol = load_protocol()
-                popularity = [
-                    [item, inputs.train_stats["items"][str(item)]["positive_users"]] for item in ids
-                ]
-                seen: set[str] = set()
-                source = stream_jsonl(prepared_dir / "development/queries.jsonl.gz", query_desc)
-                validated = (
-                    (cast("PredictionQuery", query), _query(query, id_set, seen, protocol))
-                    for query in source
+            stage = open_stage(output_dir)
+            writer = GzipOneWriter(stage / "scores.jsonl.gz")
+            while block := tuple(islice(validated, 128)):
+                wanted = tuple(
+                    seeds for _, seeds in block if seeds and model["variant_id"] != "popularity"
                 )
-                first = tuple(islice(validated, 128)) if backend == "gpu" else ()
-                if backend == "gpu":
-                    admission_start = perf_counter_ns()
-                    info["gpu_admission"] = _admit_gpu(
-                        first, model_dir, model, scorer, inputs, query_desc
-                    )
-                    info["gpu_admission_seconds"] = (perf_counter_ns() - admission_start) / 1e9
-                stage = open_stage(output_dir)
-                writer = GzipOneWriter(stage / "scores.jsonl.gz")
-                rows = chain(first, validated)
-                while block := tuple(islice(rows, 128)):
-                    wanted = tuple(
-                        seeds for _, seeds in block if seeds and model["variant_id"] != "popularity"
-                    )
+                tick = perf_counter_ns()
+                scored = iter(_vectors(scorer, wanted))
+                scoring_ns += perf_counter_ns() - tick
+                for query, seeds in block:
                     tick = perf_counter_ns()
-                    scored = iter(_vectors(scorer, wanted))
-                    scoring_ns += perf_counter_ns() - tick
-                    for query, seeds in block:
-                        tick = perf_counter_ns()
-                        scores = (
-                            popularity
-                            if not seeds or model["variant_id"] == "popularity"
-                            else _encode_vector(next(scored), len(seeds), ids)
-                        )
-                        writer.write_json({"query_id": query["query_id"], "scores": scores})
-                        writing_ns += perf_counter_ns() - tick
-                        query_count += 1
-                        score_count += len(scores)
-                scores_desc = writer.close()
+                    scores = (
+                        popularity
+                        if not seeds or model["variant_id"] == "popularity"
+                        else _encode_vector(next(scored), len(seeds), ids)
+                    )
+                    writer.write_json({"query_id": query["query_id"], "scores": scores})
+                    writing_ns += perf_counter_ns() - tick
+                    query_count += 1
+                    score_count += len(scores)
+            scores_desc = writer.close()
+            writer = None
+            manifest = {
+                "schema_version": 1,
+                "kind": "arb-ml-predictions",
+                "prepared_identity": inputs.prepared_identity,
+                "query_descriptor": query_desc,
+                "catalog_descriptor": inputs.catalog_descriptor,
+                "split": "validation",
+                "model_id": model["variant_id"],
+                "config_sha256": sha(canonical_bytes(model)),
+                "fit_identity": inputs.fit_identity,
+                "train_interactions": inputs.train_interactions_descriptor,
+                "train_stats": inputs.train_stats_descriptor,
+                "code_revision": model["producer"]["code_revision"],
+                "zero_seed_policy": "popularity-train-positive-user-counts",
+                "scores": scores_desc,
+            }
+            write_json(stage / "prediction-manifest.json", manifest)
+        finally:
+            if writer is not None:
+                writer.abort()
                 writer = None
-                manifest = {
-                    "schema_version": 1,
-                    "kind": "arb-ml-predictions",
-                    "prepared_identity": inputs.prepared_identity,
-                    "query_descriptor": query_desc,
-                    "catalog_descriptor": inputs.catalog_descriptor,
-                    "split": "validation",
-                    "model_id": model["variant_id"],
-                    "config_sha256": sha(canonical_bytes(model)),
-                    "fit_identity": inputs.fit_identity,
-                    "train_interactions": inputs.train_interactions_descriptor,
-                    "train_stats": inputs.train_stats_descriptor,
-                    "code_revision": model["producer"]["code_revision"],
-                    "zero_seed_policy": "popularity-train-positive-user-counts",
-                    "scores": scores_desc,
-                }
-                write_json(stage / "prediction-manifest.json", manifest)
-                if backend == "gpu":
-                    info["dedicated_pool_session_including_admission"] = gpu_memory_usage()
-                    info["memory_scope"] = "dedicated-pool-only-excludes-context-and-cublas"
-            finally:
-                if writer is not None:
-                    writer.abort()
-                    writer = None
-                if scorer is not None:
-                    if isinstance(scorer, CloseableScorer):
-                        scorer.close()
+            if scorer is not None:
+                if isinstance(scorer, CloseableScorer):
+                    scorer.close()
         info.update(
             {
                 "queries": query_count,
@@ -420,190 +311,4 @@ def predict_validation(
             measurements.update(failure)
         if measurement_output is not None and not measurement_output.exists():
             write_json(measurement_output, failure)
-        raise
-
-
-def gpu_preflight(
-    prepared_dir: str | Path,
-    model_dir: str | Path,
-    output_dir: str | Path,
-    *,
-    expected_prepared_identity: str,
-) -> Path:
-    """Private, label-free GPU parity and comparable single/batch timing evidence."""
-    from contextlib import ExitStack
-
-    from recsys.research.gpu import gpu_execution, gpu_memory_usage
-
-    prepared_dir, model_dir, output_dir = map(Path, (prepared_dir, model_dir, output_dir))
-    separate(prepared_dir, model_dir, output_dir)
-    from recsys.research.models.spec import _model_backend
-
-    preview, _ = read_json(safe_path(model_dir, directory=True) / "model-manifest.json")
-    if not isinstance(preview, dict) or not isinstance(preview.get("variant_id"), str):
-        fail("research_model_invalid")
-    _model_backend(preview["variant_id"], "gpu")
-    stage: Path | None = None
-    try:
-        started = perf_counter_ns()
-        with ExitStack() as stack:
-            stack.enter_context(gpu_execution())
-            session_acquire = (perf_counter_ns() - started) / 1e9
-            inputs = read_scoring_inputs(
-                prepared_dir, expected_prepared_identity=expected_prepared_identity
-            )
-            tick = perf_counter_ns()
-            model, scorer = load_model(model_dir, inputs=inputs, backend="gpu")
-            stack.callback(scorer.close)
-            initial_upload = (perf_counter_ns() - tick) / 1e9
-            prep, _ = read_json(prepared_dir / "prepare-manifest.json")
-            if not isinstance(prep, dict) or not isinstance(prep.get("files"), dict):
-                fail("research_prediction_invalid")
-            descriptor = cast("StreamDescriptor", prep["files"]["development/queries.jsonl.gz"])
-            seen: set[str] = set()
-            protocol = load_protocol()
-            ids = inputs.mal_ids
-            id_set = set(ids)
-            source = stream_jsonl(prepared_dir / "development/queries.jsonl.gz", descriptor)
-            validated = (
-                (cast("PredictionQuery", query), _query(query, id_set, seen, protocol))
-                for query in source
-            )
-            first = tuple(islice(validated, 128))
-            admission = _admit_gpu(first, model_dir, model, scorer, inputs, descriptor)
-            total = len(first)
-            for _ in validated:
-                total += 1
-            sample = tuple(group for _, group in first if group)
-            single = cpu_single = batch = None
-            if sample:
-                tick = perf_counter_ns()
-                cpu_scorer = cast("StandardBackend", _backend(model["variant_id"])).load(
-                    model_dir, model, inputs, backend="cpu"
-                )
-                if isinstance(cpu_scorer, CloseableScorer):
-                    stack.callback(cpu_scorer.close)
-                cpu_init = (perf_counter_ns() - tick) / 1e9
-                cpu_traces = []
-                for _ in range(2):
-                    durations = []
-                    for group in sample:
-                        tick = perf_counter_ns()
-                        cpu_scorer.score(group)
-                        durations.append((perf_counter_ns() - tick) / 1e6)
-                    cpu_traces.append(
-                        {
-                            "median_ms": statistics.median(durations),
-                            "p95_ms": sorted(durations)[
-                                min(len(durations) - 1, int(0.95 * len(durations)))
-                            ],
-                            "queries": len(durations),
-                        }
-                    )
-                cpu_single = {
-                    "fresh_scorer_init_seconds": cpu_init,
-                    "first_cache_empty_trace": cpu_traces[0],
-                    "warmed_repeat_trace": cpu_traces[1],
-                }
-                tick = perf_counter_ns()
-                single_model, single_scorer = load_model(model_dir, inputs=inputs, backend="gpu")
-                stack.callback(single_scorer.close)
-                single_upload = (perf_counter_ns() - tick) / 1e9
-                if sha(canonical_bytes(single_model)) != admission["model_sha256"]:
-                    fail("research_backend_mismatch")
-                traces = []
-                for _ in range(2):
-                    durations = []
-                    for group in sample:
-                        tick = perf_counter_ns()
-                        single_scorer.score(group)
-                        durations.append((perf_counter_ns() - tick) / 1e6)
-                    traces.append(
-                        {
-                            "median_ms": statistics.median(durations),
-                            "p95_ms": sorted(durations)[
-                                min(len(durations) - 1, int(0.95 * len(durations)))
-                            ],
-                            "queries": len(durations),
-                        }
-                    )
-                single = {
-                    "fresh_scorer_init_upload_seconds": single_upload,
-                    "first_cache_empty_trace": traces[0],
-                    "warmed_repeat_trace": traces[1],
-                }
-                tick = perf_counter_ns()
-                batch_model, batch_scorer = load_model(model_dir, inputs=inputs, backend="gpu")
-                stack.callback(batch_scorer.close)
-                batch_upload = (perf_counter_ns() - tick) / 1e9
-                if sha(canonical_bytes(batch_model)) != admission["model_sha256"]:
-                    fail("research_backend_mismatch")
-                traces = []
-                for _ in range(2):
-                    tick = perf_counter_ns()
-                    vectors = _vectors(batch_scorer, sample)
-                    seconds = (perf_counter_ns() - tick) / 1e9
-                    traces.append(
-                        {
-                            "wall_seconds": seconds,
-                            "queries_per_second": len(sample) / seconds,
-                            "queries": len(sample),
-                        }
-                    )
-                batch = {
-                    "fresh_scorer_init_upload_seconds": batch_upload,
-                    "first_cache_empty_trace": traces[0],
-                    "warmed_repeat_trace": traces[1],
-                }
-                with tempfile.TemporaryDirectory(prefix="arb-ml02-gpu-prefix-") as temporary:
-                    tick = perf_counter_ns()
-                    writer = GzipOneWriter(Path(temporary) / "scores.jsonl.gz")
-                    try:
-                        for (query, group), vector in zip(
-                            (item for item in first if item[1]), vectors, strict=True
-                        ):
-                            writer.write_json(
-                                {
-                                    "query_id": query["query_id"],
-                                    "scores": _encode_vector(vector, len(group), ids),
-                                }
-                            )
-                        writer.close()
-                    except BaseException:
-                        writer.abort()
-                        raise
-                    prefix_seconds = (perf_counter_ns() - tick) / 1e9
-            else:
-                prefix_seconds = 0.0
-            memory = gpu_memory_usage()
-        report = {
-            "schema_version": 1,
-            "kind": "arb-ml02-gpu-preflight",
-            "status": "passed",
-            "backend": "gpu",
-            "admission": admission,
-            "validated_development_queries": total,
-            "session_acquire_seconds": session_acquire,
-            "initial_model_init_upload_seconds": initial_upload,
-            "cpu_single_query_latency": cpu_single,
-            "single_query_latency": single,
-            "score_many_batch_throughput": batch,
-            "sample_prefix_encode_gzip_seconds": prefix_seconds,
-            "dedicated_pool_session_including_admission_and_benchmark": memory,
-            "memory_scope": "dedicated-pool-only-excludes-context-and-cublas",
-            "timing_conditions": {
-                "shared_device_session": True,
-                "first_trace_scorer_cache_empty": True,
-                "second_trace_warmed_repeat": True,
-                "single_query_latency_is_not_batch_latency": True,
-            },
-            "diagnostic_wall_seconds": (perf_counter_ns() - started) / 1e9,
-        }
-        stage = open_stage(output_dir)
-        write_json(stage / "preflight.json", report)
-        publish(stage, output_dir)
-        return output_dir / "preflight.json"
-    except BaseException:
-        if stage is not None:
-            cleanup(stage)
         raise

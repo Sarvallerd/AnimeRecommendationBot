@@ -18,22 +18,7 @@ class CampaignSpec(TypedDict):
     variants: dict[str, dict[str, JSONValue]]
 
 
-GPU_DEPENDENCIES = (
-    "cupy-cuda12x",
-    "cuda-toolkit",
-    "cuda-pathfinder",
-    "nvidia-cublas-cu12",
-    "nvidia-cuda-runtime-cu12",
-    "nvidia-cuda-nvrtc-cu12",
-    "nvidia-cufft-cu12",
-    "nvidia-curand-cu12",
-    "nvidia-cusolver-cu12",
-    "nvidia-cusparse-cu12",
-    "nvidia-nvjitlink-cu12",
-)
-
-
-GPU_VARIANTS = {"content-mean", "content-max", "content-union", "puresvd"}
+GPU_SCORING_RECOVERY_COMMIT = "fa983eaeeeeb41b41ac893b7de9827a40c25d27d"
 
 
 EXPECTED_VARIANTS = {
@@ -90,8 +75,9 @@ def campaign() -> tuple[CampaignSpec, str]:
     return spec, sha(raw)
 
 
-def _model_backend(variant_id: str, requested: str) -> None:
-    if requested not in ("cpu", "gpu") or type(requested) is not str:
-        fail("research_backend_unsupported")
-    if requested == "gpu" and variant_id not in GPU_VARIANTS:
-        fail("research_backend_unsupported")
+def require_cpu_backend(requested: object) -> None:
+    if type(requested) is str and requested == "cpu":
+        return
+    if type(requested) is str and requested == "gpu":
+        fail("research_gpu_scoring_retired")
+    fail("research_backend_unsupported")

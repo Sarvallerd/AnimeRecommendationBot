@@ -65,7 +65,6 @@ SOURCE_FILES = (
     "research/evaluation/evaluate.py",
     "research/evaluation/finalize.py",
     "research/evaluation/selection.py",
-    "research/gpu.py",
     "research/models/__init__.py",
     "research/models/collaborative.py",
     "research/models/content.py",

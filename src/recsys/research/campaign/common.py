@@ -30,10 +30,7 @@ VARIANTS = (
 PHASES = ("fit", "predict", "evaluate", "replay")
 
 
-AUX_PHASE = "fit_cpu_component"
-
-
-AUX_VARIANTS = ("content-mean", "puresvd")
+HYBRID_COMPONENT_VARIANTS = ("content-mean", "puresvd")
 
 
 FIT_SECONDS = 7200.0

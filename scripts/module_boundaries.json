@@ -80,7 +80,6 @@
       "modules": [
         "recsys.research",
         "recsys.research.artifacts",
-        "recsys.research.gpu",
         "recsys.research.protocol",
         "recsys.research.resources"
       ],

@@ -12,7 +12,9 @@ from recsys.contracts.provenance import SOURCE_FILES, SOURCE_LAYOUT
 ROOT = Path(__file__).resolve().parents[2]
 RECORD = ROOT / "docs/migrations/arb054-recsys-layout-v2.json"
 TRAINING_RECORD = ROOT / "docs/migrations/arb058-training-artifacts-v1.json"
+RETIREMENT_RECORD = ROOT / "docs/migrations/arb059-cupy-scoring-retirement.json"
 LEGACY_RECORD_SHA256 = "27dd3f274a4cee02b0d6e7cf43fa9f4fcfbfe755e04d0c43d68d6c319ced5016"
+TRAINING_RECORD_SHA256 = "9a891c85f97340713be41319aeed559285c8cab54363fb8ede1f94ad76dff221"
 LOCK = ROOT / "src/recsys/resources/releases/release_neelagiri_2025_nafiul_2026_v1.json"
 SOURCE_BASELINE = "1441573fbbbffc4693c7e1100aaae4458d9e88d4"
 TASK_BASELINE = "b385bfae9ad128f257784aec61e541296b648e31"
@@ -34,7 +36,10 @@ class MigrationRecordTests(unittest.TestCase):
             ("0.2.0", "0.2.1"),
         )
         self.assertEqual(current["source_layout"], SOURCE_LAYOUT)
-        self.assertEqual(current["source_inventory"], list(SOURCE_FILES))
+        self.assertEqual(
+            current["source_inventory"],
+            sorted((*SOURCE_FILES, "research/gpu.py")),
+        )
         self.assertEqual(current["previous_artifact_versions"], legacy["artifact_versions"])
         self.assertEqual(
             current["preserved_resource_sha256"],
@@ -72,7 +77,10 @@ class MigrationRecordTests(unittest.TestCase):
             "research/training/spec.py",
         }
         self.assertTrue(added.isdisjoint(record["source_inventory"]))
-        self.assertEqual(set(record["source_inventory"]) | added, set(SOURCE_FILES))
+        self.assertEqual(
+            set(record["source_inventory"]) | added,
+            set(SOURCE_FILES) | {"research/gpu.py"},
+        )
         self.assertEqual(len(record["module_moves"]), 33)
         self.assertEqual(len(record["resource_moves"]), 11)
         for item in record["resource_moves"]:
@@ -138,6 +146,66 @@ class MigrationRecordTests(unittest.TestCase):
         self.assertEqual(versions["composite_build_report"]["new_schema_version"], 3)
         self.assertEqual(
             versions["named_release_lock"]["new_schema_authority"], "tiny-fixture-only"
+        )
+
+    def test_retirement_record_chains_frozen_layout_and_training(self) -> None:
+        self.assertEqual(hashlib.sha256(RECORD.read_bytes()).hexdigest(), LEGACY_RECORD_SHA256)
+        self.assertEqual(
+            hashlib.sha256(TRAINING_RECORD.read_bytes()).hexdigest(), TRAINING_RECORD_SHA256
+        )
+        legacy = json.loads(RECORD.read_bytes())
+        training = json.loads(TRAINING_RECORD.read_bytes())
+        retired = json.loads(RETIREMENT_RECORD.read_bytes())
+        self.assertEqual(
+            set(legacy["source_inventory"]) | set(training["added_sources"]),
+            set(training["source_inventory"]),
+        )
+        self.assertEqual(
+            set(training["source_inventory"]) - set(retired["removed_sources"]),
+            set(retired["source_inventory"]),
+        )
+        self.assertEqual(retired["source_inventory"], list(SOURCE_FILES))
+        self.assertEqual(len(SOURCE_FILES), 75)
+        self.assertEqual(retired["previous_source_inventory"], training["source_inventory"])
+        self.assertEqual(retired["removed_sources"], ["research/gpu.py"])
+        self.assertEqual(
+            retired["task_baseline_commit"], "20757caeaf102b1f2137abede43c7d472e8778e2"
+        )
+        self.assertEqual(
+            retired["previous_migration_sha256"],
+            {
+                str(RECORD.relative_to(ROOT)): LEGACY_RECORD_SHA256,
+                str(TRAINING_RECORD.relative_to(ROOT)): TRAINING_RECORD_SHA256,
+            },
+        )
+        self.assertEqual(retired["source_layout"], SOURCE_LAYOUT)
+        self.assertEqual(retired["package_version_from"], "0.2.1")
+        self.assertEqual(retired["package_version_to"], "0.3.0")
+        self.assertEqual(
+            retired["historical_gpu_scoring_recovery_commit"],
+            "fa983eaeeeeb41b41ac893b7de9827a40c25d27d",
+        )
+        self.assertEqual(retired["original_producer_recovery_commit"], SOURCE_BASELINE)
+        self.assertEqual(
+            retired["artifact_versions"],
+            {
+                "research_preparation": 2,
+                "research_model": 2,
+                "research_campaign_plan": 3,
+                "research_campaign_report": 2,
+                "research_campaign_envelope": 1,
+                "research_training_config": 1,
+                "research_training_artifact": 1,
+            },
+        )
+        self.assertEqual(
+            retired["preserved_resource_sha256"], training["preserved_resource_sha256"]
+        )
+        for name, digest in retired["preserved_resource_sha256"].items():
+            self.assertEqual(hashlib.sha256((ROOT / name).read_bytes()).hexdigest(), digest)
+        self.assertEqual(
+            retired["acceptance"],
+            {"full_ml02": False, "model_quality": False, "release_accepted": False},
         )
 
 

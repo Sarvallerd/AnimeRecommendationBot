@@ -10,6 +10,10 @@ REFERENCE_RECOVERY = (
     "1441573fbbbffc4693c7e1100aaae4458d9e88d4; follow root README.md "
     "and https://app.notion.com/p/3fb3908d6b1f8136a1dfff3c4a12108e."
 )
+GPU_SCORING_RECOVERY = (
+    "GPU scoring is retired. Recover the historical implementation from pinned Git checkout "
+    "{commit}; see docs/migrations/arb059-cupy-scoring-retirement.json."
+)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -232,6 +236,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     elif parsed.command == "research":
         from pathlib import Path
 
+        from recsys.research.models.spec import (
+            GPU_SCORING_RECOVERY_COMMIT,
+            require_cpu_backend,
+        )
         from recsys.research.protocol import ResearchError
 
         try:
@@ -266,6 +274,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     f"weights_format={verified.spec.weights_format}"
                 )
             elif parsed.research_command == "model-fit":
+                require_cpu_backend(parsed.backend)
                 from recsys.research.models.package import fit_model
 
                 assets = (
@@ -292,6 +301,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     backend=parsed.backend,
                 )
             elif parsed.research_command == "predict-validation":
+                require_cpu_backend(parsed.backend)
                 from recsys.research.predict import predict_validation
 
                 measured: dict[str, object] | None = {} if parsed.measurement_output else None
@@ -307,15 +317,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                     else None,
                 )
             elif parsed.research_command == "gpu-preflight":
-                from recsys.research.predict import gpu_preflight
-
-                result = gpu_preflight(
-                    Path(parsed.prepared_dir),
-                    Path(parsed.model_dir),
-                    Path(parsed.output_dir),
-                    expected_prepared_identity=parsed.expected_prepared_identity,
-                )
+                require_cpu_backend("gpu")
+                result = ""  # The retired route always raises above.
             elif parsed.research_command == "campaign-run":
+                require_cpu_backend(parsed.backend)
                 from recsys.research.campaign.runner import run_campaign
 
                 result = run_campaign(
@@ -381,6 +386,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         except (ResearchError, OSError, ValueError, KeyError, TypeError) as exc:
             code = str(exc) if isinstance(exc, ResearchError) else "research_integrity_error"
             print(f"recsys research: {code}", file=sys.stderr)
+            if code == "research_gpu_scoring_retired":
+                print(
+                    GPU_SCORING_RECOVERY.format(commit=GPU_SCORING_RECOVERY_COMMIT),
+                    file=sys.stderr,
+                )
             return 1
     elif parsed.command == "build":
         from pathlib import Path

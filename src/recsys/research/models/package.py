@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal, cast, overload
+from typing import cast
 
 from recsys.research.artifacts import cleanup, open_stage, publish, safe_path, separate, write_json
 from recsys.research.models.dispatch import (
@@ -20,12 +20,11 @@ from recsys.research.models.manifest import (
     _producer,
     _read_model_package,
 )
-from recsys.research.models.spec import _model_backend, campaign
+from recsys.research.models.spec import campaign, require_cpu_backend
 from recsys.research.models.types import (
     CloseableScorer,
     Scorer,
     ScoringInputs,
-    SupportedBatchScorer,
     TrainingInputs,
 )
 from recsys.research.protocol import fail
@@ -41,8 +40,8 @@ def fit_model(
     assets: dict[str, Path] | None = None,
     backend: str = "cpu",
 ) -> Path:
+    require_cpu_backend(backend)
     prepared_dir, output_dir = Path(prepared_dir), Path(output_dir)
-    _model_backend(variant_id, backend)
     separate(prepared_dir, output_dir)
     inputs = (
         read_scoring_inputs(prepared_dir, expected_prepared_identity=expected_prepared_identity)
@@ -54,13 +53,7 @@ def fit_model(
     variant_module = _backend(variant_id)
     spec, campaign_hash = campaign()
     external = _external(variant_id, assets, prepared_dir, output_dir)
-    if backend == "gpu":
-        from recsys.research.gpu import probe_gpu
-
-        scoring = probe_gpu()
-    else:
-        scoring = None
-    producer = _producer(code_revision, variant_id, model_backend=backend, scoring=scoring)
+    producer = _producer(code_revision, variant_id)
     parameters = spec["variants"][variant_id]
     stage = open_stage(output_dir)
     try:
@@ -105,21 +98,10 @@ def fit_model(
         raise
 
 
-@overload
-def load_model(
-    model_dir: str | Path, *, inputs: ScoringInputs, backend: Literal["gpu"]
-) -> tuple[ModelManifest, SupportedBatchScorer]: ...
-
-
-@overload
-def load_model(
-    model_dir: str | Path, *, inputs: ScoringInputs, backend: str = "cpu"
-) -> tuple[ModelManifest, Scorer]: ...
-
-
 def load_model(
     model_dir: str | Path, *, inputs: ScoringInputs, backend: str = "cpu"
 ) -> tuple[ModelManifest, Scorer]:
+    require_cpu_backend(backend)
     model_dir = safe_path(model_dir, directory=True)
     manifest, raw = _read_model_package(model_dir, inputs=inputs, backend=backend)
     variant_module = _backend(manifest["variant_id"])
@@ -134,10 +116,6 @@ def load_model(
             model_dir, manifest, inputs, backend=backend
         )
     if not callable(getattr(scorer, "score", None)):
-        if isinstance(scorer, CloseableScorer):
-            scorer.close()
-        fail("research_model_invalid")
-    if backend == "gpu" and not isinstance(scorer, SupportedBatchScorer):
         if isinstance(scorer, CloseableScorer):
             scorer.close()
         fail("research_model_invalid")

@@ -16,11 +16,10 @@ from typing import NotRequired, TypedDict, cast
 from recsys.contracts.provenance import SOURCE_LAYOUT, source_fingerprints
 from recsys.research.artifacts import FileDescriptor
 from recsys.research.campaign.common import (
-    AUX_PHASE,
-    AUX_VARIANTS,
     CAMPAIGN_SECONDS,
     EVALUATION_SECONDS,
     FIT_SECONDS,
+    HYBRID_COMPONENT_VARIANTS,
     PHASES,
     RSS_LIMIT_BYTES,
     VARIANTS,
@@ -39,9 +38,7 @@ class CampaignVariant(TypedDict):
 
 class CampaignScheduling(TypedDict):
     cpu_workers: int
-    gpu_workers: int
     blas_threads: int
-    gpu_optional_benchmark: str
 
 
 class SourceReceipt(TypedDict):
@@ -64,7 +61,6 @@ class CampaignPlan(TypedDict):
     code_revision: str
     producer: SourceReceipt
     variants: list[CampaignVariant]
-    auxiliary_fits: list[dict[str, str]]
     execution_config_count: int
     assets: dict[str, FileDescriptor]
     budgets: dict[str, float | int]
@@ -74,21 +70,8 @@ class CampaignPlan(TypedDict):
     deadline_utc: str
 
 
-def _backend(variant: str, configured: str) -> str:
-    return "cpu" if configured == "cpu" or variant in ("popularity", "itemknn", "hybrid") else "gpu"
-
-
-def _expected_nodes(plan: CampaignPlan) -> set[tuple[str, str]]:
-    nodes = {(variant, phase) for variant in VARIANTS for phase in PHASES}
-    if plan["scheduling"]["gpu_workers"] == 1 and any(
-        entry["backend"] == "gpu" for entry in plan["variants"]
-    ):
-        nodes.update((variant, AUX_PHASE) for variant in AUX_VARIANTS)
-    return nodes
-
-
-def _component_phase(plan: CampaignPlan) -> str:
-    return AUX_PHASE if plan["auxiliary_fits"] else "fit"
+def _expected_nodes() -> set[tuple[str, str]]:
+    return {(variant, phase) for variant in VARIANTS for phase in PHASES}
 
 
 def _string_map(value: object) -> bool:
@@ -106,7 +89,6 @@ def _descriptor(value: object) -> bool:
 def _plan_fields_valid(plan: dict[str, object]) -> bool:
     producer = plan.get("producer")
     variants = plan.get("variants")
-    auxiliary = plan.get("auxiliary_fits")
     assets = plan.get("assets")
     budgets = plan.get("budgets")
     scheduling = plan.get("scheduling")
@@ -135,7 +117,6 @@ def _plan_fields_valid(plan: dict[str, object]) -> bool:
         )
         or type(plan.get("execution_config_count")) is not int
         or type(variants) is not list
-        or type(auxiliary) is not list
         or type(assets) is not dict
         or type(budgets) is not dict
         or type(scheduling) is not dict
@@ -157,22 +138,17 @@ def _plan_fields_valid(plan: dict[str, object]) -> bool:
     ):
         return False
     return (
-        all(_string_map(item) for item in auxiliary)
-        and all(type(key) is str and _descriptor(item) for key, item in assets.items())
+        all(type(key) is str and _descriptor(item) for key, item in assets.items())
         and all(type(key) is str and type(item) in (int, float) for key, item in budgets.items())
-        and all(
-            type(scheduling.get(key)) is int
-            for key in ("cpu_workers", "gpu_workers", "blas_threads")
-        )
-        and type(scheduling.get("gpu_optional_benchmark")) is str
+        and all(type(scheduling.get(key)) is int for key in ("cpu_workers", "blas_threads"))
     )
 
 
-def _validate_plan_structure(plan: object) -> str:
+def _validate_plan_structure(plan: object) -> None:
     if (
         type(plan) is not dict
         or type(plan.get("schema_version")) is not int
-        or plan["schema_version"] != 2
+        or plan["schema_version"] != 3
         or type(plan.get("producer")) is not dict
         or plan["producer"].get("source_layout") != SOURCE_LAYOUT
     ):
@@ -182,7 +158,7 @@ def _validate_plan_structure(plan: object) -> str:
     spec, campaign_sha = campaign()
     if (
         type(plan) is not dict
-        or plan.get("schema_version") != 2
+        or plan.get("schema_version") != 3
         or plan.get("kind") != "arb-ml02-campaign-plan"
         or plan.get("campaign_spec_sha256") != campaign_sha
         or type(plan.get("variants")) is not list
@@ -193,30 +169,14 @@ def _validate_plan_structure(plan: object) -> str:
     if not _plan_fields_valid(cast("dict[str, object]", plan)):
         _fail("research_campaign_plan_mismatch")
     plan = cast("CampaignPlan", plan)
-    configured = "gpu" if any(item.get("backend") == "gpu" for item in plan["variants"]) else "cpu"
-    expected_aux = (
-        [
-            {
-                "variant_id": variant,
-                "phase": AUX_PHASE,
-                "backend": "cpu",
-                "fit_budget_owner": variant,
-                "consumer": "hybrid",
-            }
-            for variant in AUX_VARIANTS
-        ]
-        if configured == "gpu"
-        else []
-    )
     expected_components = [
-        {"variant_id": variant, "phase": AUX_PHASE if configured == "gpu" else "fit"}
-        for variant in AUX_VARIANTS
+        {"variant_id": variant, "phase": "fit"} for variant in HYBRID_COMPONENT_VARIANTS
     ]
     expected_variants = [
         {
             "variant_id": name,
             "parameters": spec["variants"][name],
-            "backend": _backend(name, configured),
+            "backend": "cpu",
             **({"components": expected_components} if name == "hybrid" else {}),
         }
         for name in VARIANTS
@@ -232,32 +192,46 @@ def _validate_plan_structure(plan: object) -> str:
     schedule = plan.get("scheduling")
     if (
         plan["variants"] != expected_variants
-        or plan.get("auxiliary_fits") != expected_aux
-        or plan.get("execution_config_count") != (9 if configured == "gpu" else 7)
+        or plan.get("execution_config_count") != 7
         or plan.get("budgets") != expected_budgets
         or type(schedule) is not dict
         or schedule.get("cpu_workers") not in (1, 2)
         or schedule
         != {
             "cpu_workers": schedule["cpu_workers"],
-            "gpu_workers": 1,
             "blas_threads": 1,
-            "gpu_optional_benchmark": "not_scheduled",
+        }
+        or set(plan)
+        != {
+            "schema_version",
+            "kind",
+            "prepared_identity",
+            "protocol_identity",
+            "fit_identity",
+            "catalog_descriptor",
+            "train_interactions",
+            "train_stats",
+            "campaign_spec_sha256",
+            "code_revision",
+            "producer",
+            "variants",
+            "execution_config_count",
+            "assets",
+            "budgets",
+            "scheduling",
+            "score_retention",
+            "created_utc",
+            "deadline_utc",
         }
         or _parse_iso(plan["deadline_utc"]) - _parse_iso(plan["created_utc"])
         != timedelta(seconds=CAMPAIGN_SECONDS)
     ):
         _fail("research_campaign_plan_mismatch")
-    return configured
 
 
-def _source_receipt(backend: str) -> SourceReceipt:
+def _source_receipt() -> SourceReceipt:
     names = source_fingerprints()
     dependencies: tuple[str, ...] = ("numpy", "scipy", "scikit-learn", "threadpoolctl")
-    if backend == "gpu":
-        from recsys.research.models.spec import GPU_DEPENDENCIES
-
-        dependencies += GPU_DEPENDENCIES
     return {
         "source_layout": SOURCE_LAYOUT,
         "code_files_sha256": names,
@@ -271,7 +245,6 @@ def _plan(
     expected_prepared_identity: str,
     code_revision: str,
     glove: str | Path,
-    backend: str,
     cpu_workers: int,
     created: datetime,
 ) -> CampaignPlan:
@@ -283,8 +256,6 @@ def _plan(
     if (
         type(code_revision) is not str
         or re.fullmatch(r"[0-9a-f]{40}", code_revision) is None
-        or backend not in ("cpu", "gpu")
-        or type(backend) is not str
         or type(cpu_workers) is not int
         or cpu_workers not in (1, 2)
     ):
@@ -297,35 +268,20 @@ def _plan(
     glove_desc = file_descriptor(glove)
     if glove_desc != {"bytes": locked["text_size"], "sha256": locked["text_sha256"]}:
         _fail()
-    auxiliary = (
-        [
-            {
-                "variant_id": variant,
-                "phase": AUX_PHASE,
-                "backend": "cpu",
-                "fit_budget_owner": variant,
-                "consumer": "hybrid",
-            }
-            for variant in AUX_VARIANTS
-        ]
-        if backend == "gpu"
-        else []
-    )
-    component_phase = AUX_PHASE if auxiliary else "fit"
     variants: list[CampaignVariant] = []
     for name in VARIANTS:
         item: CampaignVariant = {
             "variant_id": name,
             "parameters": spec["variants"][name],
-            "backend": _backend(name, backend),
+            "backend": "cpu",
         }
         if name == "hybrid":
             item["components"] = [
-                {"variant_id": variant, "phase": component_phase} for variant in AUX_VARIANTS
+                {"variant_id": variant, "phase": "fit"} for variant in HYBRID_COMPONENT_VARIANTS
             ]
         variants.append(item)
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "kind": "arb-ml02-campaign-plan",
         "prepared_identity": inputs.prepared_identity,
         "protocol_identity": inputs.protocol_identity,
@@ -335,10 +291,9 @@ def _plan(
         "train_stats": inputs.train_stats_descriptor,
         "campaign_spec_sha256": campaign_sha,
         "code_revision": code_revision,
-        "producer": _source_receipt(backend),
+        "producer": _source_receipt(),
         "variants": variants,
-        "auxiliary_fits": auxiliary,
-        "execution_config_count": 9 if backend == "gpu" else 7,
+        "execution_config_count": 7,
         "assets": {"glove": glove_desc},
         "budgets": {
             "fit_seconds_per_variant": FIT_SECONDS,
@@ -350,9 +305,7 @@ def _plan(
         },
         "scheduling": {
             "cpu_workers": cpu_workers,
-            "gpu_workers": 1,
             "blas_threads": 1,
-            "gpu_optional_benchmark": "not_scheduled",
         },
         "score_retention": "keep",
         "created_utc": _iso(created),

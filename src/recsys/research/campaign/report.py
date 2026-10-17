@@ -12,8 +12,6 @@ from typing import TYPE_CHECKING, cast
 
 from recsys.research.campaign.artifacts import _phase_path, _verify_phase
 from recsys.research.campaign.common import (
-    AUX_PHASE,
-    AUX_VARIANTS,
     FIT_SECONDS,
     PHASES,
     VARIANTS,
@@ -26,7 +24,6 @@ from recsys.research.campaign.common import (
 from recsys.research.campaign.journal import CampaignEvent, PhaseKey, _Journal, _successes
 from recsys.research.campaign.plan import (
     CampaignPlan,
-    _component_phase,
     _expected_nodes,
     _source_receipt,
     _validate_plan_structure,
@@ -70,7 +67,6 @@ def _public_projection(
         _fail("research_campaign_input_invalid")
     all_rows: dict[str, EvaluationRows] = {}
     variants: list[dict[str, object]] = []
-    auxiliaries: list[dict[str, object]] = []
     journal_events = _Journal(root / "journal.jsonl").events
     _, attempts, charged, _, _ = _successes(journal_events)
     reference_metadata = None
@@ -161,36 +157,6 @@ def _public_projection(
                     "max_sample_gap_seconds",
                 )
             }
-        measurement = None
-        if plan["variants"][VARIANTS.index(variant)]["backend"] == "gpu":
-            measured_value, _ = _read_private(
-                paths["predict"].parent / "resources" / "measurement.json"
-            )
-            measured = cast("dict[str, object]", measured_value)
-            pool = measured.get("dedicated_pool_session_including_admission")
-            if (
-                measured.get("status") != "published"
-                or type(pool) is not dict
-                or set(pool)
-                != {
-                    "pool_used_bytes",
-                    "pool_reserved_bytes",
-                    "pool_limit_bytes",
-                    "pool_peak_used_bytes",
-                    "pool_peak_reserved_bytes",
-                }
-                or any(type(value) is not int or value < 0 for value in pool.values())
-            ):
-                _fail("research_campaign_measurement_invalid")
-            measurement = {
-                "gpu_admission_seconds": measured["gpu_admission_seconds"],
-                "queries": measured["queries"],
-                "score_pairs": measured["score_pairs"],
-                "synchronized_scoring_seconds": measured["synchronized_scoring_seconds"],
-                "encoding_gzip_write_seconds": measured["encoding_gzip_write_seconds"],
-                "dedicated_pool_session_including_admission": dict(pool),
-                "memory_scope": "dedicated-pool-only-excludes-context-and-cublas",
-            }
         variants.append(
             {
                 "variant_id": variant,
@@ -206,55 +172,12 @@ def _public_projection(
                 "scores_compressed_bytes": prediction["scores"]["bytes"],
                 "scores_uncompressed_bytes": prediction["scores"]["uncompressed_bytes"],
                 "resources": phase_resources,
-                "predict_measurement": measurement,
                 "fit_budget": {
                     "primary_charged_seconds": charged.get((variant, "fit"), 0.0),
-                    "auxiliary_charged_seconds": charged.get((variant, AUX_PHASE), 0.0),
-                    "all_attempts_charged_seconds": charged.get((variant, "fit"), 0.0)
-                    + charged.get((variant, AUX_PHASE), 0.0),
-                    "remaining_seconds": FIT_SECONDS
-                    - charged.get((variant, "fit"), 0.0)
-                    - charged.get((variant, AUX_PHASE), 0.0),
+                    "all_attempts_charged_seconds": charged.get((variant, "fit"), 0.0),
+                    "remaining_seconds": FIT_SECONDS - charged.get((variant, "fit"), 0.0),
                 },
                 "checked_groups": recomputed,
-            }
-        )
-    for variant in AUX_VARIANTS if plan["auxiliary_fits"] else ():
-        path = _phase_path(root, successes, variant, AUX_PHASE)
-        if path is None:
-            _fail("research_campaign_incomplete")
-        manifest_value, raw = read_json(path / "model-manifest.json")
-        manifest = cast("ModelManifest", manifest_value)
-        if (
-            manifest["variant_id"] != variant
-            or manifest["producer"]["execution"]["backend"] != "cpu"
-        ):
-            _fail("research_campaign_component_invalid")
-        evidence = successes[(variant, AUX_PHASE)]["resources"]
-        if evidence is None:
-            _fail("research_campaign_resource_invalid")
-        if evidence.get("outcome") != "ok" or evidence.get("cleanup_complete") is not True:
-            _fail("research_campaign_resource_invalid")
-        auxiliaries.append(
-            {
-                "variant_id": variant,
-                "backend": "cpu",
-                "phase": AUX_PHASE,
-                "status": "complete",
-                "component_identity": _digest(raw),
-                "consumer": "hybrid",
-                "fit_budget_owner": variant,
-                "resources": {
-                    key: evidence[key]
-                    for key in (
-                        "elapsed_seconds",
-                        "sampled_peak_rss_bytes",
-                        "wait4_peak_rss_bytes",
-                        "observed_peak_rss_bytes",
-                        "rss_samples",
-                        "max_sample_gap_seconds",
-                    )
-                },
             }
         )
     hybrid_path = _required_phase_path(root, successes, "hybrid", "fit")
@@ -263,7 +186,7 @@ def _public_projection(
     if hybrid_manifest["producer"]["execution"]["backend"] != "cpu":
         _fail("research_campaign_component_invalid")
     for part, variant in (("content", "content-mean"), ("svd", "puresvd")):
-        origin = _required_phase_path(root, successes, variant, _component_phase(plan))
+        origin = _required_phase_path(root, successes, variant, "fit")
         source_value, raw = read_json(origin / "model-manifest.json")
         source = cast("ModelManifest", source_value)
         components = cast("dict[str, dict[str, str]]", hybrid_manifest["metadata"]["components"])
@@ -331,17 +254,13 @@ def _public_projection(
             }
     return {
         "variants": variants,
-        "auxiliary_fits": auxiliaries,
         "execution_config_count": plan["execution_config_count"],
-        "planned_nodes": len(_expected_nodes(plan)),
-        "actual_completed_model_packages": sum(
-            phase in ("fit", AUX_PHASE) for _variant, phase in successes
-        ),
+        "planned_nodes": len(_expected_nodes()),
+        "actual_completed_model_packages": sum(phase == "fit" for _variant, phase in successes),
         "actual_attempts_started": sum(attempts.values()),
         "actual_attempts_completed": sum(
             event["event"] == "attempt_finished" for event in journal_events
         ),
-        "hybrid_admission": {"status": "not_applicable", "reason": "declared_cpu_execution"},
         "primary_users": main_users,
         "primary_ndcg5": primary,
         "paired_vs_popularity": paired,
@@ -365,18 +284,18 @@ def validate_campaign(
     safe_path(prepared_dir, directory=True)
     safe_path(root, directory=True)
     plan_value, raw = _read_private(root / "campaign-plan.json")
-    configured = _validate_plan_structure(plan_value)
+    _validate_plan_structure(plan_value)
     plan = cast("CampaignPlan", plan_value)
     if (
         _digest(raw) != expected_campaign_identity
         or plan["prepared_identity"] != expected_prepared_identity
-        or plan["producer"] != _source_receipt(configured)
+        or plan["producer"] != _source_receipt()
         or tuple(entry["variant_id"] for entry in plan["variants"]) != VARIANTS
     ):
         _fail("research_campaign_plan_mismatch")
     journal = _Journal(root / "journal.jsonl")
     successes, attempts, charged, starts, failed = _successes(journal.events)
-    if starts or failed or set(successes) != _expected_nodes(plan):
+    if starts or failed or set(successes) != _expected_nodes():
         _fail("research_campaign_incomplete")
     for (variant, phase), event in successes.items():
         identity, _ = _verify_phase(
@@ -398,7 +317,7 @@ def validate_campaign(
     report = cast("dict[str, object]", report_value)
     manifest, _ = _read_private(root / "campaign-report-manifest.json")
     expected_fields = {
-        "schema_version": 1,
+        "schema_version": 2,
         "kind": "arb-ml02-campaign-report",
         "plan_identity": expected_campaign_identity,
         "prepared_identity": expected_prepared_identity,
