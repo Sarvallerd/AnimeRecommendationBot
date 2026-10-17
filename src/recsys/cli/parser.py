@@ -206,10 +206,10 @@ def build_parser() -> argparse.ArgumentParser:
     predict_validation.add_argument("--backend", choices=("cpu", "gpu"), default="cpu")
     predict_validation.add_argument("--measurement-output")
     gpu_preflight = research_commands.add_parser(
-        "gpu-preflight", help="GPU parity and timing diagnostic"
+        "gpu-preflight", help="retired GPU scoring route and historical recovery guidance"
     )
     for flag in ("prepared-dir", "expected-prepared-identity", "model-dir", "output-dir"):
-        gpu_preflight.add_argument(f"--{flag}", required=True)
+        gpu_preflight.add_argument(f"--{flag}")
     campaign_run = research_commands.add_parser(
         "campaign-run", help="run fixed ML-02 validation campaign"
     )

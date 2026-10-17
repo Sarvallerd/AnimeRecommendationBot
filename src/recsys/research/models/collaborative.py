@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypedDict, cast, overload
 
 from recsys.contracts.bundle import JSONValue
 from recsys.research.models.inputs import iter_training_rows
 from recsys.research.models.manifest import ModelManifest
+from recsys.research.models.spec import require_cpu_backend
 from recsys.research.models.types import Scorer, ScoreVector, ScoringInputs, TrainingInputs
 from recsys.research.protocol import exact, fail
 
@@ -17,8 +17,6 @@ if TYPE_CHECKING:
     import numpy as np
     from numpy.typing import NDArray
     from scipy.sparse import csr_matrix
-
-    from recsys.research.gpu import CupyDenseDots
 
 
 class KnnParameters(TypedDict):
@@ -360,6 +358,7 @@ def load(
     backend: str = "cpu",
     payload_prefix: str = "",
 ) -> Scorer:
+    require_cpu_backend(backend)
     import numpy as np
     from threadpoolctl import threadpool_limits
 
@@ -368,8 +367,6 @@ def load(
         fail("research_model_invalid")
     if kind not in ("itemknn", "puresvd") or _parameters(manifest["parameters"]) != kind:
         fail("research_model_invalid")
-    if backend not in ("cpu", "gpu") or (backend == "gpu" and kind != "puresvd"):
-        fail("research_backend_unsupported")
     positive = _validate_metadata(manifest["metadata"], kind, inputs)
     m = len(inputs.mal_ids)
     columns = {item: col for col, item in enumerate(inputs.mal_ids)}
@@ -432,25 +429,8 @@ def load(
         fail("research_model_invalid")
     supported_items = positive > 0
     supported_items.setflags(write=False)
-    dots: CupyDenseDots | None = None
-    if backend == "gpu" and rank:
-        from recsys.research.gpu import CupyDenseDots
-
-        dots = CupyDenseDots(np.ascontiguousarray(np.asarray(factors), dtype=np.float64))
 
     class PureSVDScorer:
-        def __init__(self) -> None:
-            self.dots = dots
-            self.closed = False
-
-        def close(self) -> None:
-            if self.closed:
-                return
-            self.closed = True
-            if self.dots is not None:
-                owned, self.dots = self.dots, None
-                owned.close()
-
         def score(self, seed_mal_ids: tuple[int, ...]) -> ScoreVector:
             return self.score_many((seed_mal_ids,))[0]
 
@@ -461,8 +441,6 @@ def load(
             )
 
         def score_many(self, seed_sets: tuple[tuple[int, ...], ...]) -> tuple[ScoreVector, ...]:
-            if backend == "gpu" and self.closed:
-                fail("research_gpu_closed")
             if type(seed_sets) is not tuple or len(seed_sets) > 128:
                 fail("research_model_invalid")
             answer: list[ScoreVector | None] = [None] * len(seed_sets)
@@ -475,7 +453,6 @@ def load(
                 if not seeds or not supported or rank == 0:
                     answer[position] = ScoreVector(zeros, unavailable, 0)
                     continue
-                # The CPU fold-in and the denominator are identical for both backends.
                 profile = np.asarray(
                     factors[list(seeds)].sum(axis=0) / len(seeds), dtype=np.float64
                 )
@@ -483,16 +460,10 @@ def load(
                 profiles.append(profile)
                 supports.append(int(supported))
             if profiles:
-                if backend == "gpu":
-                    if self.dots is None:
-                        fail("research_gpu_closed")
-                    block = np.ascontiguousarray(np.asarray(profiles), dtype=np.float64)
-                    rows: Iterable[NDArray[np.float64]] = self.dots.dot(block)
-                else:
-                    with threadpool_limits(limits=1, user_api="blas"):
-                        rows = tuple(
-                            np.asarray(factors @ profile, dtype=np.float64) for profile in profiles
-                        )
+                with threadpool_limits(limits=1, user_api="blas"):
+                    rows = tuple(
+                        np.asarray(factors @ profile, dtype=np.float64) for profile in profiles
+                    )
                 for position, values, supported in zip(positions, rows, supports, strict=True):
                     if not np.isfinite(values).all():
                         fail("research_model_invalid")

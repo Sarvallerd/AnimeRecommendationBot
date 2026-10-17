@@ -15,7 +15,6 @@ from typing import TypedDict, cast
 from recsys.research.campaign.artifacts import _phase_path
 from recsys.research.campaign.common import (
     _SAFE_CODE,
-    AUX_PHASE,
     PHASES,
     VARIANTS,
     _canonical,
@@ -28,7 +27,6 @@ from recsys.research.campaign.common import (
 from recsys.research.campaign.journal import _Journal, _successes
 from recsys.research.campaign.plan import (
     CampaignPlan,
-    _component_phase,
     _expected_nodes,
     _source_receipt,
     _validate_plan_structure,
@@ -145,7 +143,7 @@ def _worker_main(request_path: Path) -> int:
         request["schema_version"] != 1
         or request["kind"] != "arb-ml02-campaign-worker"
         or request["variant"] not in VARIANTS
-        or request["phase"] not in (*PHASES, AUX_PHASE)
+        or request["phase"] not in PHASES
         or request["attempt"] < 1
     ):
         _fail()
@@ -176,13 +174,14 @@ def _worker_main(request_path: Path) -> int:
             or _digest(raw) != request["plan_identity"]
         ):
             _fail("research_campaign_generation_stale")
-        configured = _validate_plan_structure(plan_value)
+        _validate_plan_structure(plan_value)
         plan = cast("CampaignPlan", plan_value)
-        if plan["variants"][VARIANTS.index(request["variant"])]["variant_id"] != request[
-            "variant"
-        ] or (request["variant"], request["phase"]) not in _expected_nodes(plan):
+        if (
+            plan["variants"][VARIANTS.index(request["variant"])]["variant_id"] != request["variant"]
+            or (request["variant"], request["phase"]) not in _expected_nodes()
+        ):
             _fail("research_campaign_generation_stale")
-        if plan.get("producer") != _source_receipt(configured):
+        if plan.get("producer") != _source_receipt():
             _fail("research_campaign_plan_mismatch")
         accepted, _, _, running, _ = _successes(_Journal(root / "journal.jsonl").events)
         start = running.get((request["variant"], request["phase"]))
@@ -194,9 +193,7 @@ def _worker_main(request_path: Path) -> int:
             _fail("research_campaign_generation_stale")
         variant = request["variant"]
         phase = request["phase"]
-        backend = (
-            "cpu" if phase == AUX_PHASE else plan["variants"][VARIANTS.index(variant)]["backend"]
-        )
+        backend = "cpu"
         prepared = Path(request["prepared_dir"])
         output = Path(request["output_dir"])
         identity = plan["prepared_identity"]
@@ -204,8 +201,8 @@ def _worker_main(request_path: Path) -> int:
             _fail()
         expected_model = _phase_path(root, accepted, variant, "fit")
         expected_prediction = _phase_path(root, accepted, variant, "predict")
-        expected_content = _phase_path(root, accepted, "content-mean", _component_phase(plan))
-        expected_svd = _phase_path(root, accepted, "puresvd", _component_phase(plan))
+        expected_content = _phase_path(root, accepted, "content-mean", "fit")
+        expected_svd = _phase_path(root, accepted, "puresvd", "fit")
         required_paths = (
             (("model_dir", expected_model),)
             if phase == "predict"
@@ -223,7 +220,7 @@ def _worker_main(request_path: Path) -> int:
             ):
                 _fail("research_campaign_request_invalid")
         # No scientific import or input read occurs before the gate checks.
-        if phase in ("fit", AUX_PHASE):
+        if phase == "fit":
             from recsys.research.models.package import fit_model
 
             assets = (

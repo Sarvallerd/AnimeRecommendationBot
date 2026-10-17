@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 from collections import OrderedDict
-from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -12,7 +11,7 @@ from recsys.content.glove import DIMENSION, BuildError, _tokens, build_vectors, 
 from recsys.contracts.bundle import JSONValue
 from recsys.release.lock import release_info
 from recsys.research.models.manifest import ModelManifest
-from recsys.research.models.spec import EXPECTED_VARIANTS
+from recsys.research.models.spec import EXPECTED_VARIANTS, require_cpu_backend
 from recsys.research.models.types import ScoreVector, ScoringInputs, TrainingInputs
 from recsys.research.protocol import exact, fail
 
@@ -20,7 +19,6 @@ if TYPE_CHECKING:
     import numpy as np
     from numpy.typing import NDArray
 
-    from recsys.research.gpu import CupyDenseDots
 
 type SourceCache = NDArray[np.float64] | NDArray[np.int32]
 
@@ -149,6 +147,7 @@ class ContentScorer:
         *,
         backend: str = "cpu",
     ) -> None:
+        require_cpu_backend(backend)
         import numpy as np
 
         self.ids = np.asarray(ids, dtype=np.int64)
@@ -157,19 +156,6 @@ class ContentScorer:
         self.ready = ready
         self.variant = variant
         self.cache = _LRU()
-        self.backend = backend
-        self.dots: CupyDenseDots | None = None
-        if backend == "gpu":
-            from recsys.research.gpu import CupyDenseDots
-
-            self.dots = CupyDenseDots(np.ascontiguousarray(np.asarray(vectors), dtype=np.float64))
-        elif backend != "cpu":
-            fail("research_backend_unsupported")
-
-    def close(self) -> None:
-        if self.dots is not None:
-            dots, self.dots = self.dots, None
-            dots.close()
 
     def _row(self, index: int) -> NDArray[np.float64]:
         import numpy as np
@@ -205,27 +191,7 @@ class ContentScorer:
         cached = self.cache.get(index)
         if cached is not None:
             return cached
-        if self.backend == "gpu":
-            self._prefetch((index,))
-            cached = self.cache.get(index)
-            if cached is None:
-                fail("research_gpu_execution_failed")
-            return cached
         return self._pack_source(index, self._row(index))
-
-    def _prefetch(self, indices: Iterable[int]) -> None:
-        import numpy as np
-
-        if self.dots is None:
-            fail("research_gpu_closed")
-        missing = tuple(dict.fromkeys(index for index in indices if self.cache.get(index) is None))
-        for offset in range(0, len(missing), 128):
-            block = missing[offset : offset + 128]
-            left = np.ascontiguousarray(np.asarray(self.vectors[list(block)]), dtype=np.float64)
-            rows = self.dots.dot(left)
-            for index, row in zip(block, rows, strict=True):
-                # A view would retain the whole GPU result batch outside the LRU budget.
-                self._pack_source(index, self._finish_row(row.copy()))
 
     def _validated(self, seed_mal_ids: tuple[int, ...]) -> tuple[int, ...]:
         if (
@@ -243,16 +209,12 @@ class ContentScorer:
         return frozenset(int(self.ids[index]) for index in self._validated(seed_mal_ids))
 
     def score(self, seed_mal_ids: tuple[int, ...]) -> ScoreVector:
-        if self.backend == "gpu":
-            return self.score_many((seed_mal_ids,))[0]
         return self._score_validated(seed_mal_ids, self._validated(seed_mal_ids))
 
     def score_many(self, seed_sets: tuple[tuple[int, ...], ...]) -> tuple[ScoreVector, ...]:
         if type(seed_sets) is not tuple or len(seed_sets) > 128:
             fail("research_model_invalid")
         supported = tuple(self._validated(seeds) for seeds in seed_sets)
-        if self.backend == "gpu":
-            self._prefetch(index for group in supported for index in group)
         return tuple(
             self._score_validated(seeds, group)
             for seeds, group in zip(seed_sets, supported, strict=True)
@@ -301,6 +263,7 @@ def load(
     payload_prefix: str = "",
 ) -> ContentScorer:
     """Recheck the payload semantics after the common manifest and hash checks."""
+    require_cpu_backend(backend)
     import numpy as np
 
     if payload_prefix not in ("", "content_"):

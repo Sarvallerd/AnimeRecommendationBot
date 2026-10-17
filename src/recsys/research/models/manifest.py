@@ -22,13 +22,11 @@ from recsys.research.artifacts import (
     safe_path,
     separate,
 )
-from recsys.research.gpu import GpuMetadata
 from recsys.research.models.spec import (
     EXPECTED_VARIANTS,
-    GPU_DEPENDENCIES,
     VARIANT_DEPENDENCIES,
-    _model_backend,
     campaign,
+    require_cpu_backend,
 )
 from recsys.research.models.types import ScoringInputs
 from recsys.research.protocol import exact, fail
@@ -125,13 +123,7 @@ def _external(
     return entries
 
 
-def _producer(
-    code_revision: object,
-    variant_id: str,
-    *,
-    model_backend: str = "cpu",
-    scoring: GpuMetadata | None = None,
-) -> ModelProducer:
+def _producer(code_revision: object, variant_id: str) -> ModelProducer:
     import numpy as np
 
     if type(code_revision) is not str or HEX40.fullmatch(code_revision) is None:
@@ -143,19 +135,7 @@ def _producer(
         if name in dependencies or type(name) is not str:
             fail("research_model_invalid")
         dependencies[name] = importlib.metadata.version(name)
-    if model_backend == "gpu":
-        if type(scoring) is not dict:
-            fail("research_backend_mismatch")
-        for name in GPU_DEPENDENCIES:
-            try:
-                dependencies[name] = importlib.metadata.version(name)
-            except importlib.metadata.PackageNotFoundError:
-                fail("research_gpu_unavailable")
-    elif model_backend != "cpu" or scoring is not None:
-        fail("research_backend_unsupported")
     execution: dict[str, object] = {"backend": "cpu", "dtype": "float64", "blas_threads": 1}
-    if scoring is not None:
-        execution["scoring"] = scoring
     return {
         "code_revision": code_revision,
         "code_files_sha256": source_fingerprints(),
@@ -244,12 +224,12 @@ def _validate_manifest(
     backend: str = "cpu",
     expected_code_revision: str | None = None,
 ) -> ModelManifest:
+    require_cpu_backend(backend)
     exact(manifest, MODEL_FIELDS)
     manifest = cast("dict[str, object]", manifest)
     variant = manifest["variant_id"]
     if type(variant) is not str or variant not in EXPECTED_VARIANTS:
         fail("research_model_variant_invalid")
-    _model_backend(variant, backend)
     spec, campaign_hash = campaign()
     producer_value = manifest["producer"]
     if type(producer_value) is not dict or type(producer_value.get("code_revision")) is not str:
@@ -260,24 +240,11 @@ def _validate_manifest(
     if expected_code_revision is not None and producer["code_revision"] != expected_code_revision:
         fail("research_model_invalid")
     execution = producer.get("execution")
-    if type(execution) is not dict or set(execution) != (
-        {"backend", "dtype", "blas_threads", "scoring"}
-        if backend == "gpu"
-        else {"backend", "dtype", "blas_threads"}
-    ):
+    if type(execution) is dict and "scoring" in execution:
+        fail("research_gpu_scoring_retired")
+    if type(execution) is not dict or set(execution) != {"backend", "dtype", "blas_threads"}:
         fail("research_backend_mismatch")
-    scoring = execution.get("scoring") if backend == "gpu" else None
-    if backend == "gpu":
-        from recsys.research.gpu import gpu_execution
-
-        with gpu_execution(expected_scoring=scoring):
-            pass
-    expected_producer = _producer(
-        producer["code_revision"],
-        variant,
-        model_backend=backend,
-        scoring=cast("GpuMetadata | None", scoring),
-    )
+    expected_producer = _producer(producer["code_revision"], variant)
     if (
         type(manifest["schema_version"]) is not int
         or manifest["schema_version"] != 2
@@ -339,6 +306,7 @@ def _read_model_package(
     backend: str = "cpu",
     expected_code_revision: str | None = None,
 ) -> tuple[ModelManifest, bytes]:
+    require_cpu_backend(backend)
     model_dir = safe_path(model_dir, directory=True)
     value, raw = read_json(model_dir / "model-manifest.json")
     manifest = _validate_manifest(

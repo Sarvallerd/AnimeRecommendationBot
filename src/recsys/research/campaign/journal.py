@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import NotRequired, TypedDict, cast
 
 from recsys.research.campaign.common import (
-    AUX_PHASE,
     CAMPAIGN_SECONDS,
     PHASES,
     VARIANTS,
@@ -66,6 +65,8 @@ def _validated_event(value: object) -> CampaignEvent:
     for key in ("variant", "phase", "status", "generation", "plan_identity"):
         if key in event and type(event[key]) is not str:
             _fail()
+    if "phase" in event and event["phase"] not in PHASES:
+        _fail()
     if "attempt" in event and type(event["attempt"]) is not int:
         _fail()
     for key in ("charged_seconds", "remaining_seconds"):
@@ -173,7 +174,7 @@ def _successes(events: list[CampaignEvent]) -> SuccessState:
         if event["event"] not in ("attempt_started", "attempt_finished", "attempt_interrupted"):
             continue
         key = (event["variant"], event["phase"])
-        if key[0] not in VARIANTS or key[1] not in (*PHASES, AUX_PHASE):
+        if key[0] not in VARIANTS or key[1] not in PHASES:
             _fail()
         number = event["attempt"]
         if type(number) is not int or number < 1:

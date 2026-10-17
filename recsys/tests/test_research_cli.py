@@ -24,6 +24,7 @@ class ResearchCliTests(unittest.TestCase):
             "model-fit",
             "predict-validation",
             "gpu-preflight",
+            "campaign-run",
             "evaluate",
             "compare",
             "finalize",
@@ -55,6 +56,66 @@ class ResearchCliTests(unittest.TestCase):
             ]
         )
         self.assertEqual(parsed.backend, "gpu")
+
+    def test_retired_gpu_routes_do_not_touch_private_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            private = Path(directory) / "private-input"
+            output = Path(directory) / "unpublished"
+            common = [
+                "--prepared-dir",
+                str(private),
+                "--expected-prepared-identity",
+                "sha256:" + "0" * 64,
+                "--output-dir",
+                str(output),
+            ]
+            routes = (
+                [
+                    "model-fit",
+                    *common,
+                    "--variant",
+                    "puresvd",
+                    "--code-revision",
+                    "a" * 40,
+                    "--backend",
+                    "gpu",
+                ],
+                [
+                    "predict-validation",
+                    *common,
+                    "--model-dir",
+                    str(private),
+                    "--backend",
+                    "gpu",
+                    "--measurement-output",
+                    str(output / "measurement.json"),
+                ],
+                [
+                    "campaign-run",
+                    *common,
+                    "--code-revision",
+                    "a" * 40,
+                    "--glove",
+                    str(private),
+                    "--backend",
+                    "gpu",
+                ],
+                ["gpu-preflight"],
+                ["gpu-preflight", *common, "--model-dir", str(private)],
+            )
+            for route in routes:
+                with self.subTest(route=route[0]):
+                    out, err = io.StringIO(), io.StringIO()
+                    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                        status = main(["research", *route])
+                    self.assertEqual(status, 1)
+                    self.assertEqual(out.getvalue(), "")
+                    self.assertIn("recsys research: research_gpu_scoring_retired", err.getvalue())
+                    self.assertIn("fa983eaeeeeb41b41ac893b7de9827a40c25d27d", err.getvalue())
+                    self.assertNotIn(str(private), err.getvalue())
+                    self.assertNotIn(str(output), err.getvalue())
+                    self.assertFalse(private.exists())
+                    self.assertFalse(output.exists())
 
     def test_safe_error_code(self) -> None:
         err = io.StringIO()

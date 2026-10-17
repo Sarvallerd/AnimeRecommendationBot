@@ -17,7 +17,6 @@ from typing import NotRequired, TypedDict, cast
 
 from recsys.research.campaign.artifacts import _phase_directory, _phase_path, _verify_phase
 from recsys.research.campaign.common import (
-    AUX_PHASE,
     EVALUATION_SECONDS,
     FIT_SECONDS,
     PHASES,
@@ -38,20 +37,19 @@ from recsys.research.campaign.common import (
 from recsys.research.campaign.journal import CampaignEvent, PhaseKey, _Journal, _successes
 from recsys.research.campaign.plan import (
     CampaignPlan,
-    _component_phase,
     _expected_nodes,
     _plan,
     _validate_plan_structure,
 )
 from recsys.research.campaign.report import _public_projection
 from recsys.research.campaign.worker import _worker_request
+from recsys.research.models.spec import require_cpu_backend
 from recsys.research.resources import JobHandle, ProcessResult
 
 
 class ActivePhase(TypedDict):
     variant: str
     phase: str
-    lane: str
     attempt: int
     generation: str
     observed_elapsed: float
@@ -90,50 +88,38 @@ def _next_ready(
     successes: dict[PhaseKey, CampaignEvent],
     failed: set[PhaseKey],
     active_keys: set[PhaseKey],
-    plan: CampaignPlan,
     cpu_used: int,
-    gpu_used: int,
     cpu_workers: int,
-) -> tuple[str, str, str] | None:
+) -> tuple[str, str] | None:
     for variant in VARIANTS:
-        for phase in (*PHASES, AUX_PHASE):
+        for phase in PHASES:
             key = (variant, phase)
-            if key not in _expected_nodes(plan):
-                continue
             if key in successes or key in failed or key in active_keys:
                 continue
-            index = PHASES.index(phase) if phase in PHASES else 0
-            if phase == AUX_PHASE and (variant, "fit") not in successes:
-                continue
+            index = PHASES.index(phase)
             if index and (variant, PHASES[index - 1]) not in successes:
                 continue
             if (
                 phase == "fit"
                 and variant == "hybrid"
                 and any(
-                    (dependency, _component_phase(plan)) not in successes
+                    (dependency, "fit") not in successes
                     for dependency in ("content-mean", "puresvd")
                 )
             ):
                 continue
-            lane = (
-                "cpu"
-                if phase == AUX_PHASE
-                else plan["variants"][VARIANTS.index(variant)]["backend"]
-                if phase in ("fit", "predict")
-                else "cpu"
-            )
-            if lane == "gpu" and gpu_used or lane == "cpu" and cpu_used >= cpu_workers:
+            if cpu_used >= cpu_workers:
                 continue
-            return variant, phase, lane
+            return variant, phase
     return None
 
 
 def _phase_budget_remaining(charged: dict[PhaseKey, float], variant: str, phase: str) -> float:
-    budget = FIT_SECONDS if phase in ("fit", AUX_PHASE) else EVALUATION_SECONDS
+    if phase not in PHASES:
+        _fail("research_campaign_invalid")
+    budget = FIT_SECONDS if phase == "fit" else EVALUATION_SECONDS
     used = sum(
-        charged.get((variant, step), 0.0)
-        for step in (("fit", AUX_PHASE) if phase in ("fit", AUX_PHASE) else PHASES[1:])
+        charged.get((variant, step), 0.0) for step in (("fit",) if phase == "fit" else PHASES[1:])
     )
     return budget - used
 
@@ -163,8 +149,8 @@ def _prepare_attempt(
     _ensure_private(directory / "resources")
     model = _phase_path(root, successes, variant, "fit")
     predictions = _phase_path(root, successes, variant, "predict")
-    content = _phase_path(root, successes, "content-mean", _component_phase(plan))
-    svd = _phase_path(root, successes, "puresvd", _component_phase(plan))
+    content = _phase_path(root, successes, "content-mean", "fit")
+    svd = _phase_path(root, successes, "puresvd", "fit")
     request = _worker_request(
         root,
         plan_identity,
@@ -196,6 +182,7 @@ def run_campaign(
     expected_campaign_identity: str | None = None,
 ) -> Path:
     """Run exactly seven fixed validation variants with durable, bounded workers."""
+    require_cpu_backend(backend)
     from recsys.research.artifacts import safe_path, separate
     from recsys.research.resources import ResourceSupervisor
 
@@ -236,7 +223,6 @@ def run_campaign(
                 expected_prepared_identity,
                 code_revision,
                 glove,
-                backend,
                 cpu_workers,
                 created,
             )
@@ -250,7 +236,6 @@ def run_campaign(
                 expected_prepared_identity,
                 code_revision,
                 glove,
-                backend,
                 cpu_workers,
                 created,
             )
@@ -312,21 +297,18 @@ def run_campaign(
                     # Start independent ready phases while slots are free. Heavy
                     # artifact validation is deferred until no child is active.
                     while True:
-                        cpu_used = sum(item["lane"] == "cpu" for item in active.values())
-                        gpu_used = sum(item["lane"] == "gpu" for item in active.values())
+                        cpu_used = len(active)
                         choice = _next_ready(
                             successes,
                             failed,
                             {(item["variant"], item["phase"]) for item in active.values()}
                             | {(item["variant"], item["phase"]) for item in pending},
-                            plan,
                             cpu_used,
-                            gpu_used,
                             cpu_workers,
                         )
                         if choice is None:
                             break
-                        variant, phase, lane = choice
+                        variant, phase = choice
                         remaining = _remaining(plan, charged, variant, phase)
                         if remaining <= 0:
                             frozen, failure_code = True, "research_campaign_budget_limit"
@@ -392,7 +374,6 @@ def run_campaign(
                         active[handle] = {
                             "variant": variant,
                             "phase": phase,
-                            "lane": lane,
                             "attempt": number,
                             "generation": generation,
                             "observed_elapsed": 0.0,
@@ -449,9 +430,9 @@ def run_campaign(
                                 frozen = True
                                 failure_code = event["code"]
                         pending.clear()
-                    if frozen or set(successes) == _expected_nodes(plan):
+                    if frozen or set(successes) == _expected_nodes():
                         break
-                    if _next_ready(successes, failed, set(), plan, 0, 0, cpu_workers) is None:
+                    if _next_ready(successes, failed, set(), 0, cpu_workers) is None:
                         frozen, failure_code = True, "research_campaign_dependency_blocked"
                         journal.append("campaign_failure", code=failure_code)
                         break
@@ -543,7 +524,7 @@ def run_campaign(
                             )
                         except BaseException:
                             pass
-        complete = not frozen and set(successes) == _expected_nodes(plan)
+        complete = not frozen and set(successes) == _expected_nodes()
         if complete:
             report = _public_projection(root, plan, successes, prepared_dir)
             if _now() > _parse_iso(plan["deadline_utc"]):
@@ -552,7 +533,7 @@ def run_campaign(
             report = {"variants": [], "primary_ndcg5": None, "paired_vs_popularity": None}
         report.update(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "kind": "arb-ml02-campaign-report",
                 "plan_identity": plan_identity,
                 "prepared_identity": plan["prepared_identity"],

@@ -1,11 +1,9 @@
 """Fixed raw-score RRF and portable embedded component checks."""
 
-import os
 import tempfile
 import unittest
 from collections.abc import Sequence
 from pathlib import Path
-from unittest.mock import patch
 
 import numpy as np
 from research_model_support import ModelFixture, patch_release_info
@@ -13,7 +11,7 @@ from test_research_model_content import _glove
 
 from recsys.research.models.hybrid import _fusion
 from recsys.research.models.package import fit_model, load_model, read_scoring_inputs
-from recsys.research.models.types import CloseableScorer, ScoreVector
+from recsys.research.models.types import ScoreVector
 from recsys.research.protocol import ResearchError
 
 
@@ -31,9 +29,6 @@ class _Fake:
 
     def score(self, seed_mal_ids: tuple[int, ...]) -> ScoreVector:
         return self.vector
-
-    def close(self) -> None:
-        pass
 
     def supported_seed_ids(self, seeds: tuple[int, ...]) -> frozenset[int]:
         return frozenset(self.supported & set(seeds))
@@ -94,48 +89,6 @@ class PortableTests(unittest.TestCase):
                     assets=paths,
                 )
                 inputs = read_scoring_inputs(prepared, expected_prepared_identity=identity)
-                from recsys.research.predict import gpu_preflight, predict_validation
-
-                with (
-                    patch(
-                        "recsys.research.gpu.probe_gpu",
-                        side_effect=AssertionError("probe forbidden"),
-                    ),
-                    patch(
-                        "recsys.research.gpu.gpu_execution",
-                        side_effect=AssertionError("session forbidden"),
-                    ),
-                ):
-                    for action in (
-                        lambda: fit_model(
-                            prepared,
-                            base / "hybrid-gpu",
-                            expected_prepared_identity=identity,
-                            variant_id="hybrid",
-                            code_revision="a" * 40,
-                            assets=paths,
-                            backend="gpu",
-                        ),
-                        lambda: load_model(hybrid, inputs=inputs, backend="gpu"),
-                        lambda: predict_validation(
-                            prepared,
-                            hybrid,
-                            base / "hybrid-gpu-pred",
-                            expected_prepared_identity=identity,
-                            backend="gpu",
-                        ),
-                        lambda: gpu_preflight(
-                            prepared,
-                            hybrid,
-                            base / "hybrid-gpu-preflight",
-                            expected_prepared_identity=identity,
-                        ),
-                    ):
-                        with self.assertRaisesRegex(ResearchError, "research_backend_unsupported"):
-                            action()
-                self.assertFalse((base / "hybrid-gpu").exists())
-                self.assertFalse((base / "hybrid-gpu-pred").exists())
-                self.assertFalse((base / "hybrid-gpu-preflight").exists())
                 original = load_model(hybrid, inputs=inputs)[1].score((1, 2))
                 for source in paths.values():
                     for entry in source.iterdir():
@@ -149,116 +102,3 @@ class PortableTests(unittest.TestCase):
                     stream.write(b"x")
                 with self.assertRaises(ResearchError):
                     load_model(hybrid, inputs=inputs)
-
-
-@unittest.skipUnless(os.getenv("ARB_RESEARCH_GPU_TEST") == "1", "hardware opt-in")
-class HardwareTests(unittest.TestCase):
-    def test_four_gpu_components_and_cpu_hybrid_preserve_raw_ranks(self) -> None:
-        from recsys.research.gpu import probe_gpu
-        from recsys.research.predict import gpu_preflight, predict_validation
-
-        with tempfile.TemporaryDirectory() as temporary:
-            fixture = ModelFixture(temporary)
-            glove = Path(temporary) / "glove.txt"
-            fixture.lock["inputs"]["embeddings"] = _glove(glove)
-            prepared, identity = fixture.make_prepared()
-            base = Path(temporary)
-            parts = {"content_model": base / "content-cpu", "puresvd_model": base / "svd-cpu"}
-            evidence = base / "evidence"
-            evidence.mkdir(mode=0o700)
-            with patch_release_info(fixture.lock):
-                for variant in ("content-mean", "content-max", "content-union", "puresvd"):
-                    fit_model(
-                        prepared,
-                        base / (variant + "-gpu"),
-                        expected_prepared_identity=identity,
-                        variant_id=variant,
-                        code_revision="a" * 40,
-                        assets={"glove": glove} if variant.startswith("content-") else None,
-                        backend="gpu",
-                    )
-                fit_model(
-                    prepared,
-                    parts["content_model"],
-                    expected_prepared_identity=identity,
-                    variant_id="content-mean",
-                    code_revision="a" * 40,
-                    assets={"glove": glove},
-                    backend="cpu",
-                )
-                fit_model(
-                    prepared,
-                    parts["puresvd_model"],
-                    expected_prepared_identity=identity,
-                    variant_id="puresvd",
-                    code_revision="a" * 40,
-                    backend="cpu",
-                )
-                hybrid = base / "hybrid"
-                fit_model(
-                    prepared,
-                    hybrid,
-                    expected_prepared_identity=identity,
-                    variant_id="hybrid",
-                    code_revision="a" * 40,
-                    assets=parts,
-                    backend="cpu",
-                )
-                inputs = read_scoring_inputs(prepared, expected_prepared_identity=identity)
-                for source in parts.values():
-                    for entry in source.iterdir():
-                        entry.unlink()
-                    source.rmdir()
-                manifest, scorer = load_model(hybrid, inputs=inputs, backend="cpu")
-                self.assertEqual(scorer.score((1,)).supported_seeds, 1)
-                assert isinstance(scorer, CloseableScorer)
-                scorer.close()
-                measured: dict[str, object] = {}
-                predict_validation(
-                    prepared,
-                    hybrid,
-                    base / "predictions",
-                    expected_prepared_identity=identity,
-                    backend="cpu",
-                    measurements=measured,
-                    measurement_output=evidence / "prediction.json",
-                )
-                self.assertEqual(measured["status"], "published")
-                with (
-                    patch(
-                        "recsys.research.gpu.probe_gpu",
-                        side_effect=AssertionError("probe forbidden"),
-                    ),
-                    patch(
-                        "recsys.research.gpu.gpu_execution",
-                        side_effect=AssertionError("session forbidden"),
-                    ),
-                ):
-                    with self.assertRaisesRegex(ResearchError, "research_backend_unsupported"):
-                        fit_model(
-                            prepared,
-                            base / "hybrid-gpu",
-                            expected_prepared_identity=identity,
-                            variant_id="hybrid",
-                            code_revision="a" * 40,
-                            assets=parts,
-                            backend="gpu",
-                        )
-                    with self.assertRaisesRegex(ResearchError, "research_backend_unsupported"):
-                        load_model(hybrid, inputs=inputs, backend="gpu")
-                    with self.assertRaisesRegex(ResearchError, "research_backend_unsupported"):
-                        predict_validation(
-                            prepared,
-                            hybrid,
-                            base / "hybrid-gpu-pred",
-                            expected_prepared_identity=identity,
-                            backend="gpu",
-                        )
-                    with self.assertRaisesRegex(ResearchError, "research_backend_unsupported"):
-                        gpu_preflight(
-                            prepared,
-                            hybrid,
-                            base / "preflight",
-                            expected_prepared_identity=identity,
-                        )
-                self.assertEqual(probe_gpu()["backend"], "cupy")

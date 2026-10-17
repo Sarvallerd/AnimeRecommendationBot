@@ -7,11 +7,10 @@ been acquired and checked. All expensive scientific work runs in workers.
 from __future__ import annotations
 
 import hashlib
-import math
 from pathlib import Path
-from typing import Literal, TypedDict, cast
+from typing import TypedDict, cast
 
-from recsys.research.campaign.common import AUX_PHASE, VARIANTS, _digest, _fail, _read_private
+from recsys.research.campaign.common import _digest, _fail, _read_private
 from recsys.research.campaign.journal import CampaignEvent, PhaseKey
 from recsys.research.campaign.plan import CampaignPlan
 
@@ -68,91 +67,6 @@ def _read_receipt(
     return cast("WorkerReceipt", result)
 
 
-def _validate_gpu_measurement(value: object) -> None:
-    """Check the retained measurement before campaign reporting reads its fields."""
-
-    def nonnegative_float(item: object) -> bool:
-        return type(item) is float and math.isfinite(item) and item >= 0
-
-    def nonnegative_int(item: object) -> bool:
-        return type(item) is int and item >= 0
-
-    durations = {
-        "session_acquire_seconds",
-        "input_validation_seconds",
-        "model_validation_upload_seconds",
-        "input_model_init_upload_seconds",
-        "gpu_admission_seconds",
-        "synchronized_scoring_seconds",
-        "encoding_gzip_write_seconds",
-        "staging_wall_seconds",
-        "publication_wall_seconds",
-    }
-    if type(value) is not dict or set(value) != {
-        "backend",
-        "status",
-        "gpu_admission",
-        "dedicated_pool_session_including_admission",
-        "memory_scope",
-        "queries",
-        "score_pairs",
-        *durations,
-    }:
-        _fail("research_campaign_admission_invalid")
-    admission_value = value["gpu_admission"]
-    pool_value = value["dedicated_pool_session_including_admission"]
-    if (
-        value["status"] != "published"
-        or value["backend"] != "gpu"
-        or value["memory_scope"] != "dedicated-pool-only-excludes-context-and-cublas"
-        or any(not nonnegative_float(value[key]) for key in durations)
-        or any(not nonnegative_int(value[key]) for key in ("queries", "score_pairs"))
-        or type(admission_value) is not dict
-        or type(pool_value) is not dict
-    ):
-        _fail("research_campaign_admission_invalid")
-    if (
-        set(admission_value)
-        != {
-            "purpose",
-            "canonical_queries",
-            "nonempty_queries",
-            "raw_atol",
-            "raw_rtol",
-            "raw_max_abs_difference",
-            "encoded_score_differences",
-            "complete_available_rankings_equal",
-            "model_sha256",
-            "query_sha256",
-            "scoring_provenance",
-            "code_files_sha256",
-        }
-        or admission_value["purpose"] != "parity-only-gpu-admission"
-        or admission_value["complete_available_rankings_equal"] is not True
-        or any(
-            not nonnegative_int(admission_value[key])
-            for key in ("canonical_queries", "nonempty_queries", "encoded_score_differences")
-        )
-        or any(
-            not nonnegative_float(admission_value[key])
-            for key in ("raw_atol", "raw_rtol", "raw_max_abs_difference")
-        )
-        or any(type(admission_value[key]) is not str for key in ("model_sha256", "query_sha256"))
-        or type(admission_value["scoring_provenance"]) is not dict
-        or type(admission_value["code_files_sha256"]) is not dict
-        or set(pool_value)
-        != {
-            "pool_used_bytes",
-            "pool_reserved_bytes",
-            "pool_limit_bytes",
-            "pool_peak_used_bytes",
-            "pool_peak_reserved_bytes",
-        }
-        or any(not nonnegative_int(item) for item in pool_value.values())
-    ):
-        _fail("research_campaign_admission_invalid")
-
-
 def _verify_phase(
     root: Path,
     plan: CampaignPlan,
@@ -173,7 +87,6 @@ def _verify_phase(
     receipt = _read_receipt(attempt_dir, variant, phase, attempt, generation)
     manifest_name = {
         "fit": "model-manifest.json",
-        AUX_PHASE: "model-manifest.json",
         "predict": "prediction-manifest.json",
         "evaluate": "evaluation-manifest.json",
         "replay": "evaluation-manifest.json",
@@ -182,9 +95,9 @@ def _verify_phase(
     manifest_identity = _digest(raw)
     if receipt["manifest_sha256"] != manifest_identity:
         _fail("research_campaign_receipt_invalid")
-    backend = "cpu" if phase == AUX_PHASE else plan["variants"][VARIANTS.index(variant)]["backend"]
+    backend = "cpu"
     inputs = read_scoring_inputs(prepared_dir, expected_prepared_identity=plan["prepared_identity"])
-    if phase in ("fit", AUX_PHASE):
+    if phase == "fit":
         manifest, validated_raw = _read_model_package(
             artifact, inputs=inputs, backend=backend, expected_code_revision=plan["code_revision"]
         )
@@ -195,19 +108,10 @@ def _verify_phase(
             or manifest["producer"]["code_revision"] != plan["code_revision"]
         ):
             _fail()
-        if backend == "gpu":
-            from recsys.research.gpu import gpu_execution
-
-            with gpu_execution():
-                _, gpu_scorer = load_model(
-                    artifact, inputs=inputs, backend=cast("Literal['gpu']", backend)
-                )
-                gpu_scorer.close()
-        else:
-            _, cpu_scorer = load_model(artifact, inputs=inputs, backend=backend)
-            close = getattr(cpu_scorer, "close", None)
-            if callable(close):
-                close()
+        _, cpu_scorer = load_model(artifact, inputs=inputs, backend=backend)
+        close = getattr(cpu_scorer, "close", None)
+        if callable(close):
+            close()
     elif phase == "predict":
         from recsys.research.evaluation.evaluate import PreparationManifest, _predictions
 
@@ -232,9 +136,6 @@ def _verify_phase(
             != {key: prediction["scores"][key] for key in ("bytes", "sha256")}
         ):
             _fail("research_campaign_prediction_invalid")
-        if backend == "gpu":
-            measured_value, _ = _read_private(attempt_dir / "resources" / "measurement.json")
-            _validate_gpu_measurement(measured_value)
         return manifest_identity, prediction_identity
     else:
         from recsys.research.evaluation.compare import _evaluation
