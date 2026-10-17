@@ -86,6 +86,8 @@ def _parse_device_wire(value: object) -> DeviceSpec:
         raise ResearchError("training_device_invalid")
     wire = cast("dict[str, object]", value)
     kind, index = wire["kind"], wire["index"]
+    if type(kind) is not str:
+        raise ResearchError("training_device_invalid")
     if kind == "cpu" and index is None:
         return DeviceSpec("cpu", None)
     if kind == "cuda" and type(index) is int and 0 <= index <= 31:
@@ -113,11 +115,17 @@ def parse_training_spec(value: object) -> TrainingSpec:
     if (
         type(raw["schema_version"]) is not int
         or raw["schema_version"] != 1
+        or type(raw["kind"]) is not str
         or raw["kind"] != "arb-training-spec"
     ):
         raise ResearchError("training_spec_invalid")
     train = _parse_device_wire(raw["train_device"])
     inference = _parse_device_wire(raw["inference_device"])
+    if any(
+        type(raw[field]) is not str
+        for field in ("family", "framework", "weights_format", "precision")
+    ):
+        raise ResearchError("training_spec_invalid")
     if (raw["family"], raw["framework"], raw["weights_format"]) not in (
         ("seed-embedding", "pytorch", "safetensors-v1"),
         ("boosted-ranker", "catboost", "catboost-cbm-v1"),

@@ -7,6 +7,10 @@ from recsys.research.protocol import ResearchError
 from recsys.research.training.spec import parse_device, parse_training_spec
 
 
+class WireString(str):
+    """A string-like Python value that is not an exact JSON string type."""
+
+
 def valid_spec() -> dict[str, object]:
     return {
         "schema_version": 1,
@@ -31,13 +35,32 @@ class TrainingSpecTests(unittest.TestCase):
         self.assertEqual(parse_device("cuda:31").index, 31)
 
     def test_reject_noncanonical_devices(self) -> None:
-        for value in ("cuda", "cuda:01", "cuda:-1", "cuda:32", "gpu", "auto", " cpu", True, 0):
+        for value in (
+            "cuda",
+            "cuda:01",
+            "cuda:-1",
+            "cuda:32",
+            "gpu",
+            "auto",
+            " cpu",
+            WireString("cpu"),
+            WireString("cuda:0"),
+            True,
+            0,
+        ):
             with (
                 self.subTest(value=value),
                 self.assertRaisesRegex(ResearchError, "training_device_invalid"),
             ):
                 parse_device(value)
-        for bad_wire in ({"kind": "cpu", "index": 0}, {"kind": "cuda", "index": True}):
+        for bad_wire in (
+            {"kind": "cpu", "index": 0},
+            {"kind": "cuda", "index": True},
+            {"kind": WireString("cpu"), "index": None},
+            {"kind": WireString("cuda"), "index": 0},
+            {"kind": None, "index": None},
+            {"kind": 0, "index": None},
+        ):
             config = valid_spec()
             config["inference_device"] = bad_wire
             with self.assertRaisesRegex(ResearchError, "training_device_invalid"):
@@ -72,6 +95,17 @@ class TrainingSpecTests(unittest.TestCase):
         config["parameters"] = {f"p{n}": n for n in range(33)}
         with self.assertRaisesRegex(ResearchError, "training_spec_invalid"):
             parse_training_spec(config)
+
+    def test_reject_nonexact_string_literal_fields(self) -> None:
+        for field in ("kind", "family", "framework", "weights_format", "precision"):
+            original = valid_spec()[field]
+            assert isinstance(original, str)
+            for replacement in (WireString(original), None, 0):
+                with self.subTest(field=field, value=repr(replacement)):
+                    config = valid_spec()
+                    config[field] = replacement
+                    with self.assertRaisesRegex(ResearchError, "training_spec_invalid"):
+                        parse_training_spec(config)
 
     def test_reserved_catboost_combination_parses(self) -> None:
         config = valid_spec()
