@@ -182,7 +182,15 @@
       "modules": [
         "recsys.research.training",
         "recsys.research.training.artifacts",
-        "recsys.research.training.spec"
+        "recsys.research.training.candidate",
+        "recsys.research.training.examples",
+        "recsys.research.training.execution",
+        "recsys.research.training.predict",
+        "recsys.research.training.receipts",
+        "recsys.research.training.spec",
+        "recsys.research.training.torch_model",
+        "recsys.research.training.types",
+        "recsys.research.training.worker"
       ],
       "depends_on": [
         "core",

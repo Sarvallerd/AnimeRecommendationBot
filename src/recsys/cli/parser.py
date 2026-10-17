@@ -185,6 +185,34 @@ def build_parser() -> argparse.ArgumentParser:
     )
     training_verify.add_argument("model_dir")
     training_verify.add_argument("--expected-identity", required=True)
+    training_fit = research_commands.add_parser(
+        "training-fit", help="fit the predeclared native seed-embedding candidate"
+    )
+    for flag in (
+        "candidate",
+        "prepared-dir",
+        "expected-prepared-identity",
+        "output-dir",
+        "code-revision",
+    ):
+        training_fit.add_argument(f"--{flag}", required=True)
+    training_fit.add_argument("--train-device", default="cuda:0")
+    training_fit.add_argument("--inference-device", default="cpu")
+    training_predict = research_commands.add_parser(
+        "training-predict", help="make one bounded prediction from native weights"
+    )
+    for flag in (
+        "prepared-dir",
+        "expected-prepared-identity",
+        "model-dir",
+        "expected-model-identity",
+        "output-dir",
+        "code-revision",
+    ):
+        training_predict.add_argument(f"--{flag}", required=True)
+    training_predict.add_argument("--seed-mal-id", type=int, action="append", default=[])
+    training_predict.add_argument("--limit", type=int, default=5)
+    training_predict.add_argument("--inference-device")
     model_fit = research_commands.add_parser("model-fit", help="fit a frozen ML-02 variant")
     for flag in (
         "prepared-dir",

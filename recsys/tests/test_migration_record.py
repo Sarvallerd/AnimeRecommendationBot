@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[2]
 RECORD = ROOT / "docs/migrations/arb054-recsys-layout-v2.json"
 TRAINING_RECORD = ROOT / "docs/migrations/arb058-training-artifacts-v1.json"
 RETIREMENT_RECORD = ROOT / "docs/migrations/arb059-cupy-scoring-retirement.json"
+NATIVE_RECORD = ROOT / "docs/migrations/arb060-native-pytorch-training-v1.json"
 LEGACY_RECORD_SHA256 = "27dd3f274a4cee02b0d6e7cf43fa9f4fcfbfe755e04d0c43d68d6c319ced5016"
 TRAINING_RECORD_SHA256 = "9a891c85f97340713be41319aeed559285c8cab54363fb8ede1f94ad76dff221"
 LOCK = ROOT / "src/recsys/resources/releases/release_neelagiri_2025_nafiul_2026_v1.json"
@@ -38,7 +39,7 @@ class MigrationRecordTests(unittest.TestCase):
         self.assertEqual(current["source_layout"], SOURCE_LAYOUT)
         self.assertEqual(
             current["source_inventory"],
-            sorted((*SOURCE_FILES, "research/gpu.py")),
+            json.loads(RETIREMENT_RECORD.read_bytes())["previous_source_inventory"],
         )
         self.assertEqual(current["previous_artifact_versions"], legacy["artifact_versions"])
         self.assertEqual(
@@ -79,7 +80,7 @@ class MigrationRecordTests(unittest.TestCase):
         self.assertTrue(added.isdisjoint(record["source_inventory"]))
         self.assertEqual(
             set(record["source_inventory"]) | added,
-            set(SOURCE_FILES) | {"research/gpu.py"},
+            set(json.loads(TRAINING_RECORD.read_bytes())["source_inventory"]),
         )
         self.assertEqual(len(record["module_moves"]), 33)
         self.assertEqual(len(record["resource_moves"]), 11)
@@ -164,8 +165,7 @@ class MigrationRecordTests(unittest.TestCase):
             set(training["source_inventory"]) - set(retired["removed_sources"]),
             set(retired["source_inventory"]),
         )
-        self.assertEqual(retired["source_inventory"], list(SOURCE_FILES))
-        self.assertEqual(len(SOURCE_FILES), 75)
+        self.assertEqual(len(retired["source_inventory"]), 75)
         self.assertEqual(retired["previous_source_inventory"], training["source_inventory"])
         self.assertEqual(retired["removed_sources"], ["research/gpu.py"])
         self.assertEqual(
@@ -207,6 +207,34 @@ class MigrationRecordTests(unittest.TestCase):
             retired["acceptance"],
             {"full_ml02": False, "model_quality": False, "release_accepted": False},
         )
+
+    def test_native_training_migration_preserves_source_and_resource_history(self) -> None:
+        retired = json.loads(RETIREMENT_RECORD.read_bytes())
+        current = json.loads(NATIVE_RECORD.read_bytes())
+        self.assertEqual(current["migration_id"], "arb060-native-pytorch-training-v1")
+        self.assertEqual(
+            current["task_baseline_commit"], "18297ed7db59b66f6b4a63a179ea8daacdea0490"
+        )
+        self.assertEqual(current["previous_source_inventory"], retired["source_inventory"])
+        self.assertEqual(len(current["previous_source_inventory"]), 75)
+        self.assertEqual(len(current["added_sources"]), 9)
+        self.assertEqual(current["source_inventory"], list(SOURCE_FILES))
+        self.assertEqual(len(SOURCE_FILES), 84)
+        self.assertEqual(
+            sorted(set(current["source_inventory"]) - set(current["previous_source_inventory"])),
+            current["added_sources"],
+        )
+        for name, digest in current["previous_migration_sha256"].items():
+            self.assertEqual(hashlib.sha256((ROOT / name).read_bytes()).hexdigest(), digest)
+        self.assertEqual(current["preserved_resource_sha256"], retired["preserved_resource_sha256"])
+        for name, digest in current["preserved_resource_sha256"].items():
+            self.assertEqual(hashlib.sha256((ROOT / name).read_bytes()).hexdigest(), digest)
+        resource = current["candidate_resource"]
+        raw = (ROOT / resource["path"]).read_bytes()
+        self.assertEqual(
+            (len(raw), hashlib.sha256(raw).hexdigest()), (resource["bytes"], resource["sha256"])
+        )
+        self.assertEqual(current["acceptance"], retired["acceptance"])
 
 
 if __name__ == "__main__":

@@ -273,6 +273,36 @@ def main(argv: Sequence[str] | None = None) -> int:
                     f"framework={verified.spec.framework} "
                     f"weights_format={verified.spec.weights_format}"
                 )
+            elif parsed.research_command == "training-fit":
+                from recsys.research.training.execution import fit_training_model
+                from recsys.research.training.spec import parse_device
+
+                result = fit_training_model(
+                    Path(parsed.prepared_dir),
+                    Path(parsed.output_dir),
+                    expected_prepared_identity=parsed.expected_prepared_identity,
+                    candidate_id=parsed.candidate,
+                    code_revision=parsed.code_revision,
+                    train_device=parse_device(parsed.train_device),
+                    inference_device=parse_device(parsed.inference_device),
+                )
+            elif parsed.research_command == "training-predict":
+                from recsys.research.training.execution import predict_training_model
+                from recsys.research.training.spec import parse_device
+
+                result = predict_training_model(
+                    Path(parsed.prepared_dir),
+                    Path(parsed.model_dir),
+                    Path(parsed.output_dir),
+                    expected_prepared_identity=parsed.expected_prepared_identity,
+                    expected_model_identity=parsed.expected_model_identity,
+                    seed_mal_ids=tuple(parsed.seed_mal_id),
+                    code_revision=parsed.code_revision,
+                    limit=parsed.limit,
+                    inference_device=parse_device(parsed.inference_device)
+                    if parsed.inference_device is not None
+                    else None,
+                )
             elif parsed.research_command == "model-fit":
                 require_cpu_backend(parsed.backend)
                 from recsys.research.models.package import fit_model

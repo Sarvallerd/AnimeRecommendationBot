@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "anime-recommendation-recsys"
-version = "0.3.0"
+version = "0.4.0"
 description = "Anime recommendation bot and offline recommendation preparation"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
@@ -12,6 +12,8 @@ dependencies = ["duckdb==1.5.6", "numpy==2.5.3", "pandas==3.0.6"]
 
 [project.optional-dependencies]
 quality = ["scikit-learn==1.9.1"]
+torch-cpu = ["torch==2.13.0+cpu", "safetensors==0.8.0"]
+torch-cuda = ["torch==2.13.0+cu129", "safetensors==0.8.0", "cuda-toolkit==12.9.1"]
 
 [dependency-groups]
 data = ["dvc==3.67.1"]
@@ -33,6 +35,7 @@ auditwheel = "skip"
 
 [tool.uv]
 required-version = "==0.11.12"
+conflicts = [[{ extra = "torch-cpu" }, { extra = "torch-cuda" }]]
 cache-keys = [
   { file = "pyproject.toml" }, { file = "Cargo.toml" }, { file = "Cargo.lock" },
   { file = "packaging/scripts/recsys" },
@@ -48,6 +51,22 @@ cache-keys = [
 
 [tool.uv.extra-build-variables]
 anime-recommendation-recsys = { MATURIN_NO_INSTALL_RUST = "1" }
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cpu", extra = "torch-cpu" },
+  { index = "pytorch-cu129", extra = "torch-cuda" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu129"
+url = "https://download.pytorch.org/whl/cu129"
+explicit = true
 
 [tool.ruff]
 required-version = "==0.17.1"

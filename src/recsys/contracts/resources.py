@@ -17,7 +17,7 @@ _RESOURCE_NAMES = {
     ),
     "releases": frozenset(("release_neelagiri_2025_nafiul_2026_v1.json",)),
     "protocols": frozenset(("research_protocol_v1.json",)),
-    "campaigns": frozenset(("research_campaign_v1.json",)),
+    "campaigns": frozenset(("research_campaign_v1.json", "research_seed_embedding_v1.json")),
     "queries": frozenset(("quality_queries_v1.json",)),
     "prompts": frozenset(("assessment_prompt_v1.md",)),
 }

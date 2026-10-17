@@ -1,0 +1,980 @@
+"""Parent publication preflight and failure cleanup without a model run."""
+
+from __future__ import annotations
+
+import copy
+import hashlib
+import json
+import os
+import platform
+import subprocess
+import tempfile
+import textwrap
+import unittest
+from collections.abc import Mapping, Sequence
+from dataclasses import replace
+from pathlib import Path
+from typing import cast
+from unittest.mock import patch
+
+from research_model_support import patch_release_info
+from test_training_artifacts import _inputs
+from training_support import SeedTrainingFixture
+
+from recsys.research.models.types import ScoringInputs
+from recsys.research.protocol import ResearchError
+from recsys.research.resources import JobHandle, ProcessResult, ResourceSupervisor
+from recsys.research.training import execution
+from recsys.research.training.artifacts import TrainingManifest, VerifiedTrainingArtifact
+from recsys.research.training.candidate import candidate_identity, load_candidate
+from recsys.research.training.execution import fit_training_model
+from recsys.research.training.spec import DeviceSpec
+from recsys.research.training.types import (
+    FitWorkerRequest,
+    FitWorkerResult,
+    PredictWorkerRequest,
+    PredictWorkerResult,
+)
+
+_ID = "sha256:" + "a" * 64
+_OTHER = "sha256:" + "b" * 64
+_REVISION = "b" * 40
+
+
+def _context() -> tuple[
+    FitWorkerRequest,
+    FitWorkerResult,
+    PredictWorkerRequest,
+    PredictWorkerResult,
+    VerifiedTrainingArtifact,
+]:
+    inputs = _inputs()
+    spec = load_candidate(
+        train_device=DeviceSpec("cpu", None), inference_device=DeviceSpec("cpu", None)
+    )
+    manifest = cast(
+        "TrainingManifest",
+        {
+            "config": spec.wire(),
+            "config_identity": _ID,
+            "data_identity": _ID,
+            "source_identity": _ID,
+            "framework_version": "2.13.0+cpu",
+            "producer": {"code_revision": _REVISION},
+        },
+    )
+    verified = VerifiedTrainingArtifact(
+        _ID, manifest, spec, inputs.mal_ids, (1,), Path("/tmp/weights.safetensors")
+    )
+    base = {
+        "schema_version": 1,
+        "kind": "arb-training-worker-request",
+        "request_token": "a" * 64,
+        "candidate": "item-seed-mean-bpr-v1",
+        "candidate_resource_identity": candidate_identity(),
+        "prepared_dir": "/tmp/prepared",
+        "expected_prepared_identity": inputs.prepared_identity,
+        "code_revision": _REVISION,
+    }
+    fit_request = cast("FitWorkerRequest", {**base, "operation": "fit", "spec": spec.wire()})
+    runtime = {
+        "framework_version": "2.13.0+cpu",
+        "python_version": platform.python_version(),
+        "numpy_version": "2.5.3",
+        "safetensors_version": "0.8.0",
+        "device": {"kind": "cpu", "index": None},
+        "torch_cuda_version": None,
+        "device_name": None,
+        "cuda_peak_allocated_bytes": None,
+        "cuda_peak_reserved_bytes": None,
+    }
+    result_base = {
+        "schema_version": 1,
+        "kind": "arb-training-worker-result",
+        "status": "success",
+        "candidate": base["candidate"],
+        "candidate_resource_identity": base["candidate_resource_identity"],
+        "request_identity": _ID,
+        "prepared_identity": inputs.prepared_identity,
+        "fit_identity": inputs.fit_identity,
+        "data_identity": _ID,
+        "source_identity": _ID,
+        "runtime": runtime,
+    }
+    fit_result = cast(
+        "FitWorkerResult",
+        {
+            **result_base,
+            "operation": "fit",
+            "model": {"relative_path": "model", "identity": _ID},
+            "config_identity": _ID,
+            "training": {
+                "epochs": [],
+                "examples": 3,
+                "optimizer_steps": 3,
+                "supported_items": 1,
+                "initial_weights_sha256": "a" * 64,
+                "final_weights_sha256": "b" * 64,
+                "changed_weights": True,
+            },
+        },
+    )
+    predict_request = cast(
+        "PredictWorkerRequest",
+        {
+            **base,
+            "operation": "predict",
+            "model_dir": "/tmp/model",
+            "expected_model_identity": _ID,
+            "seed_mal_ids": [1],
+            "limit": 5,
+            "inference_device": None,
+        },
+    )
+    predict_result = cast(
+        "PredictWorkerResult",
+        {
+            **result_base,
+            "operation": "predict",
+            "model_identity": _ID,
+            "inference_producer": {"code_revision": _REVISION},
+            "stored_inference_device": runtime["device"],
+            "requested_inference_device": None,
+            "effective_inference_device": runtime["device"],
+            "prediction": {
+                "relative_path": "prediction.json",
+                "descriptor": {"bytes": 1, "sha256": "a" * 64},
+                "identity": _ID,
+            },
+        },
+    )
+    return fit_request, fit_result, predict_request, predict_result, verified
+
+
+def _prediction_context() -> tuple[
+    PredictWorkerRequest,
+    PredictWorkerResult,
+    VerifiedTrainingArtifact,
+    ScoringInputs,
+    dict[str, object],
+]:
+    _fit_request, _fit_result, request, result, original = _context()
+    base = _inputs()
+    stats = copy.deepcopy(base.train_stats)
+    stats["train_completed_rows"] = 3
+    stats["items"]["2"]["completed_users"] = 1
+    stats["items"]["2"]["positive_users"] = 1
+    stats["items"]["2"]["rating_sum"] = 8
+    stats["items"]["2"]["rating_count"] = 1
+    stats["items"]["2"]["band"] = "tail"
+    for item in (3, 4, 5):
+        stats["items"][str(item)] = {
+            "completed_users": 1 if item == 3 else 0,
+            "positive_users": 1 if item == 3 else 0,
+            "rating_sum": 8 if item == 3 else 0,
+            "rating_count": 1 if item == 3 else 0,
+            "band": "tail" if item == 3 else "cold",
+        }
+    inputs = replace(base, mal_ids=(1, 2, 3, 4, 5), train_stats=stats)
+    verified = replace(original, mal_ids=inputs.mal_ids, supported_mal_ids=(1, 2, 3))
+    prediction: dict[str, object] = {
+        "schema_version": 1,
+        "kind": "arb-seed-prediction",
+        "model_identity": verified.identity,
+        "prepared_identity": inputs.prepared_identity,
+        "seed_mal_ids": [1],
+        "supported_seed_mal_ids": [1],
+        "skipped_seed_mal_ids": [],
+        "limit": 5,
+        "status": "ok",
+        "source": "seed-embedding",
+        "recommendations": [
+            {"mal_id": 2, "score": 0.9},
+            {"mal_id": 3, "score": 0.8},
+        ],
+    }
+    return request, result, verified, inputs, prediction
+
+
+class TrainingExecutionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.prepared = self.root / "prepared"
+        self.prepared.mkdir()
+        self.output = self.root / "new-run"
+
+    def test_worker_environment_isolates_cpu_without_mutating_parent(self) -> None:
+        with patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": "0"}):
+            cpu = execution._worker_env(DeviceSpec("cpu", None))
+            cuda = execution._worker_env(DeviceSpec("cuda", 0))
+            self.assertEqual(cpu["CUDA_VISIBLE_DEVICES"], "")
+            self.assertEqual(cuda["CUDA_VISIBLE_DEVICES"], "0")
+            self.assertEqual(os.environ["CUDA_VISIBLE_DEVICES"], "0")
+        with patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": ""}):
+            self.assertEqual(
+                execution._worker_env(DeviceSpec("cuda", 0))["CUDA_VISIBLE_DEVICES"], ""
+            )
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertNotIn("CUDA_VISIBLE_DEVICES", execution._worker_env(DeviceSpec("cuda", 0)))
+
+    def _fit(self) -> Path:
+        return fit_training_model(
+            self.prepared,
+            self.output,
+            expected_prepared_identity="sha256:" + "a" * 64,
+            candidate_id="item-seed-mean-bpr-v1",
+            code_revision="b" * 40,
+            train_device=DeviceSpec("cpu", None),
+            inference_device=DeviceSpec("cpu", None),
+        )
+
+    def test_existing_target_rejected_before_input_or_worker(self) -> None:
+        self.output.mkdir()
+        with patch("recsys.research.training.execution.read_scoring_inputs") as reader:
+            with self.assertRaises(ResearchError):
+                self._fit()
+        reader.assert_not_called()
+
+    def test_timeout_cleans_tentative_attempt_without_publication(self) -> None:
+        process = ProcessResult("timeout", None, 1.0, 0, 0, 0, 1, 0.1, True)
+        with (
+            patch("recsys.research.training.execution.read_scoring_inputs", return_value=_inputs()),
+            patch("recsys.research.training.execution._supervised", return_value=process),
+        ):
+            with self.assertRaisesRegex(ResearchError, "training_timeout"):
+                self._fit()
+        self.assertFalse(self.output.exists())
+        self.assertEqual({path.name for path in self.root.iterdir()}, {"prepared"})
+
+    def test_invalid_candidate_and_revision_do_not_open_input(self) -> None:
+        with patch("recsys.research.training.execution.read_scoring_inputs") as reader:
+            with self.assertRaises(ResearchError):
+                fit_training_model(
+                    self.prepared,
+                    self.output,
+                    expected_prepared_identity="sha256:" + "a" * 64,
+                    candidate_id="arbitrary",
+                    code_revision="bad",
+                )
+        reader.assert_not_called()
+        self.assertFalse(self.output.exists())
+
+    def test_path_separation_and_symlink_rejected_before_input(self) -> None:
+        link = self.root / "link"
+        link.symlink_to(self.prepared, target_is_directory=True)
+        for target in (self.prepared / "nested", link / "run"):
+            with self.subTest(target=target):
+                with patch("recsys.research.training.execution.read_scoring_inputs") as reader:
+                    with self.assertRaises(ResearchError):
+                        fit_training_model(
+                            self.prepared,
+                            target,
+                            expected_prepared_identity=_ID,
+                            candidate_id="item-seed-mean-bpr-v1",
+                            code_revision=_REVISION,
+                            train_device=DeviceSpec("cpu", None),
+                        )
+                reader.assert_not_called()
+
+    def test_process_outcomes_never_publish(self) -> None:
+        for outcome, expected in (
+            ("timeout", "training_timeout"),
+            ("cancelled", "training_cancelled"),
+            ("rss_limit", "training_resource_limit"),
+            ("exit_nonzero", "training_worker_failed"),
+        ):
+            with self.subTest(outcome=outcome):
+                process = ProcessResult(outcome, 1, 1.0, 0, 0, 0, 1, 0.1, True)
+                with (
+                    patch(
+                        "recsys.research.training.execution.read_scoring_inputs",
+                        return_value=_inputs(),
+                    ),
+                    patch("recsys.research.training.execution._supervised", return_value=process),
+                    self.assertRaisesRegex(ResearchError, expected),
+                ):
+                    self._fit()
+                self.assertFalse(self.output.exists())
+                self.assertEqual({path.name for path in self.root.iterdir()}, {"prepared"})
+
+    def test_cleanup_incomplete_retains_private_attempt_without_publication(self) -> None:
+        process = ProcessResult("rss_limit", None, 1.0, 0, 0, 0, 1, 0.1, False)
+        with (
+            patch("recsys.research.training.execution.read_scoring_inputs", return_value=_inputs()),
+            patch("recsys.research.training.execution._supervised", return_value=process),
+            self.assertRaisesRegex(ResearchError, "training_resource_limit"),
+        ):
+            self._fit()
+        self.assertFalse(self.output.exists())
+        self.assertEqual(len(list(self.root.glob(".new-run.attempt.*"))), 1)
+
+    def test_stale_identity_and_nonfinite_worker_failure_do_not_publish(self) -> None:
+        for request_identity, expected in (
+            (_OTHER, "training_worker_failed"),
+            (None, "training_nonfinite_loss"),
+        ):
+            with self.subTest(request_identity=request_identity):
+
+                def worker(attempt: Path, _cancel: object, *, device: DeviceSpec) -> ProcessResult:
+                    self.assertEqual(device, DeviceSpec("cpu", None))
+                    raw = (attempt / "request.json").read_bytes()
+                    actual = "sha256:" + hashlib.sha256(raw).hexdigest()
+                    execution.write_json(
+                        attempt / "result.json",
+                        {
+                            "schema_version": 1,
+                            "kind": "arb-training-worker-result",
+                            "operation": "fit",
+                            "status": "failure",
+                            "request_identity": request_identity or actual,
+                            "code": "training_nonfinite_loss",
+                        },
+                    )
+                    return ProcessResult("exit_nonzero", 1, 1.0, 0, 0, 0, 1, 0.1, True)
+
+                with (
+                    patch(
+                        "recsys.research.training.execution.read_scoring_inputs",
+                        return_value=_inputs(),
+                    ),
+                    patch("recsys.research.training.execution._supervised", side_effect=worker),
+                    self.assertRaisesRegex(ResearchError, expected),
+                ):
+                    self._fit()
+                self.assertFalse(self.output.exists())
+                self.assertEqual({path.name for path in self.root.iterdir()}, {"prepared"})
+
+    def test_oversized_malformed_and_wrong_operation_results_do_not_publish(self) -> None:
+        for content, expected in (
+            ("oversized", "training_worker_failed"),
+            ("malformed", "training_worker_failed"),
+            ("wrong_operation", "training_worker_result_invalid"),
+        ):
+            with self.subTest(content=content):
+
+                def worker(attempt: Path, _cancel: object, *, device: DeviceSpec) -> ProcessResult:
+                    self.assertEqual(device, DeviceSpec("cpu", None))
+                    path = attempt / "result.json"
+                    if content == "oversized":
+                        path.write_bytes(b"x" * 65537)
+                    elif content == "malformed":
+                        path.write_bytes(b'{ "not":"canonical" }')
+                    else:
+                        actual = (
+                            "sha256:"
+                            + hashlib.sha256((attempt / "request.json").read_bytes()).hexdigest()
+                        )
+                        execution.write_json(
+                            path,
+                            {
+                                "schema_version": 1,
+                                "kind": "arb-training-worker-result",
+                                "operation": "predict",
+                                "status": "failure",
+                                "request_identity": actual,
+                                "code": "training_native_failed",
+                            },
+                        )
+                    return ProcessResult("ok", 0, 1.0, 0, 0, 0, 1, 0.1, True)
+
+                with (
+                    patch(
+                        "recsys.research.training.execution.read_scoring_inputs",
+                        return_value=_inputs(),
+                    ),
+                    patch("recsys.research.training.execution._supervised", side_effect=worker),
+                    self.assertRaisesRegex(ResearchError, expected),
+                ):
+                    self._fit()
+                self.assertFalse(self.output.exists())
+                self.assertEqual({path.name for path in self.root.iterdir()}, {"prepared"})
+
+    def test_fit_context_binding_rejects_each_mismatched_field(self) -> None:
+        request, result, _predict_request, _predict_result, verified = _context()
+        inputs = _inputs()
+        execution._bind_fit(result, request, inputs, verified)
+        for path in (
+            ("candidate",),
+            ("candidate_resource_identity",),
+            ("prepared_identity",),
+            ("fit_identity",),
+            ("data_identity",),
+            ("source_identity",),
+            ("model", "identity"),
+            ("config_identity",),
+            ("runtime", "framework_version"),
+            ("runtime", "device"),
+            ("runtime", "numpy_version"),
+            ("runtime", "safetensors_version"),
+            ("runtime", "python_version"),
+            ("training", "supported_items"),
+        ):
+            with self.subTest(path=path):
+                tampered = copy.deepcopy(result)
+                current = cast("dict[str, object]", tampered)
+                for key in path[:-1]:
+                    current = cast("dict[str, object]", current[key])
+                current[path[-1]] = _OTHER
+                with self.assertRaisesRegex(ResearchError, "training_worker_result_invalid"):
+                    execution._bind_fit(tampered, request, inputs, verified)
+        wrong_manifest = copy.deepcopy(verified.manifest)
+        wrong_manifest["producer"]["code_revision"] = "c" * 40
+        wrong_verified = VerifiedTrainingArtifact(
+            verified.identity,
+            wrong_manifest,
+            verified.spec,
+            verified.mal_ids,
+            verified.supported_mal_ids,
+            verified.weights_path,
+        )
+        with self.assertRaisesRegex(ResearchError, "training_worker_result_invalid"):
+            execution._bind_fit(result, request, inputs, wrong_verified)
+
+    def test_prediction_context_and_query_binding_rejects_tampering(self) -> None:
+        request, result, verified, inputs, prediction = _prediction_context()
+        with patch(
+            "recsys.research.training.execution.producer", return_value=result["inference_producer"]
+        ):
+            execution._bind_predict(result, request, inputs, verified, prediction)
+            for key in (
+                "candidate",
+                "candidate_resource_identity",
+                "prepared_identity",
+                "fit_identity",
+                "model_identity",
+                "data_identity",
+                "source_identity",
+                "inference_producer",
+                "stored_inference_device",
+                "requested_inference_device",
+                "effective_inference_device",
+            ):
+                with self.subTest(result_key=key):
+                    bad = copy.deepcopy(result)
+                    bad[key] = _OTHER
+                    with self.assertRaisesRegex(ResearchError, "training_worker_result_invalid"):
+                        execution._bind_predict(bad, request, inputs, verified, prediction)
+            for key in ("device", "framework_version", "numpy_version", "safetensors_version"):
+                with self.subTest(runtime_key=key):
+                    bad = copy.deepcopy(result)
+                    cast("dict[str, object]", bad["runtime"])[key] = _OTHER
+                    with self.assertRaisesRegex(ResearchError, "training_worker_result_invalid"):
+                        execution._bind_predict(bad, request, inputs, verified, prediction)
+            for key, value in (
+                ("model_identity", _OTHER),
+                ("prepared_identity", _OTHER),
+                ("seed_mal_ids", [2]),
+                ("supported_seed_mal_ids", []),
+                ("skipped_seed_mal_ids", [1]),
+                ("limit", 1),
+                ("status", "abstained"),
+                ("source", "none"),
+                ("recommendations", [{"mal_id": 1, "score": 1.0}]),
+                ("recommendations", [{"mal_id": 2, "score": float("nan")}]),
+            ):
+                with self.subTest(prediction_key=key, value=value):
+                    bad_prediction = copy.deepcopy(prediction)
+                    bad_prediction[key] = value
+                    with self.assertRaisesRegex(ResearchError, "training_prediction_invalid"):
+                        execution._bind_predict(result, request, inputs, verified, bad_prediction)
+
+    def test_supported_prediction_requires_complete_eligible_ranked_rows(self) -> None:
+        request, result, verified, inputs, prediction = _prediction_context()
+        with patch(
+            "recsys.research.training.execution.producer", return_value=result["inference_producer"]
+        ):
+            execution._bind_predict(result, request, inputs, verified, prediction)
+            tied = copy.deepcopy(prediction)
+            tied["recommendations"] = [
+                {"mal_id": 2, "score": 0.7},
+                {"mal_id": 3, "score": 0.7},
+            ]
+            execution._bind_predict(result, request, inputs, verified, tied)
+            for rows in (
+                [{"mal_id": 4, "score": 99.0}, {"mal_id": 3, "score": 0.8}],
+                [{"mal_id": 3, "score": 0.8}, {"mal_id": 2, "score": 0.9}],
+                [{"mal_id": 3, "score": 0.7}, {"mal_id": 2, "score": 0.7}],
+                [{"mal_id": 2, "score": 0.9}],
+                [],
+            ):
+                with self.subTest(rows=rows):
+                    bad = copy.deepcopy(prediction)
+                    bad["recommendations"] = rows
+                    with self.assertRaisesRegex(ResearchError, "training_prediction_invalid"):
+                        execution._bind_predict(result, request, inputs, verified, bad)
+
+    def test_empty_prediction_requires_exact_popularity_including_zero_tail(self) -> None:
+        request, result, verified, inputs, prediction = _prediction_context()
+        request["seed_mal_ids"] = []
+        prediction.update(
+            seed_mal_ids=[],
+            supported_seed_mal_ids=[],
+            skipped_seed_mal_ids=[],
+            source="train-popularity",
+            recommendations=[
+                {"mal_id": 1, "score": 1.0},
+                {"mal_id": 2, "score": 1.0},
+                {"mal_id": 3, "score": 1.0},
+                {"mal_id": 4, "score": 0.0},
+                {"mal_id": 5, "score": 0.0},
+            ],
+        )
+        with patch(
+            "recsys.research.training.execution.producer", return_value=result["inference_producer"]
+        ):
+            execution._bind_predict(result, request, inputs, verified, prediction)
+            for rows in (
+                [
+                    {"mal_id": 1, "score": 1.0},
+                    {"mal_id": 2, "score": 9.0},
+                    {"mal_id": 3, "score": 1.0},
+                    {"mal_id": 4, "score": 0.0},
+                    {"mal_id": 5, "score": 0.0},
+                ],
+                [
+                    {"mal_id": 2, "score": 1.0},
+                    {"mal_id": 1, "score": 1.0},
+                    {"mal_id": 3, "score": 1.0},
+                    {"mal_id": 4, "score": 0.0},
+                    {"mal_id": 5, "score": 0.0},
+                ],
+                [
+                    {"mal_id": 1, "score": 1.0},
+                    {"mal_id": 2, "score": 1.0},
+                    {"mal_id": 3, "score": 1.0},
+                    {"mal_id": 4, "score": 0.0},
+                ],
+                [
+                    {"mal_id": 1, "score": 1.0},
+                    {"mal_id": 2, "score": 1.0},
+                    {"mal_id": 3, "score": 1.0},
+                    {"mal_id": 4, "score": 0.0},
+                    {"mal_id": 5, "score": 1.0},
+                ],
+            ):
+                with self.subTest(rows=rows):
+                    bad = copy.deepcopy(prediction)
+                    bad["recommendations"] = rows
+                    with self.assertRaisesRegex(ResearchError, "training_prediction_invalid"):
+                        execution._bind_predict(result, request, inputs, verified, bad)
+
+    def test_all_unsupported_prediction_requires_exact_empty_rows(self) -> None:
+        request, result, verified, inputs, prediction = _prediction_context()
+        request["seed_mal_ids"] = [4]
+        prediction.update(
+            seed_mal_ids=[4],
+            supported_seed_mal_ids=[],
+            skipped_seed_mal_ids=[4],
+            status="abstained",
+            source="none",
+            recommendations=[],
+        )
+        with patch(
+            "recsys.research.training.execution.producer", return_value=result["inference_producer"]
+        ):
+            execution._bind_predict(result, request, inputs, verified, prediction)
+            prediction["recommendations"] = [{"mal_id": 2, "score": 0.9}]
+            with self.assertRaisesRegex(ResearchError, "training_prediction_invalid"):
+                execution._bind_predict(result, request, inputs, verified, prediction)
+
+    def test_semantically_bad_worker_prediction_never_reaches_publication(self) -> None:
+        request, result, verified, inputs, prediction = _prediction_context()
+        attempt = self.root / "attempt"
+        attempt.mkdir()
+        target = self.root / "published"
+        prediction["recommendations"] = [
+            {"mal_id": 4, "score": 99.0},
+            {"mal_id": 3, "score": 0.8},
+        ]
+        descriptor = execution.write_json(attempt / "prediction.json", prediction)
+        result["prediction"]["descriptor"] = descriptor
+        result["prediction"]["identity"] = "sha256:" + descriptor["sha256"]
+        process = ProcessResult("ok", 0, 1.0, 1, 1, 1, 1, 0.1, True)
+        with (
+            patch(
+                "recsys.research.training.execution.producer",
+                return_value=result["inference_producer"],
+            ),
+            self.assertRaisesRegex(ResearchError, "training_prediction_invalid"),
+        ):
+            execution._publish_predict(
+                attempt, target, result, request, inputs, verified, execution._limits(), process
+            )
+        self.assertFalse(target.exists())
+        self.assertFalse(list(self.root.glob(".published.stage.*")))
+
+
+@unittest.skipUnless(os.environ.get("ARB_TEST_TORCH") == "1", "opt-in supervised CPU fit")
+class SupervisedCpuTrainingTests(unittest.TestCase):
+    def test_real_supervised_fit_and_one_prediction_publish_atomically(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        fixture = SeedTrainingFixture(temporary.name)
+        prepared, prepared_identity = fixture.make_prepared()
+        lock_path = fixture.root / "fixture-lock.json"
+        lock_path.write_text(json.dumps(fixture.lock), encoding="utf-8")
+        wrapper = fixture.root / "fixture-worker.py"
+        wrapper.write_text(
+            "import json, sys\n"
+            "from pathlib import Path\n"
+            "sys.path.insert(0, sys.argv[3])\n"
+            "from research_model_support import patch_release_info\n"
+            "from recsys.research.training.worker import main\n"
+            "with patch_release_info(json.loads(Path(sys.argv[2]).read_text())):\n"
+            "    raise SystemExit(main([sys.argv[1]]))\n",
+            encoding="utf-8",
+        )
+        original_start = ResourceSupervisor.start
+        tests_dir = str(Path(__file__).resolve().parent)
+
+        def fixture_start(
+            supervisor: ResourceSupervisor,
+            argv: Sequence[str],
+            *,
+            cwd: Path,
+            log_dir: Path,
+            remaining_seconds: float,
+            env: Mapping[str, str] | None = None,
+        ) -> JobHandle:
+            self.assertEqual(argv[1:4], ["-I", "-m", "recsys.research.training.worker"])
+            return original_start(
+                supervisor,
+                [argv[0], "-I", str(wrapper), argv[4], str(lock_path), tests_dir],
+                cwd=cwd,
+                log_dir=log_dir,
+                remaining_seconds=remaining_seconds,
+                env=env,
+            )
+
+        revision = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).resolve().parents[2],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        model_run = fixture.root / "model-run"
+        prediction_run = fixture.root / "prediction-run"
+        with (
+            patch_release_info(fixture.lock),
+            patch.object(ResourceSupervisor, "start", new=fixture_start),
+        ):
+            receipt_path = fit_training_model(
+                prepared,
+                model_run,
+                expected_prepared_identity=prepared_identity,
+                candidate_id="item-seed-mean-bpr-v1",
+                code_revision=revision,
+                train_device=DeviceSpec("cpu", None),
+                inference_device=DeviceSpec("cpu", None),
+            )
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+            self.assertEqual(receipt["training"]["optimizer_steps"], 3)
+            self.assertEqual(receipt["training"]["supported_items"], 6)
+            self.assertTrue(receipt["process"]["cleanup_complete"])
+            model = model_run / "model"
+            self.assertEqual({path.name for path in model_run.iterdir()}, {"model", "run.json"})
+            prediction_path = execution.predict_training_model(
+                prepared,
+                model,
+                prediction_run,
+                expected_prepared_identity=prepared_identity,
+                expected_model_identity=receipt["model"]["identity"],
+                seed_mal_ids=(1, 9),
+                code_revision=revision,
+                limit=5,
+            )
+            prediction_receipt = json.loads(prediction_path.read_text(encoding="utf-8"))
+            prediction = json.loads(
+                (prediction_run / "prediction.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(prediction["supported_seed_mal_ids"], [1])
+            self.assertEqual(prediction["skipped_seed_mal_ids"], [9])
+            self.assertEqual(prediction["status"], "ok")
+            self.assertEqual(prediction_receipt["model_identity"], receipt["model"]["identity"])
+            self.assertEqual(
+                {path.name for path in prediction_run.iterdir()}, {"prediction.json", "run.json"}
+            )
+        self.assertFalse(list(fixture.root.glob(".*.attempt.*")))
+
+
+@unittest.skipUnless(
+    os.environ.get("ARB_TEST_TORCH_CUDA_CPU") == "1", "opt-in CUDA wheel CPU-only path"
+)
+class CudaBuildCpuExecutionTests(unittest.TestCase):
+    def test_cpu_worker_isolation_with_cuda_build_and_stored_cuda_inference(self) -> None:
+        import torch
+
+        self.assertEqual(torch.__version__, "2.13.0+cu129")
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        fixture = SeedTrainingFixture(temporary.name)
+        prepared, prepared_identity = fixture.make_prepared()
+        lock_path = fixture.root / "fixture-lock.json"
+        lock_path.write_text(json.dumps(fixture.lock), encoding="utf-8")
+        wrapper = fixture.root / "cpu-only-cuda-build-worker.py"
+        wrapper.write_text(
+            textwrap.dedent(
+                """\
+                import inspect
+                import json
+                import os
+                import sys
+                from contextlib import ExitStack
+                from pathlib import Path
+                from unittest.mock import patch
+
+                assert 'torch' not in sys.modules
+                assert os.environ.get('CUDA_VISIBLE_DEVICES') == ''
+                assert os.environ.get('PYTORCH_NVML_BASED_CUDA_CHECK') in (None, '', '0')
+                request = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
+                operation = request['operation']
+                import torch
+                original_available = torch.cuda.is_available
+                availability_results = []
+                initialized_before = torch.cuda.is_initialized()
+                assert not initialized_before
+                sys.path.insert(0, sys.argv[3])
+                from research_model_support import patch_release_info
+                from recsys.research.training import worker
+
+                def spy_available():
+                    frames = [
+                        (frame.function, frame.filename.replace('\\\\', '/'))
+                        for frame in inspect.stack()[1:]
+                        if '/unittest/mock.py' not in frame.filename
+                    ]
+                    names = [name for name, _ in reversed(frames)]
+                    expected = (
+                        'step', '_accelerator_graph_capture_health_check',
+                        'current_accelerator', 'is_available',
+                    )
+                    offsets = []
+                    cursor = 0
+                    for name in expected:
+                        try:
+                            cursor = names.index(name, cursor)
+                        except ValueError as exc:
+                            raise AssertionError(('unexpected CUDA availability chain', names)) from exc
+                        offsets.append(cursor)
+                        cursor += 1
+                    ordered = list(reversed(frames))
+                    paths = [ordered[offset][1] for offset in offsets]
+                    assert '/torch/optim/adam.py' in paths[0], paths
+                    assert '/torch/optim/optimizer.py' in paths[1], paths
+                    assert '/torch/accelerator/__init__.py' in paths[2], paths
+                    assert '/torch/accelerator/__init__.py' in paths[3], paths
+                    result = original_available()
+                    availability_results.append(result)
+                    return result
+
+                def forbidden(*_args, **_kwargs):
+                    raise AssertionError('CUDA application or stream probe')
+
+                with ExitStack() as stack:
+                    stack.enter_context(patch.object(torch.cuda, 'is_available', side_effect=spy_available))
+                    for name in (
+                        'device_count', 'mem_get_info', 'get_device_name',
+                        'reset_peak_memory_stats', 'max_memory_allocated',
+                        'max_memory_reserved', 'current_device', 'current_stream',
+                        'set_device', 'synchronize', 'init', '_lazy_init',
+                    ):
+                        stack.enter_context(patch.object(torch.cuda, name, side_effect=forbidden))
+                    for name in ('current_stream', 'current_device_index'):
+                        if hasattr(torch.accelerator, name):
+                            stack.enter_context(
+                                patch.object(torch.accelerator, name, side_effect=forbidden)
+                            )
+                    stack.enter_context(
+                        patch_release_info(json.loads(Path(sys.argv[2]).read_text()))
+                    )
+                    code = worker.main([sys.argv[1]])
+                    initialized_after = torch.cuda.is_initialized()
+                evidence = {
+                    'operation': operation,
+                    'visibility_empty_before_torch_import': True,
+                    'availability_calls': len(availability_results),
+                    'availability_results': availability_results,
+                    'application_cuda_calls': 0,
+                    'accelerator_stream_calls': 0,
+                    'pytorch_cuda_initialized_before_after': [
+                        initialized_before, initialized_after,
+                    ],
+                }
+                print('ARB060_CPU_BOUNDARY=' + json.dumps(evidence, sort_keys=True), flush=True)
+                assert code == 0, code
+                assert availability_results == ([False] * 3 if operation == 'fit' else [])
+                assert not initialized_after
+                raise SystemExit(code)
+                """
+            ),
+            encoding="utf-8",
+        )
+        original_start = ResourceSupervisor.start
+        tests_dir = str(Path(__file__).resolve().parent)
+        log_dirs: list[Path] = []
+
+        def fixture_start(
+            supervisor: ResourceSupervisor,
+            argv: Sequence[str],
+            *,
+            cwd: Path,
+            log_dir: Path,
+            remaining_seconds: float,
+            env: Mapping[str, str] | None = None,
+        ) -> JobHandle:
+            self.assertEqual(argv[1:4], ["-I", "-m", "recsys.research.training.worker"])
+            self.assertEqual(env["CUDA_VISIBLE_DEVICES"] if env is not None else None, "")
+            self.assertEqual(os.environ["CUDA_VISIBLE_DEVICES"], "0")
+            retained = fixture.root / f"worker-logs-{len(log_dirs)}"
+            log_dirs.append(retained)
+            return original_start(
+                supervisor,
+                [argv[0], "-I", str(wrapper), argv[4], str(lock_path), tests_dir],
+                cwd=cwd,
+                log_dir=retained,
+                remaining_seconds=remaining_seconds,
+                env=env,
+            )
+
+        revision = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).resolve().parents[2],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        model_run = fixture.root / "model-run"
+        supported_run = fixture.root / "supported-prediction-run"
+        empty_run = fixture.root / "empty-prediction-run"
+        with (
+            patch.dict(
+                os.environ,
+                {"CUDA_VISIBLE_DEVICES": "0", "PYTORCH_NVML_BASED_CUDA_CHECK": "0"},
+            ),
+            patch_release_info(fixture.lock),
+            patch.object(ResourceSupervisor, "start", new=fixture_start),
+            patch(
+                "recsys.research.training.execution.subprocess.run",
+                side_effect=AssertionError("CUDA admission"),
+            ),
+        ):
+            receipt_path = fit_training_model(
+                prepared,
+                model_run,
+                expected_prepared_identity=prepared_identity,
+                candidate_id="item-seed-mean-bpr-v1",
+                code_revision=revision,
+                train_device=DeviceSpec("cpu", None),
+                inference_device=DeviceSpec("cuda", 0),
+            )
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+            self.assertEqual(receipt["training"]["examples"], 9)
+            self.assertEqual(receipt["training"]["optimizer_steps"], 3)
+            self.assertEqual(receipt["training"]["supported_items"], 6)
+            self.assertTrue(receipt["training"]["changed_weights"])
+            self.assertNotEqual(
+                receipt["training"]["initial_weights_sha256"],
+                receipt["training"]["final_weights_sha256"],
+            )
+            self.assertEqual(
+                json.loads((model_run / "model" / "training-manifest.json").read_text())["config"][
+                    "inference_device"
+                ],
+                {"kind": "cuda", "index": 0},
+            )
+            for output, seeds, limit in (
+                (supported_run, (1, 9), 5),
+                (empty_run, (), 20),
+            ):
+                prediction_path = execution.predict_training_model(
+                    prepared,
+                    model_run / "model",
+                    output,
+                    expected_prepared_identity=prepared_identity,
+                    expected_model_identity=receipt["model"]["identity"],
+                    seed_mal_ids=seeds,
+                    code_revision=revision,
+                    limit=limit,
+                    inference_device=DeviceSpec("cpu", None),
+                )
+                prediction_receipt = json.loads(prediction_path.read_text(encoding="utf-8"))
+                prediction = json.loads((output / "prediction.json").read_text(encoding="utf-8"))
+                self.assertEqual(prediction_receipt["model_identity"], receipt["model"]["identity"])
+                self.assertEqual(prediction["model_identity"], receipt["model"]["identity"])
+                self.assertEqual(prediction["prepared_identity"], prepared_identity)
+                self.assertEqual(
+                    prediction_receipt["stored_inference_device"], {"kind": "cuda", "index": 0}
+                )
+                self.assertEqual(
+                    prediction_receipt["requested_inference_device"], {"kind": "cpu", "index": None}
+                )
+                self.assertEqual(
+                    prediction_receipt["effective_inference_device"], {"kind": "cpu", "index": None}
+                )
+                self.assertEqual(
+                    {path.name for path in output.iterdir()}, {"prediction.json", "run.json"}
+                )
+                if seeds:
+                    self.assertEqual(prediction["supported_seed_mal_ids"], [1])
+                    self.assertEqual(prediction["skipped_seed_mal_ids"], [9])
+                    self.assertEqual(
+                        (prediction["status"], prediction["source"]), ("ok", "seed-embedding")
+                    )
+                else:
+                    self.assertEqual(
+                        (prediction["status"], prediction["source"]), ("ok", "train-popularity")
+                    )
+                    self.assertEqual(len(prediction["recommendations"]), 20)
+                    self.assertEqual(
+                        [
+                            row["mal_id"]
+                            for row in prediction["recommendations"]
+                            if row["score"] == 0.0
+                        ],
+                        list(range(9, 21)),
+                    )
+                self._assert_cpu_runtime(prediction_receipt)
+                self.assertTrue(prediction_receipt["process"]["cleanup_complete"])
+        self._assert_cpu_runtime(receipt)
+        self.assertTrue(receipt["process"]["cleanup_complete"])
+        self.assertEqual({path.name for path in model_run.iterdir()}, {"model", "run.json"})
+        self.assertFalse(list(fixture.root.glob(".*.attempt.*")))
+        self.assertEqual(len(log_dirs), 3)
+        for index, path in enumerate(log_dirs):
+            records = [
+                json.loads(line.removeprefix("ARB060_CPU_BOUNDARY="))
+                for line in (path / "stdout.log").read_text(encoding="utf-8").splitlines()
+                if line.startswith("ARB060_CPU_BOUNDARY=")
+            ]
+            self.assertEqual(len(records), 1)
+            record = records[0]
+            self.assertEqual(record["operation"], "fit" if index == 0 else "predict")
+            self.assertTrue(record["visibility_empty_before_torch_import"])
+            self.assertEqual(record["availability_results"], [False] * 3 if index == 0 else [])
+            self.assertEqual(record["application_cuda_calls"], 0)
+            self.assertEqual(record["accelerator_stream_calls"], 0)
+            self.assertEqual(record["pytorch_cuda_initialized_before_after"], [False, False])
+            print("ARB060_CPU_BOUNDARY=" + json.dumps(record, sort_keys=True), flush=True)
+
+    def _assert_cpu_runtime(self, receipt: dict[str, object]) -> None:
+        runtime = cast("dict[str, object]", receipt["runtime"])
+        self.assertEqual(runtime["framework_version"], "2.13.0+cu129")
+        self.assertEqual(runtime["device"], {"kind": "cpu", "index": None})
+        self.assertTrue(
+            all(
+                runtime[key] is None
+                for key in (
+                    "torch_cuda_version",
+                    "device_name",
+                    "cuda_peak_allocated_bytes",
+                    "cuda_peak_reserved_bytes",
+                )
+            )
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()
