@@ -39,7 +39,7 @@ def copy_source(destination: Path) -> None:
         "Cargo.lock",
         "rust-toolchain.toml",
         "packaging/scripts/recsys",
-        "recsys/README.md",
+        "README.md",
         "contracts/check_bundle.py",
     )
     trees = ("src/recsys", "bot/src", "bot/migrations", "bot/tests", "tests/fixtures/bundle")
