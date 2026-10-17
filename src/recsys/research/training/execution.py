@@ -367,6 +367,8 @@ def _bind_predict(
     ):
         _fail("training_prediction_invalid")
     seen: set[int] = set()
+    ranked: list[tuple[float, int]] = []
+    eligible = set(verified.supported_mal_ids) - set(seeds) if supported else set()
     for row in cast("list[object]", rows):
         if type(row) is not dict or set(row) != {"mal_id", "score"}:
             _fail("training_prediction_invalid")
@@ -381,6 +383,25 @@ def _bind_predict(
         ):
             _fail("training_prediction_invalid")
         seen.add(item)
+        ranked.append((-score, item))
+        if supported and item not in eligible:
+            _fail("training_prediction_invalid")
+    if supported:
+        if len(rows) != min(request["limit"], len(eligible)) or ranked != sorted(ranked):
+            _fail("training_prediction_invalid")
+    elif not seeds:
+        expected = sorted(
+            (
+                {
+                    "mal_id": item,
+                    "score": float(inputs.train_stats["items"][str(item)]["positive_users"]),
+                }
+                for item in inputs.mal_ids
+            ),
+            key=lambda row: (-row["score"], row["mal_id"]),
+        )[: request["limit"]]
+        if rows != expected:
+            _fail("training_prediction_invalid")
 
 
 def _publish_fit(

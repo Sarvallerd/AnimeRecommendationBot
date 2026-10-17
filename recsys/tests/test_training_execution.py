@@ -12,6 +12,7 @@ import tempfile
 import textwrap
 import unittest
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import cast
 from unittest.mock import patch
@@ -20,6 +21,7 @@ from research_model_support import patch_release_info
 from test_training_artifacts import _inputs
 from training_support import SeedTrainingFixture
 
+from recsys.research.models.types import ScoringInputs
 from recsys.research.protocol import ResearchError
 from recsys.research.resources import JobHandle, ProcessResult, ResourceSupervisor
 from recsys.research.training import execution
@@ -147,6 +149,51 @@ def _context() -> tuple[
         },
     )
     return fit_request, fit_result, predict_request, predict_result, verified
+
+
+def _prediction_context() -> tuple[
+    PredictWorkerRequest,
+    PredictWorkerResult,
+    VerifiedTrainingArtifact,
+    ScoringInputs,
+    dict[str, object],
+]:
+    _fit_request, _fit_result, request, result, original = _context()
+    base = _inputs()
+    stats = copy.deepcopy(base.train_stats)
+    stats["train_completed_rows"] = 3
+    stats["items"]["2"]["completed_users"] = 1
+    stats["items"]["2"]["positive_users"] = 1
+    stats["items"]["2"]["rating_sum"] = 8
+    stats["items"]["2"]["rating_count"] = 1
+    stats["items"]["2"]["band"] = "tail"
+    for item in (3, 4, 5):
+        stats["items"][str(item)] = {
+            "completed_users": 1 if item == 3 else 0,
+            "positive_users": 1 if item == 3 else 0,
+            "rating_sum": 8 if item == 3 else 0,
+            "rating_count": 1 if item == 3 else 0,
+            "band": "tail" if item == 3 else "cold",
+        }
+    inputs = replace(base, mal_ids=(1, 2, 3, 4, 5), train_stats=stats)
+    verified = replace(original, mal_ids=inputs.mal_ids, supported_mal_ids=(1, 2, 3))
+    prediction: dict[str, object] = {
+        "schema_version": 1,
+        "kind": "arb-seed-prediction",
+        "model_identity": verified.identity,
+        "prepared_identity": inputs.prepared_identity,
+        "seed_mal_ids": [1],
+        "supported_seed_mal_ids": [1],
+        "skipped_seed_mal_ids": [],
+        "limit": 5,
+        "status": "ok",
+        "source": "seed-embedding",
+        "recommendations": [
+            {"mal_id": 2, "score": 0.9},
+            {"mal_id": 3, "score": 0.8},
+        ],
+    }
+    return request, result, verified, inputs, prediction
 
 
 class TrainingExecutionTests(unittest.TestCase):
@@ -386,21 +433,7 @@ class TrainingExecutionTests(unittest.TestCase):
             execution._bind_fit(result, request, inputs, wrong_verified)
 
     def test_prediction_context_and_query_binding_rejects_tampering(self) -> None:
-        _fit_request, _fit_result, request, result, verified = _context()
-        inputs = _inputs()
-        prediction = {
-            "schema_version": 1,
-            "kind": "arb-seed-prediction",
-            "model_identity": _ID,
-            "prepared_identity": inputs.prepared_identity,
-            "seed_mal_ids": [1],
-            "supported_seed_mal_ids": [1],
-            "skipped_seed_mal_ids": [],
-            "limit": 5,
-            "status": "ok",
-            "source": "seed-embedding",
-            "recommendations": [],
-        }
+        request, result, verified, inputs, prediction = _prediction_context()
         with patch(
             "recsys.research.training.execution.producer", return_value=result["inference_producer"]
         ):
@@ -446,6 +479,131 @@ class TrainingExecutionTests(unittest.TestCase):
                     bad_prediction[key] = value
                     with self.assertRaisesRegex(ResearchError, "training_prediction_invalid"):
                         execution._bind_predict(result, request, inputs, verified, bad_prediction)
+
+    def test_supported_prediction_requires_complete_eligible_ranked_rows(self) -> None:
+        request, result, verified, inputs, prediction = _prediction_context()
+        with patch(
+            "recsys.research.training.execution.producer", return_value=result["inference_producer"]
+        ):
+            execution._bind_predict(result, request, inputs, verified, prediction)
+            tied = copy.deepcopy(prediction)
+            tied["recommendations"] = [
+                {"mal_id": 2, "score": 0.7},
+                {"mal_id": 3, "score": 0.7},
+            ]
+            execution._bind_predict(result, request, inputs, verified, tied)
+            for rows in (
+                [{"mal_id": 4, "score": 99.0}, {"mal_id": 3, "score": 0.8}],
+                [{"mal_id": 3, "score": 0.8}, {"mal_id": 2, "score": 0.9}],
+                [{"mal_id": 3, "score": 0.7}, {"mal_id": 2, "score": 0.7}],
+                [{"mal_id": 2, "score": 0.9}],
+                [],
+            ):
+                with self.subTest(rows=rows):
+                    bad = copy.deepcopy(prediction)
+                    bad["recommendations"] = rows
+                    with self.assertRaisesRegex(ResearchError, "training_prediction_invalid"):
+                        execution._bind_predict(result, request, inputs, verified, bad)
+
+    def test_empty_prediction_requires_exact_popularity_including_zero_tail(self) -> None:
+        request, result, verified, inputs, prediction = _prediction_context()
+        request["seed_mal_ids"] = []
+        prediction.update(
+            seed_mal_ids=[],
+            supported_seed_mal_ids=[],
+            skipped_seed_mal_ids=[],
+            source="train-popularity",
+            recommendations=[
+                {"mal_id": 1, "score": 1.0},
+                {"mal_id": 2, "score": 1.0},
+                {"mal_id": 3, "score": 1.0},
+                {"mal_id": 4, "score": 0.0},
+                {"mal_id": 5, "score": 0.0},
+            ],
+        )
+        with patch(
+            "recsys.research.training.execution.producer", return_value=result["inference_producer"]
+        ):
+            execution._bind_predict(result, request, inputs, verified, prediction)
+            for rows in (
+                [
+                    {"mal_id": 1, "score": 1.0},
+                    {"mal_id": 2, "score": 9.0},
+                    {"mal_id": 3, "score": 1.0},
+                    {"mal_id": 4, "score": 0.0},
+                    {"mal_id": 5, "score": 0.0},
+                ],
+                [
+                    {"mal_id": 2, "score": 1.0},
+                    {"mal_id": 1, "score": 1.0},
+                    {"mal_id": 3, "score": 1.0},
+                    {"mal_id": 4, "score": 0.0},
+                    {"mal_id": 5, "score": 0.0},
+                ],
+                [
+                    {"mal_id": 1, "score": 1.0},
+                    {"mal_id": 2, "score": 1.0},
+                    {"mal_id": 3, "score": 1.0},
+                    {"mal_id": 4, "score": 0.0},
+                ],
+                [
+                    {"mal_id": 1, "score": 1.0},
+                    {"mal_id": 2, "score": 1.0},
+                    {"mal_id": 3, "score": 1.0},
+                    {"mal_id": 4, "score": 0.0},
+                    {"mal_id": 5, "score": 1.0},
+                ],
+            ):
+                with self.subTest(rows=rows):
+                    bad = copy.deepcopy(prediction)
+                    bad["recommendations"] = rows
+                    with self.assertRaisesRegex(ResearchError, "training_prediction_invalid"):
+                        execution._bind_predict(result, request, inputs, verified, bad)
+
+    def test_all_unsupported_prediction_requires_exact_empty_rows(self) -> None:
+        request, result, verified, inputs, prediction = _prediction_context()
+        request["seed_mal_ids"] = [4]
+        prediction.update(
+            seed_mal_ids=[4],
+            supported_seed_mal_ids=[],
+            skipped_seed_mal_ids=[4],
+            status="abstained",
+            source="none",
+            recommendations=[],
+        )
+        with patch(
+            "recsys.research.training.execution.producer", return_value=result["inference_producer"]
+        ):
+            execution._bind_predict(result, request, inputs, verified, prediction)
+            prediction["recommendations"] = [{"mal_id": 2, "score": 0.9}]
+            with self.assertRaisesRegex(ResearchError, "training_prediction_invalid"):
+                execution._bind_predict(result, request, inputs, verified, prediction)
+
+    def test_semantically_bad_worker_prediction_never_reaches_publication(self) -> None:
+        request, result, verified, inputs, prediction = _prediction_context()
+        attempt = self.root / "attempt"
+        attempt.mkdir()
+        target = self.root / "published"
+        prediction["recommendations"] = [
+            {"mal_id": 4, "score": 99.0},
+            {"mal_id": 3, "score": 0.8},
+        ]
+        descriptor = execution.write_json(attempt / "prediction.json", prediction)
+        result["prediction"]["descriptor"] = descriptor
+        result["prediction"]["identity"] = "sha256:" + descriptor["sha256"]
+        process = ProcessResult("ok", 0, 1.0, 1, 1, 1, 1, 0.1, True)
+        with (
+            patch(
+                "recsys.research.training.execution.producer",
+                return_value=result["inference_producer"],
+            ),
+            self.assertRaisesRegex(ResearchError, "training_prediction_invalid"),
+        ):
+            execution._publish_predict(
+                attempt, target, result, request, inputs, verified, execution._limits(), process
+            )
+        self.assertFalse(target.exists())
+        self.assertFalse(list(self.root.glob(".published.stage.*")))
 
 
 @unittest.skipUnless(os.environ.get("ARB_TEST_TORCH") == "1", "opt-in supervised CPU fit")
