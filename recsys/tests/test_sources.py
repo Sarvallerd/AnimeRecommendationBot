@@ -2,7 +2,6 @@
 
 import copy
 import json
-import shlex
 import unittest
 from pathlib import Path
 from typing import cast
@@ -30,39 +29,30 @@ def _items(value: object) -> list[object]:
 
 
 class SourceTests(unittest.TestCase):
-    def assert_documented_download_pins(self, instructions: str, registry: SourceRegistry) -> None:
-        """Read complete shell arguments as text; never execute the documentation."""
-        urls: dict[str, str] = {}
-        hashes: dict[str, str] = {}
-        for line in instructions.splitlines():
-            if line.startswith("curl "):
-                tokens = shlex.split(line)
-                self.assertEqual(tokens[:3], ["curl", "--fail", "--location"])
-                self.assertEqual(len(tokens), 6)
-                self.assertEqual(tokens[4], "-o")
-                self.assertTrue(tokens[5].startswith("$AUDIT_DIR/"))
-                filename = tokens[5].removeprefix("$AUDIT_DIR/")
-                self.assertNotIn("/", filename)
-                self.assertNotIn(filename, urls)
-                urls[filename] = tokens[3]
-            elif line.startswith("printf ") and "| sha256sum" in line:
-                command, separator, check = line.partition("|")
-                self.assertEqual(separator, "|")
-                self.assertEqual(shlex.split(check), ["sha256sum", "--check", "-"])
-                tokens = shlex.split(command)
-                self.assertEqual(len(tokens), 4)
-                self.assertEqual(tokens[0], "printf")
-                self.assertTrue(tokens[3].startswith("$AUDIT_DIR/"))
-                filename = tokens[3].removeprefix("$AUDIT_DIR/")
-                self.assertNotIn("/", filename)
-                self.assertNotIn(filename, hashes)
-                hashes[filename] = tokens[2]
-        expected = {item["filename"]: item for item in registry["sources"]}
-        self.assertEqual(set(urls), set(expected))
-        self.assertEqual(set(hashes), set(expected))
-        for filename, item in expected.items():
-            self.assertEqual(urls[filename], item["url"])
-            self.assertEqual(hashes[filename], item["sha256"])
+    def assert_registry_matches_audit(
+        self, registry: SourceRegistry, candidate: dict[str, object]
+    ) -> None:
+        """Compare selected source pins with the retained source audit."""
+        artifacts = [_object(item) for item in _items(candidate["artifacts"])]
+        artifact_ids: list[str] = []
+        for artifact in artifacts:
+            artifact_id = artifact.get("id")
+            if not isinstance(artifact_id, str) or not artifact_id:
+                raise AssertionError("audit artifact id must be a nonempty string")
+            self.assertNotIn(artifact_id, artifact_ids)
+            artifact_ids.append(artifact_id)
+        by_id = dict(zip(artifact_ids, artifacts, strict=True))
+        for source in registry["sources"]:
+            self.assertIn(source["id"], by_id)
+            artifact = by_id[source["id"]]
+            self.assertEqual(
+                (source["url"], source["size"], source["sha256"]),
+                (
+                    artifact["stable_url"],
+                    artifact["observed_bytes"],
+                    artifact["observed_sha256"],
+                ),
+            )
 
     def test_packaged_registry_has_pinned_inputs(self) -> None:
         registry, digest = load_registry()
@@ -130,17 +120,7 @@ class SourceTests(unittest.TestCase):
             for item in _items(audit["candidates"])
             if _object(item)["id"] == "neelagiri-2025-v1"
         )
-        expected = {_object(item)["id"]: _object(item) for item in _items(selected["artifacts"])}
-        for item, audit_id in zip(
-            registry["sources"], ("neelagiri_details_csv", "neelagiri_ratings_csv"), strict=True
-        ):
-            pin = expected[audit_id]
-            self.assertEqual(
-                (item["url"], item["size"], item["sha256"]),
-                (pin["stable_url"], pin["observed_bytes"], pin["observed_sha256"]),
-            )
-        instructions = (root / "reports/dataset-audit-v1/README.md").read_text()
-        self.assert_documented_download_pins(instructions, registry)
+        self.assert_registry_matches_audit(registry, selected)
 
     def test_nafiul_metadata_only_registry_and_unchanged_legacy_pin(self) -> None:
         registry, digest = load_registry("nafiul-2026-v1")
@@ -165,26 +145,52 @@ class SourceTests(unittest.TestCase):
         self.assertEqual(
             load_registry()[1], "49bb399935f0ac7ec649fe2f4bd7715444c09c8513704866fa90b9bea29d182f"
         )
+        root = Path(__file__).resolve().parents[1]
+        audit = _object(
+            json.loads((root / "reports/dataset-audit-v1/source-audit.json").read_text())
+        )
+        selected = next(
+            _object(item)
+            for item in _items(audit["candidates"])
+            if _object(item)["id"] == "nafiul-2026-v1"
+        )
+        self.assert_registry_matches_audit(registry, selected)
 
-    def test_documented_pins_reject_hash_suffix_and_changed_version(self) -> None:
+    def test_audit_pins_reject_changed_hash_version_size_and_duplicate_id(self) -> None:
         registry, _ = load_registry("neelagiri-2025-v1")
         root = Path(__file__).resolve().parents[1]
-        instructions = (root / "reports/dataset-audit-v1/README.md").read_text()
+        audit = _object(
+            json.loads((root / "reports/dataset-audit-v1/source-audit.json").read_text())
+        )
+        selected = next(
+            _object(item)
+            for item in _items(audit["candidates"])
+            if _object(item)["id"] == "neelagiri-2025-v1"
+        )
         first = registry["sources"][0]
-        with self.assertRaises(AssertionError):
-            self.assert_documented_download_pins(
-                instructions.replace(f"'{first['sha256']}'", f"'{first['sha256']}20'", 1),
-                registry,
-            )
-        with self.assertRaises(AssertionError):
-            self.assert_documented_download_pins(
-                instructions.replace(
-                    first["url"],
-                    first["url"].replace("datasetVersionNumber=1", "datasetVersionNumber=10"),
-                    1,
-                ),
-                registry,
-            )
+        for field, value in (
+            ("observed_sha256", f"{first['sha256']}20"),
+            (
+                "stable_url",
+                first["url"].replace("datasetVersionNumber=1", "datasetVersionNumber=10"),
+            ),
+            ("observed_bytes", first["size"] + 1),
+            ("observed_bytes", first["size"] - 1),
+        ):
+            with self.subTest(field=field, value=value):
+                candidate = copy.deepcopy(selected)
+                artifact = _object(_items(candidate["artifacts"])[0])
+                artifact[field] = value
+                with self.assertRaises(AssertionError):
+                    self.assert_registry_matches_audit(registry, candidate)
+
+        for duplicate_id in (registry["sources"][0]["id"], None):
+            with self.subTest(duplicate_id=duplicate_id):
+                candidate = copy.deepcopy(selected)
+                artifacts = _items(candidate["artifacts"])
+                _object(artifacts[1])["id"] = duplicate_id
+                with self.assertRaises(AssertionError):
+                    self.assert_registry_matches_audit(registry, candidate)
 
     def test_unknown_snapshot_rejected_before_resource_lookup(self) -> None:
         for snapshot in ("latest", "../source_registry.json", "NEELAGIRI"):

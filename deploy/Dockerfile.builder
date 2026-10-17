@@ -9,7 +9,7 @@ ENV CARGO_HOME=/usr/local/cargo RUSTUP_HOME=/usr/local/rustup UV_PYTHON_DOWNLOAD
 WORKDIR /src
 COPY pyproject.toml uv.lock Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY packaging/scripts/recsys packaging/scripts/recsys
-COPY recsys/README.md recsys/README.md
+COPY README.md README.md
 COPY src/recsys/ src/recsys/
 COPY bot/src/ bot/src/
 COPY bot/migrations/ bot/migrations/

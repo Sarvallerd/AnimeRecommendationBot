@@ -6,7 +6,7 @@ build-backend = "maturin"
 name = "anime-recommendation-recsys"
 version = "0.2.0"
 description = "Anime recommendation bot and offline recommendation preparation"
-readme = "recsys/README.md"
+readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = ["duckdb==1.5.6", "numpy==2.5.3", "pandas==3.0.6"]
 
@@ -40,7 +40,7 @@ cache-keys = [
   { file = "rust-toolchain.toml" }, { file = "rust-toolchain" }, { file = "build.rs" },
   { file = ".cargo/config*" }, { file = "bot/src/**/*.rs" }, { file = "bot/migrations/**/*.sql" },
   { file = "src/recsys/**/*.py" }, { file = "src/recsys/**/*.json" },
-  { file = "src/recsys/**/*.md" }, { file = "recsys/README.md" },
+  { file = "src/recsys/**/*.md" }, { file = "README.md" },
   { env = "RUSTUP_TOOLCHAIN" }, { env = "RUSTFLAGS" }, { env = "CARGO_ENCODED_RUSTFLAGS" },
   { env = "CARGO_BUILD_TARGET" }, { env = "MATURIN_PEP517_ARGS" }, { env = "OPENSSL_DIR" },
   { env = "OPENSSL_LIB_DIR" }, { env = "OPENSSL_INCLUDE_DIR" }, { env = "OPENSSL_STATIC" },

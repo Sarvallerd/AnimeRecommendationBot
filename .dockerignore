@@ -1,4 +1,5 @@
 **
+!README.md
 !pyproject.toml
 !uv.lock
 !Cargo.toml
@@ -14,8 +15,6 @@
 !bot/migrations/*.sql
 !bot/tests/
 !bot/tests/**
-!recsys/
-!recsys/README.md
 !src/
 !src/recsys/
 !src/recsys/**
