@@ -103,7 +103,7 @@ jobs:
         env:
           UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/arb-typing-venv
         run: |
-          uv sync --locked --no-install-project --no-default-groups --group typing --extra quality
+          uv sync --locked --no-install-project --no-default-groups --group typing --extra quality --extra torch-cpu
           uv run --locked --no-sync python -m mypy
       - name: Install Rust toolchain and native build prerequisites
         run: |
@@ -111,9 +111,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config libssl-dev
       - name: Sync recommendation dependencies
-        run: uv sync --locked --no-editable --extra quality
+        run: uv sync --locked --no-editable --extra quality --extra torch-cpu
       - name: Test recommendation preparation
-        run: uv run --locked --no-editable --extra quality python -m unittest discover -s recsys/tests -p 'test_*.py' -v
+        env:
+          ARB_TEST_TORCH: '1'
+        run: uv run --locked --no-editable --extra quality --extra torch-cpu python -m unittest discover -s recsys/tests -p 'test_*.py' -v
       - name: Test bundle contract
         run: |
           python contracts/check_bundle.py tests/fixtures/bundle

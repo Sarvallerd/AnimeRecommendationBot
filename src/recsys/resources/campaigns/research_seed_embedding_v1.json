@@ -1,0 +1,88 @@
+{
+  "candidate": "item-seed-mean-bpr-v1",
+  "execution_limits": {
+    "artifact_max_bytes": 67108864,
+    "cuda_min_free_bytes": 2147483648,
+    "prediction_max_bytes": 32768,
+    "receipt_max_bytes": 65536,
+    "request_max_bytes": 65536,
+    "rss_limit_bytes": 4294967296,
+    "timeout_seconds": 300,
+    "worker_result_max_bytes": 65536,
+    "workers": 1
+  },
+  "kind": "arb-native-training-candidate",
+  "prediction": {
+    "all_unsupported_seeds": "abstain",
+    "candidate_mask": "supported-positive-items",
+    "default_limit": 5,
+    "empty_seeds": "train-positive-count-popularity",
+    "max_batch_queries": 128,
+    "max_limit": 20,
+    "max_seed_ids": 10,
+    "tie_break": "score-descending-then-MAL_ID-ascending",
+    "unknown_seed": "reject"
+  },
+  "runtime_versions": {
+    "numpy": "2.5.3",
+    "pytorch_cpu": "2.13.0+cpu",
+    "pytorch_cuda": "2.13.0+cu129",
+    "safetensors": "0.8.0"
+  },
+  "schema_version": 1,
+  "training_spec": {
+    "family": "seed-embedding",
+    "framework": "pytorch",
+    "inference_device": {
+      "index": null,
+      "kind": "cpu"
+    },
+    "kind": "arb-training-spec",
+    "parameters": {
+      "adam_beta1": 0.9,
+      "adam_beta2": 0.999,
+      "adam_eps": 1e-08,
+      "aggregation": "mean-supported-seeds",
+      "amp": false,
+      "batch_size": 128,
+      "candidate": "item-seed-mean-bpr-v1",
+      "cpu_threads": 1,
+      "cublas_workspace_config": ":4096:8",
+      "deterministic_algorithms": true,
+      "early_stopping": false,
+      "embedding_dim": 32,
+      "epochs": 3,
+      "examples_per_user_per_epoch": 1,
+      "init_mean": 0.0,
+      "init_std": 0.01,
+      "initialization": "cpu-normal",
+      "learning_rate": 0.01,
+      "loss": "bpr-softplus-mean-negatives-then-examples-v1",
+      "max_n": 10,
+      "negative_pool": "train-positive-minus-user-completed-v1",
+      "negative_rejection_attempts": 128,
+      "negatives_max": 4,
+      "optimizer": "AdamW",
+      "optimizer_foreach": false,
+      "optimizer_fused": false,
+      "positive_min_rating": 8,
+      "sampling_seed": 6061,
+      "sampling_version": "arb060-sampling-v1",
+      "tf32": false,
+      "tuning": false,
+      "weight_decay": 0.0001
+    },
+    "precision": "float32",
+    "schema_version": 1,
+    "seed": 6060,
+    "train_device": {
+      "index": 0,
+      "kind": "cuda"
+    },
+    "weights_format": "safetensors-v1"
+  },
+  "verification_tolerance": {
+    "atol": 1e-06,
+    "rtol": 1e-05
+  }
+}

@@ -21,6 +21,8 @@ class ResearchCliTests(unittest.TestCase):
             "prepare",
             "validate",
             "training-verify",
+            "training-fit",
+            "training-predict",
             "model-fit",
             "predict-validation",
             "gpu-preflight",
@@ -56,6 +58,70 @@ class ResearchCliTests(unittest.TestCase):
             ]
         )
         self.assertEqual(parsed.backend, "gpu")
+
+    def test_training_commands_expose_only_bounded_options(self) -> None:
+        parser = build_parser()
+        fit = parser.parse_args(
+            [
+                "research",
+                "training-fit",
+                "--candidate",
+                "item-seed-mean-bpr-v1",
+                "--prepared-dir",
+                "prepared",
+                "--expected-prepared-identity",
+                "sha256:" + "0" * 64,
+                "--output-dir",
+                "new-run",
+                "--code-revision",
+                "a" * 40,
+            ]
+        )
+        self.assertEqual((fit.train_device, fit.inference_device), ("cuda:0", "cpu"))
+        predict = parser.parse_args(
+            [
+                "research",
+                "training-predict",
+                "--prepared-dir",
+                "prepared",
+                "--expected-prepared-identity",
+                "sha256:" + "0" * 64,
+                "--model-dir",
+                "model",
+                "--expected-model-identity",
+                "sha256:" + "1" * 64,
+                "--output-dir",
+                "prediction",
+                "--code-revision",
+                "a" * 40,
+                "--seed-mal-id",
+                "1",
+                "--seed-mal-id",
+                "2",
+            ]
+        )
+        self.assertEqual((predict.seed_mal_id, predict.limit), ([1, 2], 5))
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as rejected:
+                parser.parse_args(
+                    [
+                        "research",
+                        "training-fit",
+                        "--candidate",
+                        "item-seed-mean-bpr-v1",
+                        "--prepared-dir",
+                        "prepared",
+                        "--expected-prepared-identity",
+                        "sha256:" + "0" * 64,
+                        "--output-dir",
+                        "new-run",
+                        "--code-revision",
+                        "a" * 40,
+                        "--optimizer",
+                        "SGD",
+                    ]
+                )
+        self.assertEqual(rejected.exception.code, 2)
 
     def test_retired_gpu_routes_do_not_touch_private_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
