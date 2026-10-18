@@ -250,6 +250,11 @@ def build_parser() -> argparse.ArgumentParser:
     ):
         campaign_run.add_argument(f"--{flag}", required=True)
     campaign_run.add_argument("--backend", choices=("cpu", "gpu"), default="cpu")
+    campaign_run.add_argument(
+        "--campaign", choices=("ml02-cpu-v1", "ml02-native-v2"), default="ml02-cpu-v1"
+    )
+    campaign_run.add_argument("--native-train-device", choices=("cpu", "cuda:0"))
+    campaign_run.add_argument("--physical-storage-root")
     campaign_run.add_argument("--cpu-workers", type=int, choices=(1, 2), default=2)
     campaign_run.add_argument("--resume", action="store_true")
     campaign_run.add_argument("--expected-campaign-identity")

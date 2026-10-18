@@ -129,8 +129,8 @@ def payloads(base):
             for path in base.rglob('*') if path.is_file() and path.suffix in suffixes}
 source_payload = payloads(source)
 installed_payload = payloads(package)
-assert len(source_payload) == 84, len(source_payload)
-assert sum(name.startswith('resources/') for name in source_payload) == 12
+assert len(source_payload) == 89, len(source_payload)
+assert sum(name.startswith('resources/') for name in source_payload) == 13
 assert source_payload and source_payload == installed_payload, (
     set(source_payload) - set(installed_payload),
     set(installed_payload) - set(source_payload),
@@ -141,7 +141,7 @@ assert set(source_payload) == set(SOURCE_FILES)
 assert source_fingerprints() == {name: __import__('hashlib').sha256(raw).hexdigest() for name, raw in source_payload.items()}
 for info in pkgutil.walk_packages(recsys.__path__, recsys.__name__ + '.'):
     importlib.import_module(info.name)
-assert metadata.version('anime-recommendation-recsys') == '0.4.0'
+assert metadata.version('anime-recommendation-recsys') == '0.5.0'
 installed_names = {dist.metadata['Name'].lower() for dist in metadata.distributions()}
 assert not ({'torch', 'safetensors', 'cuda-toolkit', 'triton'} & installed_names)
 assert not any(name.startswith(('nvidia-', 'cupy')) for name in installed_names)
@@ -187,7 +187,7 @@ def assert_direct_script(root: Path, base: Path, env: dict[str, str], expected: 
     outside_env.pop("PYTHONPATH", None)
     outside_env.pop("VIRTUAL_ENV", None)
     outside_env["PATH"] = str(base / "empty-path")
-    assert run([str(script), "--version"], base, outside_env, timeout=20) == "recsys 0.4.0"
+    assert run([str(script), "--version"], base, outside_env, timeout=20) == "recsys 0.5.0"
     assert (
         run(
             [str(script), "validate", str(root / "tests/fixtures/bundle")],
@@ -248,7 +248,7 @@ def main() -> None:
         assert_manifest(root, env)
         uv(root, env, "sync", "--locked")
         assert_install(root, env, editable=True)
-        assert uv(root, env, "run", "--locked", "recsys", "--version") == "recsys 0.4.0"
+        assert uv(root, env, "run", "--locked", "recsys", "--version") == "recsys 0.5.0"
         expected = check_fixture(root, env)
         assert_direct_script(root, base, env, expected)
 

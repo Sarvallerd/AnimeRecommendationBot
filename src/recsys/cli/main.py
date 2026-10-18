@@ -363,6 +363,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     cpu_workers=parsed.cpu_workers,
                     resume=parsed.resume,
                     expected_campaign_identity=parsed.expected_campaign_identity,
+                    campaign_name=parsed.campaign,
+                    native_train_device=parsed.native_train_device,
+                    physical_storage_root=Path(parsed.physical_storage_root)
+                    if parsed.physical_storage_root is not None
+                    else None,
                 )
             elif parsed.research_command == "campaign-validate":
                 from recsys.research.campaign.report import validate_campaign

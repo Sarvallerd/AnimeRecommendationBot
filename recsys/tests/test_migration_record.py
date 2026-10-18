@@ -14,6 +14,7 @@ RECORD = ROOT / "docs/migrations/arb054-recsys-layout-v2.json"
 TRAINING_RECORD = ROOT / "docs/migrations/arb058-training-artifacts-v1.json"
 RETIREMENT_RECORD = ROOT / "docs/migrations/arb059-cupy-scoring-retirement.json"
 NATIVE_RECORD = ROOT / "docs/migrations/arb060-native-pytorch-training-v1.json"
+NATIVE_CAMPAIGN_RECORD = ROOT / "docs/migrations/arb062-native-validation-campaign-v2.json"
 LEGACY_RECORD_SHA256 = "27dd3f274a4cee02b0d6e7cf43fa9f4fcfbfe755e04d0c43d68d6c319ced5016"
 TRAINING_RECORD_SHA256 = "9a891c85f97340713be41319aeed559285c8cab54363fb8ede1f94ad76dff221"
 LOCK = ROOT / "src/recsys/resources/releases/release_neelagiri_2025_nafiul_2026_v1.json"
@@ -218,8 +219,7 @@ class MigrationRecordTests(unittest.TestCase):
         self.assertEqual(current["previous_source_inventory"], retired["source_inventory"])
         self.assertEqual(len(current["previous_source_inventory"]), 75)
         self.assertEqual(len(current["added_sources"]), 9)
-        self.assertEqual(current["source_inventory"], list(SOURCE_FILES))
-        self.assertEqual(len(SOURCE_FILES), 84)
+        self.assertEqual(len(current["source_inventory"]), 84)
         self.assertEqual(
             sorted(set(current["source_inventory"]) - set(current["previous_source_inventory"])),
             current["added_sources"],
@@ -235,6 +235,40 @@ class MigrationRecordTests(unittest.TestCase):
             (len(raw), hashlib.sha256(raw).hexdigest()), (resource["bytes"], resource["sha256"])
         )
         self.assertEqual(current["acceptance"], retired["acceptance"])
+
+    def test_native_validation_campaign_migration_adds_versioned_contract(self) -> None:
+        previous = json.loads(NATIVE_RECORD.read_bytes())
+        current = json.loads(NATIVE_CAMPAIGN_RECORD.read_bytes())
+        self.assertEqual(current["migration_id"], "arb062-native-validation-campaign-v2")
+        self.assertEqual(
+            current["task_baseline_commit"], "c00440d477a32980e1c780c3990dd4a61fa4c4b2"
+        )
+        self.assertEqual(current["source_layout"], SOURCE_LAYOUT)
+        self.assertEqual(
+            (current["package_version_from"], current["package_version_to"]), ("0.4.0", "0.5.0")
+        )
+        self.assertEqual(current["previous_source_inventory"], previous["source_inventory"])
+        self.assertEqual(len(current["previous_source_inventory"]), 84)
+        self.assertEqual(current["source_inventory"], list(SOURCE_FILES))
+        self.assertEqual(len(SOURCE_FILES), 89)
+        self.assertEqual(
+            sorted(set(SOURCE_FILES) - set(previous["source_inventory"])),
+            current["added_sources"],
+        )
+        for path, digest in current["previous_migration_sha256"].items():
+            self.assertEqual(hashlib.sha256((ROOT / path).read_bytes()).hexdigest(), digest)
+        for path, digest in current["preserved_resource_sha256"].items():
+            self.assertEqual(hashlib.sha256((ROOT / path).read_bytes()).hexdigest(), digest)
+        resource = current["new_campaign_resource"]
+        raw = (ROOT / resource["path"]).read_bytes()
+        self.assertEqual((len(raw), hashlib.sha256(raw).hexdigest()), (1596, resource["sha256"]))
+        self.assertEqual(
+            resource["sha256"], "4c395e475dc23e1c3faebb0ed0458fceb1bcc3c5d2af43318d0394acd729a13d"
+        )
+        self.assertEqual(current["artifact_versions"]["legacy_campaign_plan"], 3)
+        self.assertEqual(current["artifact_versions"]["native_campaign_plan"], 4)
+        self.assertEqual(current["artifact_versions"]["native_campaign_report"], 3)
+        self.assertIs(current["acceptance"]["full_ml02"], False)
 
 
 if __name__ == "__main__":
