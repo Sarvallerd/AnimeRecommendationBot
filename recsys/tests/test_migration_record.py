@@ -7,6 +7,7 @@ import json
 import unittest
 from pathlib import Path
 
+from recsys import __version__
 from recsys.contracts.provenance import SOURCE_FILES, SOURCE_LAYOUT
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -15,6 +16,7 @@ TRAINING_RECORD = ROOT / "docs/migrations/arb058-training-artifacts-v1.json"
 RETIREMENT_RECORD = ROOT / "docs/migrations/arb059-cupy-scoring-retirement.json"
 NATIVE_RECORD = ROOT / "docs/migrations/arb060-native-pytorch-training-v1.json"
 NATIVE_CAMPAIGN_RECORD = ROOT / "docs/migrations/arb062-native-validation-campaign-v2.json"
+NATIVE_REPORT_CAP_RECORD = ROOT / "docs/migrations/arb063-native-campaign-report-cap-v1.json"
 LEGACY_RECORD_SHA256 = "27dd3f274a4cee02b0d6e7cf43fa9f4fcfbfe755e04d0c43d68d6c319ced5016"
 TRAINING_RECORD_SHA256 = "9a891c85f97340713be41319aeed559285c8cab54363fb8ede1f94ad76dff221"
 LOCK = ROOT / "src/recsys/resources/releases/release_neelagiri_2025_nafiul_2026_v1.json"
@@ -25,6 +27,81 @@ LOCK_SHA256 = "46f3ffd60239675b802026025016ee6719cb0525325e088fbfa248012db3de9b"
 
 
 class MigrationRecordTests(unittest.TestCase):
+    def test_native_report_cap_migration_preserves_science_and_history(self) -> None:
+        previous = json.loads(NATIVE_CAMPAIGN_RECORD.read_bytes())
+        current = json.loads(NATIVE_REPORT_CAP_RECORD.read_bytes())
+        self.assertEqual(
+            (current["schema_version"], current["kind"]),
+            (1, "arb-native-campaign-report-cap-migration"),
+        )
+        self.assertEqual(current["migration_id"], "arb063-native-campaign-report-cap-v1")
+        self.assertEqual(current["task_id"], "ARB-063")
+        self.assertEqual(
+            current["task_baseline_commit"], "fdcd894cfb70c880581f69e2788fb0e605763a03"
+        )
+        self.assertEqual(current["task_baseline_tree"], "dedbaaaea40bb194eb65727dd017ee2b9e25a7b4")
+        self.assertEqual(
+            (current["package_version_from"], current["package_version_to"], __version__),
+            ("0.5.0", "0.5.1", "0.5.1"),
+        )
+        self.assertEqual(current["source_layout"], SOURCE_LAYOUT)
+        self.assertEqual(current["source_inventory"], list(SOURCE_FILES))
+        self.assertEqual(len(current["source_inventory"]), 89)
+        self.assertEqual(current["artifact_versions"], previous["artifact_versions"])
+        self.assertEqual(
+            current["native_public_projection_report_limit_bytes"], {"from": 262144, "to": 8388608}
+        )
+        self.assertIs(current["legacy_limits_changed"], False)
+        self.assertIs(current["scientific_profile_changed"], False)
+        self.assertEqual(
+            current["previous_migration_sha256"],
+            {
+                str(
+                    NATIVE_CAMPAIGN_RECORD.relative_to(ROOT)
+                ): "abdd8fb0b72d050c31700853de5e42abfe6cc9c5820434e8a3728343db66e817"
+            },
+        )
+        for path, digest in current["previous_migration_sha256"].items():
+            self.assertEqual(hashlib.sha256((ROOT / path).read_bytes()).hexdigest(), digest)
+        resources = current["preserved_resource_sha256"]
+        self.assertEqual(len(resources), 13)
+        self.assertEqual(
+            resources,
+            previous["preserved_resource_sha256"]
+            | {
+                previous["new_campaign_resource"]["path"]: previous["new_campaign_resource"][
+                    "sha256"
+                ]
+            },
+        )
+        for path, digest in resources.items():
+            self.assertEqual(hashlib.sha256((ROOT / path).read_bytes()).hexdigest(), digest)
+        changed = current["changed_producer_source_sha256"]
+        self.assertEqual(
+            set(changed),
+            {
+                "src/recsys/__init__.py",
+                "src/recsys/research/campaign/common.py",
+                "src/recsys/research/campaign/verification.py",
+                "src/recsys/research/campaign/runner.py",
+                "src/recsys/research/campaign/report.py",
+            },
+        )
+        for path, digests in changed.items():
+            self.assertEqual(set(digests), {"from", "to"})
+            self.assertNotEqual(digests["from"], digests["to"])
+            self.assertEqual(hashlib.sha256((ROOT / path).read_bytes()).hexdigest(), digests["to"])
+        self.assertEqual(
+            current["acceptance"],
+            {
+                "full_ml02": False,
+                "model_quality": False,
+                "test_labels_opened": False,
+                "selected_n": False,
+                "release_accepted": False,
+            },
+        )
+
     def test_training_record_preserves_historical_authority(self) -> None:
         self.assertEqual(hashlib.sha256(RECORD.read_bytes()).hexdigest(), LEGACY_RECORD_SHA256)
         legacy = json.loads(RECORD.read_bytes())

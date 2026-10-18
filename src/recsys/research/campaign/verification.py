@@ -11,6 +11,7 @@ from recsys.research.campaign.common import (
     _canonical,
     _digest,
     _fail,
+    _native_public_bytes,
     _private_file,
     _read_private,
     _touch_lock,
@@ -187,9 +188,7 @@ def _verification_main(request_path: Path) -> int:
             from recsys.research.campaign.report import _public_projection
 
             projection = _public_projection(root, plan, successes, prepared)
-            projection_raw = _canonical(projection)
-            if len(projection_raw) > 256 * 1024:
-                _fail("research_campaign_report_invalid")
+            projection_raw = _native_public_bytes(projection)
             if operation == "project-report":
                 _private_file(
                     root / "projections" / cast("str", request["generation"]) / "projection.json",
