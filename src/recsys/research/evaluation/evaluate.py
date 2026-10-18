@@ -6,6 +6,7 @@ import math
 import re
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Iterator
+from heapq import nsmallest
 from pathlib import Path
 from typing import TypedDict, cast
 
@@ -387,24 +388,25 @@ def _rank(
 ) -> list[int]:
     if type(scores) is not list or len(scores) != len(ids):
         fail("research_prediction_invalid")
-    values: list[tuple[float, int]] = []
-    for entry, expected in zip(scores, ids):
-        if (
-            type(entry) is not list
-            or len(entry) != 2
-            or type(entry[0]) is not int
-            or entry[0] != expected
-        ):
-            fail("research_prediction_invalid")
-        score = entry[1]
-        if score is not None:
-            finite(score)
-        if n0 and (stats is None or score != stats["items"][str(expected)]["positive_users"]):
-            fail("research_prediction_invalid")
-        if expected not in excluded and score is not None:
-            values.append((-cast("float", score), expected))
-    values.sort()
-    return [item for _, item in values[:10]]
+
+    def candidates() -> Iterator[tuple[float, int]]:
+        for entry, expected in zip(scores, ids):
+            if (
+                type(entry) is not list
+                or len(entry) != 2
+                or type(entry[0]) is not int
+                or entry[0] != expected
+            ):
+                fail("research_prediction_invalid")
+            score = entry[1]
+            if score is not None:
+                finite(score)
+            if n0 and (stats is None or score != stats["items"][str(expected)]["positive_users"]):
+                fail("research_prediction_invalid")
+            if expected not in excluded and score is not None:
+                yield (-cast("float", score), expected)
+
+    return [item for _, item in nsmallest(10, candidates())]
 
 
 def _history_bin(count: int) -> str:
@@ -561,6 +563,7 @@ def evaluate_predictions(
     elif selection_path is not None or expected_selection_identity is not None:
         fail()
     ids = sorted(int(item) for item in catalog["anime"])
+    catalog_ids = set(ids)
     label_query = _paired_rows(
         prepared_dir, prep, split, allowed, protocol=protocol, ids=set(catalog["anime"])
     )
@@ -588,22 +591,19 @@ def evaluate_predictions(
                 targets <= positive <= history and seeds <= positive and targets.isdisjoint(seeds)
             ):
                 fail()
+            controlled_excluded = history - targets
             controlled = _rank(
-                row["scores"], ids, history - targets, n0=query["n"] == 0, stats=stats
+                row["scores"], ids, controlled_excluded, n0=query["n"] == 0, stats=stats
             )
             product = _rank(row["scores"], ids, seeds, n0=query["n"] == 0, stats=stats)
-            for mask, ranking, relevance in (
-                ("controlled", controlled, targets),
-                ("product", product, positive - seeds),
+            for mask, ranking, relevance, excluded in (
+                ("controlled", controlled, targets, controlled_excluded),
+                ("product", product, positive - seeds, seeds),
             ):
                 if (
                     not relevance
                     or len(ranking) != len(set(ranking))
-                    or any(
-                        item not in ids
-                        or item in (history - targets if mask == "controlled" else seeds)
-                        for item in ranking
-                    )
+                    or any(item not in catalog_ids or item in excluded for item in ranking)
                 ):
                     fail()
                 result: PrivateMetric = {

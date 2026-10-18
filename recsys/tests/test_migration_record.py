@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -17,6 +18,7 @@ RETIREMENT_RECORD = ROOT / "docs/migrations/arb059-cupy-scoring-retirement.json"
 NATIVE_RECORD = ROOT / "docs/migrations/arb060-native-pytorch-training-v1.json"
 NATIVE_CAMPAIGN_RECORD = ROOT / "docs/migrations/arb062-native-validation-campaign-v2.json"
 NATIVE_REPORT_CAP_RECORD = ROOT / "docs/migrations/arb063-native-campaign-report-cap-v1.json"
+BOUNDED_EVALUATION_RECORD = ROOT / "docs/migrations/arb064-bounded-evaluation-v1.json"
 LEGACY_RECORD_SHA256 = "27dd3f274a4cee02b0d6e7cf43fa9f4fcfbfe755e04d0c43d68d6c319ced5016"
 TRAINING_RECORD_SHA256 = "9a891c85f97340713be41319aeed559285c8cab54363fb8ede1f94ad76dff221"
 LOCK = ROOT / "src/recsys/resources/releases/release_neelagiri_2025_nafiul_2026_v1.json"
@@ -24,6 +26,8 @@ SOURCE_BASELINE = "1441573fbbbffc4693c7e1100aaae4458d9e88d4"
 TASK_BASELINE = "b385bfae9ad128f257784aec61e541296b648e31"
 COMPARATOR_BASELINE = "04588dcba21898210918f44999fbccf0068b468f"
 LOCK_SHA256 = "46f3ffd60239675b802026025016ee6719cb0525325e088fbfa248012db3de9b"
+F2_EVALUATOR_SHA256 = "09de66b5fd21c9daef396684aadb8e962c91f94bf79f5797c49cb03999a81bfb"
+F2_NATIVE_REPORT_CAP_SHA256 = "03fa9f95e786437fe139d7877ded095dcaab816bb7e31626f495f9c2b20345ba"
 
 
 class MigrationRecordTests(unittest.TestCase):
@@ -41,8 +45,8 @@ class MigrationRecordTests(unittest.TestCase):
         )
         self.assertEqual(current["task_baseline_tree"], "dedbaaaea40bb194eb65727dd017ee2b9e25a7b4")
         self.assertEqual(
-            (current["package_version_from"], current["package_version_to"], __version__),
-            ("0.5.0", "0.5.1", "0.5.1"),
+            (current["package_version_from"], current["package_version_to"]),
+            ("0.5.0", "0.5.1"),
         )
         self.assertEqual(current["source_layout"], SOURCE_LAYOUT)
         self.assertEqual(current["source_inventory"], list(SOURCE_FILES))
@@ -90,7 +94,17 @@ class MigrationRecordTests(unittest.TestCase):
         for path, digests in changed.items():
             self.assertEqual(set(digests), {"from", "to"})
             self.assertNotEqual(digests["from"], digests["to"])
-            self.assertEqual(hashlib.sha256((ROOT / path).read_bytes()).hexdigest(), digests["to"])
+            if path == "src/recsys/__init__.py":
+                self.assertEqual(
+                    digests["to"],
+                    json.loads(BOUNDED_EVALUATION_RECORD.read_bytes())[
+                        "changed_producer_source_sha256"
+                    ][path]["from"],
+                )
+            else:
+                self.assertEqual(
+                    hashlib.sha256((ROOT / path).read_bytes()).hexdigest(), digests["to"]
+                )
         self.assertEqual(
             current["acceptance"],
             {
@@ -100,6 +114,88 @@ class MigrationRecordTests(unittest.TestCase):
                 "selected_n": False,
                 "release_accepted": False,
             },
+        )
+
+    def test_bounded_evaluation_migration_preserves_artifacts_and_pins(self) -> None:
+        previous = json.loads(NATIVE_REPORT_CAP_RECORD.read_bytes())
+        current = json.loads(BOUNDED_EVALUATION_RECORD.read_bytes())
+        self.assertEqual(
+            hashlib.sha256(NATIVE_REPORT_CAP_RECORD.read_bytes()).hexdigest(),
+            F2_NATIVE_REPORT_CAP_SHA256,
+        )
+        self.assertEqual(
+            (current["schema_version"], current["kind"]), (1, "arb-bounded-evaluation-migration")
+        )
+        self.assertEqual(current["migration_id"], "arb064-bounded-evaluation-v1")
+        self.assertEqual(current["task_id"], "ARB-064")
+        self.assertEqual(
+            current["task_notion_url"], "https://app.notion.com/p/3fd3908d6b1f81a1a338ef58888149a6"
+        )
+        self.assertEqual(
+            current["task_baseline_commit"], "b61881af16550a44cde6e1b54d98b522052e0e53"
+        )
+        self.assertEqual(current["task_baseline_tree"], "505688886fecd356b70ec41e1cda8c1058a17c6e")
+        self.assertEqual(
+            (current["package_version_from"], current["package_version_to"], __version__),
+            (previous["package_version_to"], "0.5.2", "0.5.2"),
+        )
+        self.assertEqual(current["source_layout"], SOURCE_LAYOUT)
+        self.assertEqual(current["source_inventory"], list(SOURCE_FILES))
+        self.assertEqual(len(current["source_inventory"]), 89)
+        self.assertEqual(current["artifact_versions"], previous["artifact_versions"])
+        self.assertEqual(
+            current["preserved_resource_sha256"], previous["preserved_resource_sha256"]
+        )
+        self.assertEqual(len(current["preserved_resource_sha256"]), 13)
+        for path, digest in current["preserved_resource_sha256"].items():
+            self.assertEqual(hashlib.sha256((ROOT / path).read_bytes()).hexdigest(), digest)
+        self.assertEqual(
+            current["previous_migration_sha256"],
+            {str(NATIVE_REPORT_CAP_RECORD.relative_to(ROOT)): F2_NATIVE_REPORT_CAP_SHA256},
+        )
+        self.assertEqual(current["native_public_projection_report_limit_bytes"], 8_388_608)
+        self.assertEqual(current["legacy_public_projection_report_limit_bytes"], 262_144)
+        for name in (
+            "scientific_profile_changed",
+            "resource_limits_changed",
+            "score_encoding_changed",
+            "evaluation_public_schema_changed",
+        ):
+            self.assertIs(current[name], False)
+        self.assertEqual(current["acceptance"], previous["acceptance"])
+        changed = current["changed_producer_source_sha256"]
+        self.assertEqual(
+            set(changed), {"src/recsys/__init__.py", "src/recsys/research/evaluation/evaluate.py"}
+        )
+        self.assertEqual(
+            changed["src/recsys/__init__.py"]["from"],
+            previous["changed_producer_source_sha256"]["src/recsys/__init__.py"]["to"],
+        )
+        self.assertEqual(
+            changed["src/recsys/research/evaluation/evaluate.py"]["from"], F2_EVALUATOR_SHA256
+        )
+        for path, digests in changed.items():
+            self.assertEqual(set(digests), {"from", "to"})
+            self.assertNotEqual(digests["from"], digests["to"])
+            self.assertEqual(hashlib.sha256((ROOT / path).read_bytes()).hexdigest(), digests["to"])
+        lock_packages = tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8"))["package"]
+        third_party = [
+            item for item in lock_packages if item["name"] != "anime-recommendation-recsys"
+        ]
+        self.assertEqual((len(lock_packages), len(third_party)), (143, 142))
+        self.assertEqual(
+            hashlib.sha256(
+                json.dumps(third_party, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest(),
+            "82f851a738a18df5dd2142d12dbaa1c6701e6dd0b7a7d53e760951cb5fb96625",
+        )
+        self.assertEqual(
+            next(
+                item["version"]
+                for item in lock_packages
+                if item["name"] == "anime-recommendation-recsys"
+            ),
+            "0.5.2",
         )
 
     def test_training_record_preserves_historical_authority(self) -> None:

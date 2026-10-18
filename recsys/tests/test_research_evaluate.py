@@ -1,4 +1,5 @@
 import copy
+import math
 import tempfile
 import unittest
 from collections.abc import Callable
@@ -19,14 +20,47 @@ from recsys.research.artifacts import (
 )
 from recsys.research.evaluation.evaluate import (
     EvaluationManifest,
+    EvaluationTrainStats,
     PredictionManifest,
     PrivateMetric,
     _paired_rows,
     _prepared,
+    _rank,
     evaluate_predictions,
     metrics,
 )
-from recsys.research.protocol import ResearchError, load_protocol
+from recsys.research.protocol import ResearchError, fail, finite, load_protocol
+
+
+def _f2_rank_reference(
+    scores: object,
+    ids: list[int],
+    excluded: set[int],
+    *,
+    n0: bool = False,
+    stats: EvaluationTrainStats | None = None,
+) -> list[int]:
+    """The frozen F2 ranking body, used only as a small synthetic oracle."""
+    if type(scores) is not list or len(scores) != len(ids):
+        fail("research_prediction_invalid")
+    values: list[tuple[float, int]] = []
+    for entry, expected in zip(scores, ids):
+        if (
+            type(entry) is not list
+            or len(entry) != 2
+            or type(entry[0]) is not int
+            or entry[0] != expected
+        ):
+            fail("research_prediction_invalid")
+        score = entry[1]
+        if score is not None:
+            finite(score)
+        if n0 and (stats is None or score != stats["items"][str(expected)]["positive_users"]):
+            fail("research_prediction_invalid")
+        if expected not in excluded and score is not None:
+            values.append((-cast("float", score), expected))
+    values.sort()
+    return [item for _, item in values[:10]]
 
 
 class ScoreTestRow(TypedDict):
@@ -50,6 +84,114 @@ def _score_rows(path: Path, descriptor: StreamDescriptor) -> list[ScoreTestRow]:
         for row in values
     )
     return cast("list[ScoreTestRow]", values)
+
+
+class RankDifferentialTests(unittest.TestCase):
+    def assert_f2_equivalent(
+        self,
+        scores: object,
+        ids: list[int],
+        excluded: set[int],
+        *,
+        n0: bool = False,
+        stats: EvaluationTrainStats | None = None,
+    ) -> None:
+        def result(reference: bool) -> tuple[type[Exception] | None, object]:
+            rank = _f2_rank_reference if reference else _rank
+            try:
+                return None, rank(scores, ids, excluded, n0=n0, stats=stats)
+            except Exception as exc:
+                return type(exc), str(exc)
+
+        self.assertEqual(result(True), result(False))
+
+    def test_full_vector_top_ten_and_masks_match_f2(self) -> None:
+        for size in (0, 1, 9, 10, 11, 21, 28_955):
+            ids = [3 * index + 7 for index in range(size)]
+            for order in ("increasing", "decreasing", "shuffled", "ties"):
+                if order == "increasing":
+                    values: list[int | float | None] = [index - size for index in range(size)]
+                elif order == "decreasing":
+                    values = [size - index for index in range(size)]
+                elif order == "shuffled":
+                    values = [((index * 104_729) % max(size, 1)) - size for index in range(size)]
+                else:
+                    values = [0.0 if index % 2 else -0.0 for index in range(size)]
+                if size and order == "shuffled":
+                    values[0] = 10**100
+                    values[-1] = -(10**100)
+                    if size > 2:
+                        values[1] = None
+                scores = [[item, score] for item, score in zip(ids, values, strict=True)]
+                for excluded in (set(), set(ids[:3]), set(ids[::2]), set(ids)):
+                    with self.subTest(size=size, order=order, excluded=len(excluded)):
+                        self.assert_f2_equivalent(scores, ids, excluded)
+
+    def test_null_zero_negative_and_n0_count_equivalence(self) -> None:
+        ids = [7, 10, 13, 16, 19, 22, 25, 28, 31, 34, 37]
+        mixed: list[int | float | None] = [None, 0, 0.0, -0.0, -3, -3.0, 7, 7.0, 10**100, 1, 1]
+        self.assert_f2_equivalent(
+            [[item, score] for item, score in zip(ids, mixed, strict=True)], ids, {10, 22}
+        )
+        stats: EvaluationTrainStats = {
+            "schema_version": 1,
+            "train_users": 11,
+            "train_completed_rows": 11,
+            "items": {
+                str(item): {
+                    "completed_users": 1,
+                    "positive_users": index % 3,
+                    "rating_sum": 8,
+                    "rating_count": 1,
+                    "band": "head",
+                }
+                for index, item in enumerate(ids)
+            },
+        }
+        counts = [
+            [item, float(index % 3) if index % 2 else index % 3] for index, item in enumerate(ids)
+        ]
+        self.assert_f2_equivalent(counts, ids, {7, 22}, n0=True, stats=stats)
+        counts[-1][1] = 20
+        self.assert_f2_equivalent(counts, ids, {37}, n0=True, stats=stats)
+        self.assert_f2_equivalent(counts, ids, set(), n0=True, stats=None)
+
+    def test_late_excluded_and_malformed_entries_keep_f2_error_codes(self) -> None:
+        ids = [3 * index + 7 for index in range(21)]
+        baseline: list[object] = [[item, 100 - index] for index, item in enumerate(ids)]
+        malformed: list[tuple[str, object, set[int]]] = [
+            ("missing", baseline[:-1], set()),
+            ("extra", baseline + [[9999, 1]], set()),
+            ("wrong_container", tuple(baseline), set()),
+        ]
+        changes: list[tuple[str, int, object, set[int]]] = [
+            ("late_bad_id", -1, [ids[-1] + 1, 0], set()),
+            ("excluded_bad_id", -1, [ids[-1] + 1, 0], {ids[-1]}),
+            ("outside_top_ten", -1, [ids[-1], True], set()),
+            ("duplicate", 1, [ids[0], 1], set()),
+            ("unknown", 0, [9999, 1], set()),
+            ("bool_id", 0, [True, 1], set()),
+            ("wrong_pair", 0, (ids[0], 1), set()),
+            ("short_pair", 0, [ids[0]], set()),
+            ("bool_score", 0, [ids[0], True], set()),
+            ("string_score", 0, [ids[0], "1"], set()),
+            ("list_score", 0, [ids[0], [1]], set()),
+            ("nan", 0, [ids[0], math.nan], set()),
+            ("inf", 0, [ids[0], math.inf], set()),
+        ]
+        for name, index, replacement, excluded in changes:
+            rows = list(baseline)
+            rows[index] = replacement
+            malformed.append((name, rows, excluded))
+        for name, scores, excluded in malformed:
+            with self.subTest(name=name):
+                self.assert_f2_equivalent(scores, ids, excluded)
+                with self.assertRaises(ResearchError) as raised:
+                    _rank(scores, ids, excluded)
+                self.assertIn(
+                    str(raised.exception),
+                    {"research_prediction_invalid", "research_integrity_error"},
+                )
 
 
 class EvaluateTests(unittest.TestCase):
@@ -101,6 +243,41 @@ class EvaluateTests(unittest.TestCase):
 
         with patch.object(Path, "open", guarded):
             self.evaluate()
+
+    def test_historical_f2_producer_rejected_before_payload_reads(self) -> None:
+        migration = (
+            Path(__file__).resolve().parents[2]
+            / "docs/migrations/arb064-bounded-evaluation-v1.json"
+        )
+        record = cast("dict[str, object]", __import__("json").loads(migration.read_bytes()))
+        changed = cast("dict[str, dict[str, str]]", record["changed_producer_source_sha256"])
+        manifest_path = self.prepared / "prepare-manifest.json"
+        value, _ = read_json(manifest_path)
+        manifest = cast("dict[str, object]", value)
+        producer = cast("dict[str, object]", manifest["producer"])
+        fingerprints = cast("dict[str, str]", producer["code_files_sha256"])
+        for path, digests in changed.items():
+            fingerprints[path.removeprefix("src/recsys/")] = digests["from"]
+        producer["package_version"] = "0.5.1"
+        manifest_path.write_bytes(canonical_bytes(manifest))
+        old_identity = identity(manifest_path)
+        original = Path.open
+
+        def guarded(
+            path: Path,
+            mode: str = "r",
+            buffering: int = -1,
+            encoding: str | None = None,
+            errors: str | None = None,
+            newline: str | None = None,
+        ) -> IO[str] | IO[bytes]:
+            if path.is_relative_to(self.prepared) and path.name != "prepare-manifest.json":
+                raise AssertionError("historical preparation payload opened")
+            return original(path, mode, buffering, encoding, errors, newline)
+
+        with patch.object(Path, "open", guarded):
+            with self.assertRaisesRegex(ResearchError, "^research_integrity_error$"):
+                _prepared(self.prepared, old_identity)
 
     def test_rejects_missing_score_and_identity_tamper(self) -> None:
         manifest_path = self.prediction / "prediction-manifest.json"
