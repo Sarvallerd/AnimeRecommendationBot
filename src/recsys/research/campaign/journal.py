@@ -42,9 +42,19 @@ class CampaignEvent(TypedDict):
     code: NotRequired[str | None]
     verification_resources: NotRequired[dict[str, object] | None]
     verification_identity: NotRequired[str | None]
+    execution_spawned: NotRequired[bool]
+    verification_spawned: NotRequired[bool]
 
 
 type PhaseKey = tuple[str, str]
+_STORAGE_PREFLIGHT_CODES = frozenset(
+    {
+        "research_campaign_storage_low",
+        "research_campaign_storage_probe_failed",
+        "research_campaign_storage_binding_changed",
+        "research_campaign_storage_root_invalid",
+    }
+)
 type SuccessState = tuple[
     dict[PhaseKey, CampaignEvent],
     dict[PhaseKey, int],
@@ -85,6 +95,30 @@ def _validated_event(value: object) -> CampaignEvent:
                 _fail()
     if "resumed" in event and type(event["resumed"]) is not bool:
         _fail()
+    if "execution_spawned" in event or "verification_spawned" in event:
+        if (
+            event["event"] != "attempt_finished"
+            or event.get("status") != "failed"
+            or event.get("code") not in _STORAGE_PREFLIGHT_CODES
+            or event.get("output_identity") is not None
+            or "execution_spawned" in event
+            and "verification_spawned" in event
+        ):
+            _fail()
+        if "execution_spawned" in event and (
+            event["execution_spawned"] is not False
+            or event.get("resources") is not None
+            or event.get("verification_resources") is not None
+        ):
+            _fail()
+        execution_resources = event.get("resources")
+        if "verification_spawned" in event and (
+            event["verification_spawned"] is not False
+            or type(execution_resources) is not dict
+            or execution_resources.get("cleanup_complete") is not True
+            or event.get("verification_resources") is not None
+        ):
+            _fail()
     if event["event"] in ("attempt_started", "attempt_finished", "attempt_interrupted"):
         required = {"variant", "phase", "attempt"}
         if event["event"] == "attempt_started" or (

@@ -12,6 +12,7 @@ import os
 import sys
 import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import NotRequired, TypedDict, cast
 
@@ -70,6 +71,28 @@ class ActivePhase(TypedDict):
     observed_elapsed: float
     warned: bool
     result: NotRequired[ProcessResult]
+
+
+class NativeOpenAttempt(TypedDict):
+    generation: str
+    variant: str
+    phase: str
+    attempt: int
+    started: float
+    execution_handle: JobHandle | None
+    verification_handle: JobHandle | None
+    verification_requested: bool
+    execution_spawn_attempted: bool
+    verification_spawn_attempted: bool
+
+
+class _NativePreflightFailure(Exception):
+    """A storage gate failed before the supervisor received a job."""
+
+
+def _native_failure_code(error: BaseException, fallback: str) -> str:
+    code = str(error)
+    return code if _SAFE_CODE.fullmatch(code) else fallback
 
 
 def _worker_env() -> dict[str, str]:
@@ -633,12 +656,15 @@ def _native_storage_check(
     root: Path, plan: CampaignPlan, remaining_arms: int, *, admission: bool = True
 ) -> tuple[int, int]:
     storage = plan["storage"]
-    snapshot = check_binding(
-        root,
-        Path(storage["physical_storage_root"]),
-        output_device=storage["output_filesystem_device"],
-        physical_device=storage["physical_filesystem_device"],
-    )
+    try:
+        snapshot = check_binding(
+            root,
+            Path(storage["physical_storage_root"]),
+            output_device=storage["output_filesystem_device"],
+            physical_device=storage["physical_filesystem_device"],
+        )
+    except OSError:
+        _fail("research_campaign_storage_probe_failed")
     require_storage(
         snapshot, required_bytes=admission_bytes(remaining_arms) if admission else STOP_BYTES
     )
@@ -655,11 +681,24 @@ def _run_native_job(
     plan: CampaignPlan,
     remaining_arms: int,
     cuda_fit: bool = False,
+    before_start: Callable[[], None] | None = None,
+    on_start: Callable[[JobHandle], None] | None = None,
 ) -> tuple[ProcessResult, str | None, int, int, int]:
     """Keep one process group supervised through cleanup and physical-space checks."""
     from recsys.research.resources import ResourceSupervisor
 
     owner = cast("ResourceSupervisor", supervisor)
+    try:
+        available_output, available_physical = _native_storage_check(
+            root, plan, remaining_arms, admission=False
+        )
+    except Exception as error:
+        code = str(error)
+        raise _NativePreflightFailure(
+            code if _SAFE_CODE.fullmatch(code) else "research_campaign_storage_probe_failed"
+        ) from error
+    if before_start is not None:
+        before_start()
     handle = owner.start(
         argv,
         cwd=root,
@@ -667,8 +706,10 @@ def _run_native_job(
         remaining_seconds=remaining_seconds,
         env=_native_worker_env(cuda_fit=cuda_fit),
     )
+    if on_start is not None:
+        on_start(handle)
     failure_code: str | None = None
-    output_min = physical_min = 2**63 - 1
+    output_min, physical_min = available_output, available_physical
     aggregate_peak = 0
     last_storage_check = 0.0
     while True:
@@ -764,6 +805,8 @@ def _native_verify_job(
     phase: str | None = None,
     attempt: int | None = None,
     execution_identity: str | None = None,
+    before_start: Callable[[], None] | None = None,
+    on_start: Callable[[JobHandle], None] | None = None,
 ) -> tuple[dict[str, object], ProcessResult, int, int, int]:
     request_path, request = _native_verification_request(
         root,
@@ -793,6 +836,8 @@ def _native_verify_job(
         remaining_seconds=remaining_seconds,
         plan=plan,
         remaining_arms=remaining_arms,
+        before_start=before_start,
+        on_start=on_start,
     )
     _private_file(container / "verification-process.json", _canonical(_process_fields(result)))
     if (
@@ -818,6 +863,74 @@ def _native_verify_job(
     ):
         _fail("research_campaign_verification_invalid")
     return cast("dict[str, object]", receipt), result, aggregate, output_min, physical_min
+
+
+def _record_closed_native_interruption(
+    supervisor: object,
+    journal: _Journal,
+    attempt: NativeOpenAttempt,
+    error: BaseException,
+) -> bool:
+    """Charge a stopped attempt only after real launched processes are closed."""
+    from recsys.research.resources import ResourceSupervisor
+
+    owner = cast("ResourceSupervisor", supervisor)
+    execution_handle = attempt["execution_handle"]
+    verification_handle = attempt["verification_handle"]
+    fields: dict[str, object] = {
+        "generation": attempt["generation"],
+        "variant": attempt["variant"],
+        "phase": attempt["phase"],
+        "attempt": attempt["attempt"],
+        "charged_seconds": time.monotonic() - attempt["started"],
+    }
+    if execution_handle is None:
+        if not isinstance(error, _NativePreflightFailure) or attempt["execution_spawn_attempted"]:
+            return False
+        journal.append(
+            "attempt_finished",
+            **fields,
+            status="failed",
+            code=str(error),
+            resources=None,
+            verification_resources=None,
+            verification_identity=None,
+            output_identity=None,
+            execution_spawned=False,
+        )
+        return True
+    execution = owner.result(execution_handle)
+    if execution is None or not execution.cleanup_complete:
+        return False
+    fields["resources"] = _process_fields(execution)
+    if attempt["verification_requested"] and verification_handle is None:
+        if attempt["verification_spawn_attempted"]:
+            return False
+        if isinstance(error, _NativePreflightFailure):
+            journal.append(
+                "attempt_finished",
+                **fields,
+                status="failed",
+                code=str(error),
+                verification_resources=None,
+                verification_identity=None,
+                output_identity=None,
+                verification_spawned=False,
+            )
+        else:
+            journal.append("attempt_interrupted", **fields, verification_resources=None)
+        return True
+    verification: ProcessResult | None = None
+    if verification_handle is not None:
+        verification = owner.result(verification_handle)
+        if verification is None or not verification.cleanup_complete:
+            return False
+    journal.append(
+        "attempt_interrupted",
+        **fields,
+        verification_resources=_process_fields(verification) if verification else None,
+    )
+    return True
 
 
 def _run_native_campaign(
@@ -926,6 +1039,29 @@ def _run_native_campaign(
             if event["event"] in ("attempt_finished", "attempt_interrupted"):
                 evidence = event.get("resources")
                 verify_resources = event.get("verification_resources")
+                attempt_dir = _phase_directory(
+                    root, event["variant"], event["phase"], event["attempt"]
+                )
+                if event.get("execution_spawned") is False:
+                    if (
+                        (attempt_dir / "artifact").exists()
+                        or (attempt_dir / "artifact").is_symlink()
+                        or (attempt_dir / "logs").exists()
+                        or (attempt_dir / "logs").is_symlink()
+                    ):
+                        _fail("research_campaign_interrupted_uncertain")
+                    continue
+                if event.get("verification_spawned") is False:
+                    execution_record, _ = _read_private(
+                        attempt_dir / "resources" / "execution.json", limit=4096
+                    )
+                    if (
+                        execution_record != evidence
+                        or not (attempt_dir / "artifact").is_dir()
+                        or (attempt_dir / "verification-process.json").exists()
+                        or (attempt_dir / "verification-process.json").is_symlink()
+                    ):
+                        _fail("research_campaign_interrupted_uncertain")
                 if (
                     type(evidence) is not dict
                     or evidence.get("cleanup_complete") is not True
@@ -953,37 +1089,52 @@ def _run_native_campaign(
         projection: dict[str, object] | None = None
         projection_resources: dict[str, object] | None = None
         entered = False
+        open_attempt: NativeOpenAttempt | None = None
+        pending_error: BaseException | None = None
+        close_complete = False
         try:
             supervisor.__enter__()
             entered = True
             if resume and successes:
-                # Recheck every retained artifact in a bounded child. The
-                # coordinator itself only handles small identities and receipts.
-                remaining_arms = 8 - sum((variant, "predict") in successes for variant in variants)
-                _native_storage_check(root, plan, remaining_arms)
-                receipt, result, peak, out_free, host_free = _native_verify_job(
-                    supervisor,
-                    root,
-                    plan,
-                    plan_identity,
-                    generation,
-                    prepared,
-                    journal,
-                    operation="resume-verify",
-                    remaining_seconds=(_parse_iso(plan["deadline_utc"]) - _now()).total_seconds(),
-                    remaining_arms=remaining_arms,
-                )
-                if (
-                    receipt.get("operation") != "resume-verify"
-                    or receipt.get("projection_identity") is not None
-                ):
-                    _fail("research_campaign_verification_invalid")
-                aggregate_peak = max(aggregate_peak, peak)
-                min_output, min_physical = min(min_output, out_free), min(min_physical, host_free)
-                journal.append(
-                    "resume_verified", generation=generation, resources=_process_fields(result)
-                )
-            while set(successes) != _expected_nodes(plan):
+                try:
+                    # Recheck every retained artifact in a bounded child. The
+                    # coordinator itself only handles small identities and receipts.
+                    remaining_arms = 8 - sum(
+                        (variant, "predict") in successes for variant in variants
+                    )
+                    _native_storage_check(root, plan, remaining_arms)
+                    receipt, result, peak, out_free, host_free = _native_verify_job(
+                        supervisor,
+                        root,
+                        plan,
+                        plan_identity,
+                        generation,
+                        prepared,
+                        journal,
+                        operation="resume-verify",
+                        remaining_seconds=(
+                            _parse_iso(plan["deadline_utc"]) - _now()
+                        ).total_seconds(),
+                        remaining_arms=remaining_arms,
+                    )
+                    if (
+                        receipt.get("operation") != "resume-verify"
+                        or receipt.get("projection_identity") is not None
+                    ):
+                        _fail("research_campaign_verification_invalid")
+                    aggregate_peak = max(aggregate_peak, peak)
+                    min_output, min_physical = (
+                        min(min_output, out_free),
+                        min(min_physical, host_free),
+                    )
+                    journal.append(
+                        "resume_verified", generation=generation, resources=_process_fields(result)
+                    )
+                except BaseException as error:
+                    failure_code = _native_failure_code(
+                        error, "research_campaign_verification_failed"
+                    )
+            while failure_code is None and set(successes) != _expected_nodes(plan):
                 if _now() >= _parse_iso(plan["deadline_utc"]):
                     failure_code = "research_campaign_wall_limit"
                     break
@@ -1034,6 +1185,32 @@ def _run_native_campaign(
                     remaining_seconds=remaining,
                 )
                 started = time.monotonic()
+                active: NativeOpenAttempt = {
+                    "generation": generation,
+                    "variant": variant,
+                    "phase": phase,
+                    "attempt": number,
+                    "started": started,
+                    "execution_handle": None,
+                    "verification_handle": None,
+                    "verification_requested": False,
+                    "execution_spawn_attempted": False,
+                    "verification_spawn_attempted": False,
+                }
+                open_attempt = active
+
+                def execution_starting() -> None:
+                    active["execution_spawn_attempted"] = True
+
+                def execution_started(handle: JobHandle) -> None:
+                    active["execution_handle"] = handle
+
+                def verification_starting() -> None:
+                    active["verification_spawn_attempted"] = True
+
+                def verification_started_handle(handle: JobHandle) -> None:
+                    active["verification_handle"] = handle
+
                 execution: ProcessResult | None = None
                 verification: ProcessResult | None = None
                 verification_identity: str | None = None
@@ -1059,6 +1236,8 @@ def _run_native_campaign(
                         cuda_fit=variant == NATIVE_VARIANT
                         and phase == "fit"
                         and plan["variants"][-1]["train_device"]["kind"] == "cuda",
+                        before_start=execution_starting,
+                        on_start=execution_started,
                     )
                     aggregate_peak = max(aggregate_peak, peak)
                     min_output, min_physical = (
@@ -1074,6 +1253,7 @@ def _run_native_campaign(
                         if verification_remaining <= 0:
                             _fail("research_campaign_budget_limit")
                         verification_started = True
+                        active["verification_requested"] = True
                         receipt, verification, peak, out_free, host_free = _native_verify_job(
                             supervisor,
                             root,
@@ -1089,6 +1269,8 @@ def _run_native_campaign(
                             execution_identity=_digest(execution_raw),
                             remaining_seconds=verification_remaining,
                             remaining_arms=remaining_arms,
+                            before_start=verification_starting,
+                            on_start=verification_started_handle,
                         )
                         aggregate_peak = max(aggregate_peak, peak)
                         min_output = min(min_output, out_free)
@@ -1151,6 +1333,7 @@ def _run_native_campaign(
                     verification_identity=verification_identity,
                     output_identity=manifest_identity if attempt_code is None else None,
                 )
+                open_attempt = None
                 if attempt_code is not None:
                     failure_code = attempt_code
                     break
@@ -1192,9 +1375,23 @@ def _run_native_campaign(
                             if _SAFE_CODE.fullmatch(code)
                             else "research_campaign_report_invalid"
                         )
+        except BaseException as error:
+            pending_error = error
+            failure_code = _native_failure_code(error, "research_campaign_controller_failed")
         finally:
             if entered:
-                supervisor.close()
+                try:
+                    supervisor.close()
+                    close_complete = True
+                except BaseException:
+                    failure_code = "research_campaign_cleanup_failed"
+            if open_attempt is not None and pending_error is not None and close_complete:
+                try:
+                    _record_closed_native_interruption(
+                        supervisor, journal, open_attempt, pending_error
+                    )
+                except BaseException:
+                    failure_code = "research_campaign_controller_failed"
         if failure_code is None and _now() > _parse_iso(plan["deadline_utc"]):
             failure_code = "research_campaign_wall_limit"
         complete = failure_code is None and projection is not None

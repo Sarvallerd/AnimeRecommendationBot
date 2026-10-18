@@ -6,6 +6,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from copy import deepcopy
 from pathlib import Path
 from typing import cast
 
@@ -14,9 +15,14 @@ from research_model_support import patch_release_info
 from training_support import SeedTrainingFixture
 
 from recsys.research.artifacts import identity, read_json, stream_jsonl
-from recsys.research.campaign.artifacts import _read_receipt
+from recsys.research.campaign.artifacts import (
+    _read_receipt,
+    _verify_native_prediction_measurement,
+    _verify_native_runtime,
+)
 from recsys.research.campaign.common import _canonical, _digest, _private_file
 from recsys.research.campaign.native import fit_native_campaign_arm, predict_native_validation
+from recsys.research.campaign.plan import CampaignPlan
 from recsys.research.campaign.spec import NATIVE_VARIANT
 from recsys.research.models.inputs import read_scoring_inputs
 from recsys.research.protocol import ResearchError
@@ -250,3 +256,169 @@ class NativeReceiptTests(unittest.TestCase):
             result_path.write_bytes(_canonical(result))
             with self.assertRaisesRegex(ResearchError, "research_campaign_receipt_invalid"):
                 _read_receipt(attempt, NATIVE_VARIANT, "fit", 1, "g", native_campaign=True)
+
+
+class NativeRuntimeVerificationTests(unittest.TestCase):
+    def _plan(self, framework: str) -> CampaignPlan:
+        return cast(
+            "CampaignPlan",
+            {
+                "producer": {
+                    "python_version": "3.12.3",
+                    "package_versions": {
+                        "torch": framework,
+                        "numpy": "2.5.3",
+                        "safetensors": "0.8.0",
+                    },
+                }
+            },
+        )
+
+    def _runtime(self, *, cuda: bool, framework: str) -> dict[str, object]:
+        return {
+            "framework_version": framework,
+            "python_version": "3.12.3",
+            "numpy_version": "2.5.3",
+            "safetensors_version": "0.8.0",
+            "device": {"kind": "cuda", "index": 0} if cuda else {"kind": "cpu", "index": None},
+            "torch_cuda_version": "12.9" if cuda else None,
+            "device_name": "fixture CUDA device" if cuda else None,
+            "cuda_peak_allocated_bytes": 1024 if cuda else None,
+            "cuda_peak_reserved_bytes": 2048 if cuda else None,
+        }
+
+    def test_runtime_versions_and_cuda_evidence_are_exact(self) -> None:
+        for cuda, framework in ((False, "2.13.0+cpu"), (True, "2.13.0+cu129")):
+            with self.subTest(cuda=cuda):
+                plan = self._plan(framework)
+                device = DeviceSpec("cuda", 0) if cuda else DeviceSpec("cpu", None)
+                valid = self._runtime(cuda=cuda, framework=framework)
+                _verify_native_runtime(
+                    valid,
+                    plan,
+                    device=device,
+                    framework_version=framework,
+                    code="research_campaign_native_fit_invalid",
+                )
+                wrong_plan = self._plan("2.13.0+cpu" if cuda else "2.13.0+cu129")
+                with self.assertRaisesRegex(ResearchError, "research_campaign_native_fit_invalid"):
+                    _verify_native_runtime(
+                        valid,
+                        wrong_plan,
+                        device=device,
+                        framework_version=framework,
+                        code="research_campaign_native_fit_invalid",
+                    )
+                mutations: list[tuple[str, object]] = [
+                    ("python_version", "3.12.99"),
+                    ("numpy_version", "9.9.9"),
+                    ("safetensors_version", "9.9.9"),
+                    ("framework_version", "2.13.0+other"),
+                    ("device", {"kind": "cuda", "index": 1}),
+                ]
+                if cuda:
+                    mutations.extend(
+                        [
+                            ("torch_cuda_version", None),
+                            ("device_name", None),
+                            ("cuda_peak_allocated_bytes", None),
+                            ("cuda_peak_reserved_bytes", None),
+                            ("cuda_peak_allocated_bytes", -1),
+                            ("cuda_peak_reserved_bytes", True),
+                        ]
+                    )
+                else:
+                    mutations.extend(
+                        [
+                            ("torch_cuda_version", "12.9"),
+                            ("device_name", "GPU"),
+                            ("cuda_peak_allocated_bytes", 0),
+                            ("cuda_peak_reserved_bytes", 0),
+                        ]
+                    )
+                for field, replacement in mutations:
+                    with self.subTest(cuda=cuda, field=field, replacement=replacement):
+                        altered = deepcopy(valid)
+                        altered[field] = replacement
+                        with self.assertRaisesRegex(
+                            ResearchError, "research_campaign_native_fit_invalid"
+                        ):
+                            _verify_native_runtime(
+                                altered,
+                                plan,
+                                device=device,
+                                framework_version=framework,
+                                code="research_campaign_native_fit_invalid",
+                            )
+
+    def test_prediction_measurement_allowlist_and_finite_timings(self) -> None:
+        framework = "2.13.0+cu129"
+        plan = self._plan(framework)
+        model_identity = "sha256:" + "a" * 64
+        valid = {
+            "schema_version": 1,
+            "kind": "arb-ml02-native-prediction-measurement",
+            "model_identity": model_identity,
+            "stored_inference_device": {"kind": "cpu", "index": None},
+            "effective_inference_device": {"kind": "cpu", "index": None},
+            "runtime": self._runtime(cuda=False, framework=framework),
+            "backend": "cpu",
+            "status": "published",
+            "queries": 5,
+            "score_pairs": 105,
+            "synchronized_scoring_seconds": 0.1,
+            "encoding_gzip_write_seconds": 0.2,
+            "staging_wall_seconds": 0.4,
+            "publication_wall_seconds": 0.5,
+        }
+        _verify_native_prediction_measurement(
+            valid,
+            plan,
+            model_identity=model_identity,
+            framework_version=framework,
+            query_count=5,
+            catalog_count=21,
+        )
+        mutations: list[tuple[str, object]] = [
+            ("unexpected", "private path"),
+            ("backend", "gpu"),
+            ("score_pairs", 104),
+            ("synchronized_scoring_seconds", float("nan")),
+            ("encoding_gzip_write_seconds", -0.1),
+            ("staging_wall_seconds", True),
+            ("publication_wall_seconds", float("inf")),
+            ("publication_wall_seconds", 0.3),
+        ]
+        for field, replacement in mutations:
+            with self.subTest(field=field):
+                altered = deepcopy(valid)
+                altered[field] = replacement
+                with self.assertRaisesRegex(ResearchError, "research_campaign_prediction_invalid"):
+                    _verify_native_prediction_measurement(
+                        altered,
+                        plan,
+                        model_identity=model_identity,
+                        framework_version=framework,
+                        query_count=5,
+                        catalog_count=21,
+                    )
+        for field, replacement in (
+            ("python_version", "3.12.99"),
+            ("numpy_version", "9.9.9"),
+            ("safetensors_version", "9.9.9"),
+            ("torch_cuda_version", "12.9"),
+            ("cuda_peak_allocated_bytes", 0),
+        ):
+            with self.subTest(runtime_field=field):
+                altered = deepcopy(valid)
+                runtime = cast("dict[str, object]", altered["runtime"])
+                runtime[field] = replacement
+                with self.assertRaisesRegex(ResearchError, "research_campaign_prediction_invalid"):
+                    _verify_native_prediction_measurement(
+                        altered,
+                        plan,
+                        model_identity=model_identity,
+                        framework_version=framework,
+                        query_count=5,
+                        catalog_count=21,
+                    )

@@ -17,6 +17,98 @@ from recsys.research.campaign.journal import CampaignEvent, PhaseKey
 from recsys.research.campaign.plan import CampaignPlan
 from recsys.research.campaign.spec import NATIVE_CAMPAIGN, NATIVE_VARIANT
 from recsys.research.models.types import ScoringInputs
+from recsys.research.training.spec import DeviceSpec
+
+
+def _verify_native_runtime(
+    value: object,
+    plan: CampaignPlan,
+    *,
+    device: DeviceSpec,
+    framework_version: str,
+    code: str,
+) -> None:
+    """Validate the unchanged native runtime wire against the immutable campaign plan."""
+    from recsys.research.training.receipts import _runtime as validate_runtime_wire
+
+    validate_runtime_wire(value, code)
+    runtime = cast("dict[str, object]", value)
+    versions = plan["producer"]["package_versions"]
+    if (
+        runtime["device"] != device.wire()
+        or runtime["framework_version"] != framework_version
+        or runtime["framework_version"] != versions.get("torch")
+        or runtime["python_version"] != plan["producer"]["python_version"]
+        or runtime["numpy_version"] != versions.get("numpy")
+        or runtime["safetensors_version"] != versions.get("safetensors")
+    ):
+        _fail(code)
+
+
+def _verify_native_prediction_measurement(
+    value: object,
+    plan: CampaignPlan,
+    *,
+    model_identity: str,
+    framework_version: str,
+    query_count: int,
+    catalog_count: int,
+) -> None:
+    code = "research_campaign_prediction_invalid"
+    fields = {
+        "schema_version",
+        "kind",
+        "model_identity",
+        "stored_inference_device",
+        "effective_inference_device",
+        "runtime",
+        "backend",
+        "status",
+        "queries",
+        "score_pairs",
+        "synchronized_scoring_seconds",
+        "encoding_gzip_write_seconds",
+        "staging_wall_seconds",
+        "publication_wall_seconds",
+    }
+    if type(value) is not dict or set(value) != fields:
+        _fail(code)
+    measurement = cast("dict[str, object]", value)
+    if (
+        type(measurement["schema_version"]) is not int
+        or measurement["schema_version"] != 1
+        or measurement["kind"] != "arb-ml02-native-prediction-measurement"
+        or measurement["model_identity"] != model_identity
+        or measurement["stored_inference_device"] != {"kind": "cpu", "index": None}
+        or measurement["effective_inference_device"] != {"kind": "cpu", "index": None}
+        or measurement["backend"] != "cpu"
+        or measurement["status"] != "published"
+        or type(measurement["queries"]) is not int
+        or measurement["queries"] != query_count
+        or type(measurement["score_pairs"]) is not int
+        or measurement["score_pairs"] != query_count * catalog_count
+    ):
+        _fail(code)
+    for key in (
+        "synchronized_scoring_seconds",
+        "encoding_gzip_write_seconds",
+        "staging_wall_seconds",
+        "publication_wall_seconds",
+    ):
+        number = measurement[key]
+        if type(number) is not float or not math.isfinite(number) or number < 0:
+            _fail(code)
+    if cast("float", measurement["staging_wall_seconds"]) > cast(
+        "float", measurement["publication_wall_seconds"]
+    ):
+        _fail(code)
+    _verify_native_runtime(
+        measurement["runtime"],
+        plan,
+        device=DeviceSpec("cpu", None),
+        framework_version=framework_version,
+        code=code,
+    )
 
 
 def _native_variant(plan: CampaignPlan) -> dict[str, object]:
@@ -143,34 +235,13 @@ def _verify_native_fit(
         or record["source_identity"] != verified.manifest["source_identity"]
     ):
         _fail("research_campaign_native_fit_invalid")
-    runtime = record["runtime"]
-    if (
-        type(runtime) is not dict
-        or set(runtime)
-        != {
-            "framework_version",
-            "python_version",
-            "numpy_version",
-            "safetensors_version",
-            "device",
-            "torch_cuda_version",
-            "device_name",
-            "cuda_peak_allocated_bytes",
-            "cuda_peak_reserved_bytes",
-        }
-        or runtime["framework_version"] != verified.manifest["framework_version"]
-        or runtime["device"] != verified.spec.train_device.wire()
-    ):
-        _fail("research_campaign_native_fit_invalid")
-    for key in ("cuda_peak_allocated_bytes", "cuda_peak_reserved_bytes"):
-        value = runtime[key]
-        if value is not None and (type(value) is not int or value < 0):
-            _fail("research_campaign_native_fit_invalid")
-    if verified.spec.train_device.kind == "cpu" and any(
-        runtime[key] is not None
-        for key in ("device_name", "cuda_peak_allocated_bytes", "cuda_peak_reserved_bytes")
-    ):
-        _fail("research_campaign_native_fit_invalid")
+    _verify_native_runtime(
+        record["runtime"],
+        plan,
+        device=verified.spec.train_device,
+        framework_version=verified.manifest["framework_version"],
+        code="research_campaign_native_fit_invalid",
+    )
     _check_native_training(record["training"], len(verified.supported_mal_ids))
     scorer = load_native(
         artifact,
@@ -389,16 +460,10 @@ def _verify_phase(
         model_path = _phase_path(root, successes, variant, "fit")
         if model_path is None:
             _fail()
-        _, model_raw = read_json(
+        model_manifest, model_raw = read_json(
             model_path
             / ("training-manifest.json" if variant == NATIVE_VARIANT else "model-manifest.json")
         )
-        if variant == NATIVE_VARIANT and native_campaign:
-            from recsys.research.training.artifacts import verify_training_artifact
-
-            verify_training_artifact(
-                model_path, expected_identity=_digest(model_raw), inputs=inputs
-            )
         if (
             prediction["model_id"] != variant
             or prediction["config_sha256"] != hashlib.sha256(model_raw).hexdigest()
@@ -408,25 +473,24 @@ def _verify_phase(
         ):
             _fail("research_campaign_prediction_invalid")
         if variant == NATIVE_VARIANT and native_campaign:
+            from recsys.research.training.artifacts import verify_training_artifact
+
+            verified_model = verify_training_artifact(
+                model_path, expected_identity=_digest(model_raw), inputs=inputs
+            )
+            if model_manifest != verified_model.manifest:
+                _fail("research_campaign_prediction_invalid")
             measurement, _ = _read_private(
                 attempt_dir / "resources" / "measurement.json", limit=64 * 1024
             )
-            if (
-                type(measurement) is not dict
-                or measurement.get("schema_version") != 1
-                or measurement.get("kind") != "arb-ml02-native-prediction-measurement"
-                or measurement.get("model_identity") != _digest(model_raw)
-                or measurement.get("stored_inference_device") != {"kind": "cpu", "index": None}
-                or measurement.get("effective_inference_device") != {"kind": "cpu", "index": None}
-                or type(measurement.get("runtime")) is not dict
-                or measurement["runtime"].get("device") != {"kind": "cpu", "index": None}
-                or measurement.get("status") != "published"
-                or type(measurement.get("queries")) is not int
-                or type(measurement.get("score_pairs")) is not int
-                or measurement["queries"] != prediction["scores"]["rows"]
-                or measurement["score_pairs"] != measurement["queries"] * len(inputs.mal_ids)
-            ):
-                _fail("research_campaign_prediction_invalid")
+            _verify_native_prediction_measurement(
+                measurement,
+                plan,
+                model_identity=_digest(model_raw),
+                framework_version=verified_model.manifest["framework_version"],
+                query_count=prediction["scores"]["rows"],
+                catalog_count=len(inputs.mal_ids),
+            )
         return manifest_identity, prediction_identity
     else:
         from recsys.research.evaluation.compare import _evaluation
