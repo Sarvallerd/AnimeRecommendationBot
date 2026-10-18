@@ -15,7 +15,52 @@ import sys
 
 sys.argv = ["recsys", "--invalid"]
 before = set(pathlib.Path.cwd().iterdir())
-for name in ("recsys", "recsys.cli.main", "recsys.__main__", "recsys.data.sources", "recsys.data.obtain", "recsys.data.mal2020", "recsys.data.dataset", "recsys.data.metadata", "recsys.data.interactions", "recsys.data.aliases", "recsys.release.catalog", "recsys.release.build", "recsys.release.prepare", "recsys.content.glove", "recsys.contracts.bundle", "recsys.release.export", "recsys.historical.legacy_vectors", "recsys.historical.comparison", "recsys.historical.assessment", "recsys.research.protocol", "recsys.research.artifacts", "recsys.research.prepare", "recsys.research.evaluation.evaluate", "recsys.research.evaluation.compare", "recsys.research.evaluation.finalize", "recsys.research.models.package", "recsys.research.predict", "recsys.research.models.popularity", "recsys.research.training", "recsys.research.training.spec", "recsys.research.training.artifacts", "recsys.research.training.candidate", "recsys.research.training.examples", "recsys.research.training.execution", "recsys.research.training.predict", "recsys.research.training.receipts", "recsys.research.training.torch_model", "recsys.research.training.types", "recsys.research.training.worker"):
+for name in (
+    "recsys",
+    "recsys.cli.main",
+    "recsys.__main__",
+    "recsys.data.sources",
+    "recsys.data.obtain",
+    "recsys.data.mal2020",
+    "recsys.data.dataset",
+    "recsys.data.metadata",
+    "recsys.data.interactions",
+    "recsys.data.aliases",
+    "recsys.release.catalog",
+    "recsys.release.build",
+    "recsys.release.prepare",
+    "recsys.content.glove",
+    "recsys.contracts.bundle",
+    "recsys.release.export",
+    "recsys.historical.legacy_vectors",
+    "recsys.historical.comparison",
+    "recsys.historical.assessment",
+    "recsys.research.protocol",
+    "recsys.research.artifacts",
+    "recsys.research.prepare",
+    "recsys.research.evaluation.evaluate",
+    "recsys.research.evaluation.compare",
+    "recsys.research.evaluation.finalize",
+    "recsys.research.models.package",
+    "recsys.research.predict",
+    "recsys.research.models.popularity",
+    "recsys.research.campaign.spec",
+    "recsys.research.campaign.plan",
+    "recsys.research.campaign.native",
+    "recsys.research.campaign.storage",
+    "recsys.research.campaign.verification",
+    "recsys.research.training",
+    "recsys.research.training.spec",
+    "recsys.research.training.artifacts",
+    "recsys.research.training.candidate",
+    "recsys.research.training.examples",
+    "recsys.research.training.execution",
+    "recsys.research.training.predict",
+    "recsys.research.training.receipts",
+    "recsys.research.training.torch_model",
+    "recsys.research.training.types",
+    "recsys.research.training.worker",
+):
     importlib.import_module(name)
 assert set(pathlib.Path.cwd().iterdir()) == before
 assert not any(name == "numpy" or name.startswith("numpy.") for name in sys.modules)

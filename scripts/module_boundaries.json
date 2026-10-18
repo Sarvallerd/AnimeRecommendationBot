@@ -158,26 +158,6 @@
         "research_prepare"
       ]
     },
-    "research_campaign": {
-      "modules": [
-        "recsys.research.campaign",
-        "recsys.research.campaign.artifacts",
-        "recsys.research.campaign.common",
-        "recsys.research.campaign.journal",
-        "recsys.research.campaign.plan",
-        "recsys.research.campaign.report",
-        "recsys.research.campaign.runner",
-        "recsys.research.campaign.worker"
-      ],
-      "depends_on": [
-        "core",
-        "release_contract",
-        "research_support",
-        "research_model_contract",
-        "research_models",
-        "research_evaluation"
-      ]
-    },
     "research_training": {
       "modules": [
         "recsys.research.training",
@@ -196,6 +176,31 @@
         "core",
         "research_support",
         "research_model_contract"
+      ]
+    },
+    "research_campaign": {
+      "modules": [
+        "recsys.research.campaign",
+        "recsys.research.campaign.artifacts",
+        "recsys.research.campaign.common",
+        "recsys.research.campaign.journal",
+        "recsys.research.campaign.native",
+        "recsys.research.campaign.plan",
+        "recsys.research.campaign.report",
+        "recsys.research.campaign.runner",
+        "recsys.research.campaign.spec",
+        "recsys.research.campaign.storage",
+        "recsys.research.campaign.verification",
+        "recsys.research.campaign.worker"
+      ],
+      "depends_on": [
+        "core",
+        "release_contract",
+        "research_support",
+        "research_model_contract",
+        "research_models",
+        "research_evaluation",
+        "research_training"
       ]
     },
     "entrypoints": {

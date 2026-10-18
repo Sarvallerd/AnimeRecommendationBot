@@ -10,7 +10,7 @@ Telegram-бот для личных чатов на русском: поиск �
 | `src/recsys/cli/`, `src/recsys/contracts/` | Python CLI, проверка артефактов и происхождения |
 | `src/recsys/data/`, `src/recsys/content/`, `src/recsys/release/` | Источники, векторы и сборка выпуска |
 | `src/recsys/research/`, `src/recsys/historical/` | Подготовка, модели, оценка, кампания и исторические методы |
-| `src/recsys/resources/` | 12 закреплённых JSON/prompt ресурсов: реестры, протоколы, кандидаты, ожидания и lock |
+| `src/recsys/resources/` | 13 закреплённых JSON/prompt ресурсов: реестры, протоколы, кандидаты, ожидания и lock |
 | `recsys/tests/`, `contracts/`, `deploy/`, `dev/` | Тесты, межъязыковой контракт, эксплуатация и проверка окружения |
 
 Справочники: [архитектура и разработка](https://app.notion.com/p/3f03908d6b1f81a1863bee31d0e66ec9), [данные и выпуски](https://app.notion.com/p/3fb3908d6b1f8136a1dfff3c4a12108e), [исследования](https://app.notion.com/p/3fb3908d6b1f81989401e704cbc4c97b), [бот и PostgreSQL](https://app.notion.com/p/3fb3908d6b1f81d582eadb84bca22973), [эксплуатация и приёмка](https://app.notion.com/p/3fb3908d6b1f8165a819fb91f377e4b6), [архив](https://app.notion.com/p/3fb3908d6b1f81788538fd13e11401a7). Правила работы — [AGENTS.md](AGENTS.md); версия layout и исторические хеши — [migration record](docs/migrations/arb054-recsys-layout-v2.json).
@@ -33,7 +33,20 @@ python3 scripts/check_agent_setup.py
 python3 deploy/tests/level1-acceptance.py
 ```
 
-Последняя команда требует Docker: FakeTelegram, временная PostgreSQL и малые фикстуры A→B→A. Это не полная или живая приёмка. Полный ML-02 отложен; выбранной модели/N пока нет. Научные входы, результаты, секреты и локальные инструменты остаются вне Git.
+Последняя команда требует Docker: FakeTelegram, временная PostgreSQL и малые фикстуры A→B→A. Это не полная или живая приёмка. Полный запуск ML-02 выполняется отдельно после проверки инженерной кампании; выбранной модели/N пока нет. Научные входы, результаты, секреты и локальные инструменты остаются вне Git.
+
+Пакет 0.5.0 добавляет закрытый профиль `ml02-native-v2` полной validation-кампании: семь прежних CPU-моделей и предобъявленный PyTorch-кандидат. Старый профиль `ml02-cpu-v1` остаётся значением по умолчанию со своими форматами. Новый план/отчёт имеют версии 4/3, а исходный ресурс и его SHA-256 закреплены в [миграции ARB-062](docs/migrations/arb062-native-validation-campaign-v2.json). Для native training нужен отдельный `torch-cuda` environment; предсказания по полному каталогу выполняются на CPU. Перед запуском укажите физический том и проверьте условный запас 192 GiB. Это оценка для допуска, а не гарантия завершения: запись останавливается при достижении порога 24 GiB свободного места. При прерывании сохраняйте каталог кампании для проверки и возобновления.
+
+```bash
+uv sync --locked --no-editable --extra quality --extra torch-cuda
+uv run --locked --no-editable --extra quality --extra torch-cuda recsys research campaign-run \
+  --campaign ml02-native-v2 --native-train-device cuda:0 \
+  --physical-storage-root /mnt/c --prepared-dir /absolute/prepared \
+  --expected-prepared-identity sha256:... --code-revision FULL_40_HEX_SHA \
+  --glove /absolute/glove.6B.300d.txt --output-dir /absolute/new-campaign
+```
+
+Это интерфейс после новой подготовки с тем же финальным SHA исходников; прежние подготовленные артефакты другого producer использовать нельзя. Команда не открывает test labels и не выбирает N. Протокол, лимиты и статус выполнения ведутся в [исследовательском справочнике](https://app.notion.com/p/3fb3908d6b1f81989401e704cbc4c97b) и [задаче ARB-062](https://app.notion.com/p/3fd3908d6b1f81a2bd6ae0ddd6538f2c).
 
 Пакет 0.4.0 добавляет предобъявленного PyTorch-кандидата `item-seed-mean-bpr-v1` для офлайн-обучения на train-only взаимодействиях. Он принимает до десяти MAL ID нового пользователя и возвращает один ограниченный запрос; веса остаются отдельным проверяемым `safetensors`-артефактом. Это инженерная синтетическая приёмка, а не выбор модели для выпуска. Обычная установка и CPU baseline не устанавливают и не импортируют PyTorch. Выберите ровно один optional extra: `torch-cpu` или `torch-cuda` (официальные индексы и версии зафиксированы в `pyproject.toml` и `uv.lock`). Перед установкой проверьте свободное место на томе с запасом не менее 20 GiB сверх ожидаемого объёма.
 
@@ -50,7 +63,7 @@ uv run --locked --no-editable --extra quality --extra torch-cpu recsys research 
   --seed-mal-id 1 --seed-mal-id 2 --limit 5
 ```
 
-Команды возвращают путь к опубликованному `run.json`; model identity — SHA-256 байтов `model/training-manifest.json` с префиксом `sha256:`. Для CUDA training укажите `--train-device cuda:0` в отдельном окружении `--extra torch-cuda`; CPU inference доступен через `--inference-device cpu`. Для CPU-операции отдельный worker запускается с пустым `CUDA_VISIBLE_DEVICES`, не меняя окружение родительского процесса; даже с CUDA-сборкой PyTorch его внутренний оптимизатор может проверять доступность CUDA, но приложение не запрашивает CUDA и не инициализирует её. Этот режим не гарантирует отсутствия обращения к драйверу; прямой вызов native API внутри уже запущенного процесса не изолирует его окружение. Один worker имеет фиксированные пределы 300 секунд, 4 GiB наблюдаемого RSS и 64 MiB артефакта, без автоматического перехода на CPU. CUDA admission требует 2 GiB свободной VRAM. Полное ML-02, реальные данные, выбор N, публикация бота и rollout остаются отдельными задачами. Новые identities и сохранённые исторические hashes описаны в [миграции ARB-060](docs/migrations/arb060-native-pytorch-training-v1.json).
+Команды возвращают путь к опубликованному `run.json`; model identity — SHA-256 байтов `model/training-manifest.json` с префиксом `sha256:`. Для CUDA training укажите `--train-device cuda:0` в отдельном окружении `--extra torch-cuda`; CPU inference доступен через `--inference-device cpu`. Для CPU-операции отдельный worker запускается с пустым `CUDA_VISIBLE_DEVICES`, не меняя окружение родительского процесса; даже с CUDA-сборкой PyTorch его внутренний оптимизатор может проверять доступность CUDA, но приложение не запрашивает CUDA и не инициализирует её. Этот режим не гарантирует отсутствия обращения к драйверу; прямой вызов native API внутри уже запущенного процесса не изолирует его окружение. Один worker имеет фиксированные пределы 300 секунд, 4 GiB наблюдаемого RSS и 64 MiB артефакта, без автоматического перехода на CPU. CUDA admission требует 2 GiB свободной VRAM. Полный validation-запуск ML-02 уже разрешён и следует после принятия версии 0.5.0; выбор N, публикация бота и rollout остаются отдельными задачами. Новые identities и сохранённые исторические hashes описаны в [миграции ARB-060](docs/migrations/arb060-native-pytorch-training-v1.json).
 
 Пакет 0.3.0 сохраняет семь ML-02 моделей как CPU baselines. Параметр `--backend cpu` (по умолчанию) поддерживается для `research model-fit`, `predict-validation` и `campaign-run`; прежний `--backend gpu` возвращает `research_gpu_scoring_retired` без чтения входов и подготовки выходов. Команда `research gpu-preflight` также возвращает этот код и принимает прежние флаги только для диагностики. Для восстановления прежнего CuPy scoring используйте отдельный закреплённый checkout `fa983eaeeeeb41b41ac893b7de9827a40c25d27d`. Форматы новых CPU campaign plan/report — 3/2; старые артефакты не преобразуются. Точные связи версий и исходных файлов записаны в [миграции ARB-059](docs/migrations/arb059-cupy-scoring-retirement.json).
 

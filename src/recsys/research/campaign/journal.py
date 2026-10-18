@@ -7,6 +7,7 @@ been acquired and checked. All expensive scientific work runs in workers.
 from __future__ import annotations
 
 import json
+import math
 import os
 import stat
 from datetime import datetime
@@ -39,6 +40,8 @@ class CampaignEvent(TypedDict):
     output_identity: NotRequired[str | None]
     resources: NotRequired[dict[str, object] | None]
     code: NotRequired[str | None]
+    verification_resources: NotRequired[dict[str, object] | None]
+    verification_identity: NotRequired[str | None]
 
 
 type PhaseKey = tuple[str, str]
@@ -72,13 +75,14 @@ def _validated_event(value: object) -> CampaignEvent:
     for key in ("charged_seconds", "remaining_seconds"):
         if key in event and type(event[key]) not in (int, float):
             _fail()
-    for key in ("output_identity", "code"):
+    for key in ("output_identity", "verification_identity", "code"):
         if key in event and event[key] is not None and type(event[key]) is not str:
             _fail()
-    if "resources" in event and event["resources"] is not None:
-        resources = event["resources"]
-        if type(resources) is not dict or any(type(key) is not str for key in resources):
-            _fail()
+    for resource_key in ("resources", "verification_resources"):
+        if resource_key in event and event[resource_key] is not None:
+            resources = event[resource_key]
+            if type(resources) is not dict or any(type(key) is not str for key in resources):
+                _fail()
     if "resumed" in event and type(event["resumed"]) is not bool:
         _fail()
     if event["event"] in ("attempt_started", "attempt_finished", "attempt_interrupted"):
@@ -158,7 +162,9 @@ class _Journal:
         return event
 
 
-def _successes(events: list[CampaignEvent]) -> SuccessState:
+def _successes(
+    events: list[CampaignEvent], *, variants: tuple[str, ...] = VARIANTS
+) -> SuccessState:
     """Restore durable successes, charges, attempts and unresolved starts."""
     successes: dict[PhaseKey, CampaignEvent] = {}
     attempts: dict[PhaseKey, int] = {}
@@ -174,7 +180,7 @@ def _successes(events: list[CampaignEvent]) -> SuccessState:
         if event["event"] not in ("attempt_started", "attempt_finished", "attempt_interrupted"):
             continue
         key = (event["variant"], event["phase"])
-        if key[0] not in VARIANTS or key[1] not in PHASES:
+        if key[0] not in variants or key[1] not in PHASES:
             _fail()
         number = event["attempt"]
         if type(number) is not int or number < 1:
@@ -184,16 +190,27 @@ def _successes(events: list[CampaignEvent]) -> SuccessState:
                 _fail()
             attempts[key] = number
             starts[key] = event
+            failed.discard(key)
         else:
             if key not in starts or starts[key]["attempt"] != number:
                 _fail()
             starts.pop(key)
             seconds = event["charged_seconds"]
-            if type(seconds) not in (int, float) or not 0 <= seconds < CAMPAIGN_SECONDS * 2:
+            if (
+                type(seconds) not in (int, float)
+                or not math.isfinite(seconds)
+                or not 0 <= seconds < CAMPAIGN_SECONDS * 2
+            ):
                 _fail()
             charged[key] = charged.get(key, 0.0) + seconds
             if event["event"] == "attempt_finished" and event["status"] == "success":
+                if len(variants) != len(VARIANTS) and (
+                    type(event.get("verification_identity")) is not str
+                    or type(event.get("verification_resources")) is not dict
+                ):
+                    _fail("research_campaign_verification_invalid")
                 successes[key] = event
+                failed.discard(key)
             elif event["event"] == "attempt_finished":
                 failed.add(key)
     return successes, attempts, charged, starts, failed

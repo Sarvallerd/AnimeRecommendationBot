@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from test_training_artifacts import _identity, _inputs, _tiny_safetensors
 from test_training_spec import valid_spec
@@ -15,6 +16,64 @@ from recsys.research.training.spec import parse_training_spec
 
 
 class ResearchCliTests(unittest.TestCase):
+    def test_campaign_profile_flags_are_closed_and_forwarded(self) -> None:
+        parser = build_parser()
+        arguments = [
+            "research",
+            "campaign-run",
+            "--prepared-dir",
+            "prepared",
+            "--expected-prepared-identity",
+            "sha256:" + "0" * 64,
+            "--code-revision",
+            "a" * 40,
+            "--glove",
+            "glove",
+            "--output-dir",
+            "output",
+        ]
+        legacy = parser.parse_args(arguments)
+        self.assertEqual(legacy.campaign, "ml02-cpu-v1")
+        self.assertIsNone(legacy.native_train_device)
+        self.assertIsNone(legacy.physical_storage_root)
+        native = parser.parse_args(
+            [
+                *arguments,
+                "--campaign",
+                "ml02-native-v2",
+                "--native-train-device",
+                "cpu",
+                "--physical-storage-root",
+                "/mnt/c",
+            ]
+        )
+        self.assertEqual((native.campaign, native.native_train_device), ("ml02-native-v2", "cpu"))
+        with patch(
+            "recsys.research.campaign.runner.run_campaign", return_value=Path("result")
+        ) as run:
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    main(
+                        [
+                            *arguments,
+                            "--campaign",
+                            "ml02-native-v2",
+                            "--native-train-device",
+                            "cpu",
+                            "--physical-storage-root",
+                            "/mnt/c",
+                        ]
+                    ),
+                    0,
+                )
+            self.assertEqual(run.call_args.kwargs["campaign_name"], "ml02-native-v2")
+            self.assertEqual(run.call_args.kwargs["native_train_device"], "cpu")
+            self.assertEqual(run.call_args.kwargs["physical_storage_root"], Path("/mnt/c"))
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as rejected:
+                parser.parse_args([*arguments, "--campaign", "arbitrary"])
+        self.assertEqual(rejected.exception.code, 2)
+
     def test_commands_exist_without_eager_research_import(self) -> None:
         parser = build_parser()
         for command in (
