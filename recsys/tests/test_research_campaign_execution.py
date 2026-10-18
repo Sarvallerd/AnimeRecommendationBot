@@ -18,11 +18,14 @@ from typing import cast
 from unittest.mock import patch
 
 from research_model_support import patch_release_info
+from test_research_campaign_report_limits import synthetic_groups
 from test_research_model_content import _glove
 from training_support import SeedTrainingFixture
 
-from recsys.research.campaign.common import FIT_SECONDS
-from recsys.research.campaign.journal import CampaignEvent, _Journal, _successes
+from recsys.research.campaign import common
+from recsys.research.campaign.common import FIT_SECONDS, _read_native_public
+from recsys.research.campaign.journal import CampaignEvent, PhaseKey, _Journal, _successes
+from recsys.research.campaign.plan import CampaignPlan
 from recsys.research.campaign.report import validate_campaign
 from recsys.research.campaign.runner import _canonical, run_campaign
 from recsys.research.campaign.spec import CampaignName
@@ -247,6 +250,234 @@ class InterruptedRealSupervisor(ResourceSupervisor):
 
 @unittest.skipUnless(os.environ.get("ARB_TEST_TORCH") == "1", "opt-in native CPU campaign")
 class NativeCampaignExecutionTests(unittest.TestCase):
+    def test_full_shape_crosses_all_native_public_boundaries(self) -> None:
+        from recsys.research.campaign.report import _public_projection
+
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = SeedTrainingFixture(temporary)
+            root = Path(temporary)
+            glove = root / "glove.txt"
+            fixture.lock["inputs"]["embeddings"] = _glove(glove)
+            prepared, identity = fixture.make_prepared()
+            output = root / "native-large-public"
+            groups = synthetic_groups()
+
+            def complete_shape(
+                campaign_root: Path,
+                plan: CampaignPlan,
+                successes: dict[PhaseKey, CampaignEvent],
+                prepared_dir: Path,
+            ) -> dict[str, object]:
+                projection = _public_projection(campaign_root, plan, successes, prepared_dir)
+                arms = cast("list[dict[str, object]]", projection["variants"])
+                names = [cast("str", arm["variant_id"]) for arm in arms]
+                for arm in arms:
+                    arm["checked_groups"] = groups
+                projection["primary_users"] = 1000
+                projection["small_cohort_suppressed"] = False
+                projection["primary_ndcg5"] = {
+                    name: {"users": 1000, "mean_ndcg5_by_n": [0.125] * 10} for name in names
+                }
+                projection["paired_vs_popularity"] = {
+                    name: {
+                        "users": 1000,
+                        "mean_difference_by_n": [0.0] * 10,
+                        "pointwise_ci95_by_n": [[-0.01, 0.01] for _ in range(10)],
+                        "bootstrap_replicates": 2000,
+                        "bootstrap_seed": 366,
+                    }
+                    for name in names[1:]
+                }
+                return projection
+
+            def generous(path: Path) -> tuple[int, int]:
+                return path.stat().st_dev, 1 << 40
+
+            with (
+                patch_release_info(fixture.lock),
+                patch("recsys.research.resources.ResourceSupervisor", InlineSupervisor),
+                patch("recsys.research.campaign.storage._filesystem", generous),
+                patch(
+                    "recsys.research.campaign.report._public_projection",
+                    side_effect=complete_shape,
+                ),
+            ):
+                result = run_campaign(
+                    prepared,
+                    output,
+                    expected_prepared_identity=identity,
+                    code_revision="a" * 40,
+                    glove=glove,
+                    campaign_name="ml02-native-v2",
+                    native_train_device="cpu",
+                    physical_storage_root=root,
+                )
+                manifest = json.loads(result.read_text())
+                report = validate_campaign(
+                    prepared,
+                    output,
+                    expected_prepared_identity=identity,
+                    expected_campaign_identity=manifest["plan_identity"],
+                )
+                journal_path = output / "journal.jsonl"
+                complete_journal = journal_path.read_bytes()
+                journal_path.write_bytes(b"".join(complete_journal.splitlines(keepends=True)[:-1]))
+                try:
+                    with self.assertRaises(ResearchError):
+                        validate_campaign(
+                            prepared,
+                            output,
+                            expected_prepared_identity=identity,
+                            expected_campaign_identity=manifest["plan_identity"],
+                        )
+                finally:
+                    journal_path.write_bytes(complete_journal)
+            self.assertEqual(report["status"], "complete")
+            arms = cast("list[dict[str, object]]", report["variants"])
+            self.assertEqual(len(arms), 8)
+            self.assertTrue(
+                all(len(cast("list[object]", arm["checked_groups"])) == 164 for arm in arms)
+            )
+            self.assertEqual(report["primary_users"], 1000)
+            self.assertIs(report["small_cohort_suppressed"], False)
+            primary = cast("dict[str, dict[str, object]]", report["primary_ndcg5"])
+            paired = cast("dict[str, dict[str, object]]", report["paired_vs_popularity"])
+            self.assertEqual(len(primary), 8)
+            self.assertEqual(len(paired), 7)
+            self.assertTrue(
+                all(
+                    len(cast("list[float]", item["mean_ndcg5_by_n"])) == 10
+                    for item in primary.values()
+                )
+            )
+            self.assertTrue(
+                all(
+                    len(cast("list[object]", item["pointwise_ci95_by_n"])) == 10
+                    for item in paired.values()
+                )
+            )
+            generation = json.loads((output / "generation.json").read_text())["generation"]
+            projected, projection_raw = _read_native_public(
+                output / "projections" / generation / "projection.json"
+            )
+            published, report_raw = _read_native_public(output / "campaign-report.json")
+            self.assertGreater(len(projection_raw), 5_500_000)
+            self.assertLess(len(projection_raw), common.NATIVE_PUBLIC_REPORT_MAX_BYTES)
+            self.assertGreater(len(report_raw), len(projection_raw))
+            self.assertLess(len(report_raw), common.NATIVE_PUBLIC_REPORT_MAX_BYTES)
+            projected_arms = cast(
+                "list[dict[str, object]]", cast("dict[str, object]", projected)["variants"]
+            )
+            self.assertEqual(projected_arms[0]["checked_groups"], groups)
+            self.assertEqual(published, report)
+
+    def test_full_envelope_overflow_publishes_minimal_incomplete(self) -> None:
+        from recsys.research.campaign.report import _public_projection
+
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = SeedTrainingFixture(temporary)
+            root = Path(temporary)
+            glove = root / "glove.txt"
+            fixture.lock["inputs"]["embeddings"] = _glove(glove)
+            prepared, identity = fixture.make_prepared()
+            output = root / "native-envelope-overflow"
+
+            def small_cap(
+                campaign_root: Path,
+                plan: CampaignPlan,
+                successes: dict[PhaseKey, CampaignEvent],
+                prepared_dir: Path,
+            ) -> dict[str, object]:
+                projection = _public_projection(campaign_root, plan, successes, prepared_dir)
+                common.NATIVE_PUBLIC_REPORT_MAX_BYTES = len(_canonical(projection)) + 100
+                return projection
+
+            def generous(path: Path) -> tuple[int, int]:
+                return path.stat().st_dev, 1 << 40
+
+            with (
+                patch_release_info(fixture.lock),
+                patch("recsys.research.resources.ResourceSupervisor", InlineSupervisor),
+                patch("recsys.research.campaign.storage._filesystem", generous),
+                patch.object(common, "NATIVE_PUBLIC_REPORT_MAX_BYTES"),
+                patch("recsys.research.campaign.report._public_projection", side_effect=small_cap),
+            ):
+                result = run_campaign(
+                    prepared,
+                    output,
+                    expected_prepared_identity=identity,
+                    code_revision="a" * 40,
+                    glove=glove,
+                    campaign_name="ml02-native-v2",
+                    native_train_device="cpu",
+                    physical_storage_root=root,
+                )
+            manifest = json.loads(result.read_text())
+            report = json.loads((output / "campaign-report.json").read_text())
+            self.assertEqual(manifest["status"], "incomplete")
+            self.assertEqual(report["failure_code"], "research_campaign_report_invalid")
+            self.assertEqual(report["variants"], [])
+            self.assertEqual(report["primary_ndcg5"], None)
+            self.assertEqual(report["paired_vs_popularity"], None)
+            self.assertEqual(len(list(output.glob("variants/*/attempts/*/1/artifact"))), 32)
+            terminal = _Journal(output / "journal.jsonl").events[-1]
+            self.assertEqual(
+                (terminal["event"], terminal["status"]), ("campaign_finished", "incomplete")
+            )
+
+    def test_second_publication_failure_cannot_claim_complete(self) -> None:
+        from recsys.research.campaign.runner import _replace_private
+
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = SeedTrainingFixture(temporary)
+            root = Path(temporary)
+            glove = root / "glove.txt"
+            fixture.lock["inputs"]["embeddings"] = _glove(glove)
+            prepared, identity = fixture.make_prepared()
+            output = root / "native-second-rename-fails"
+            failed = False
+
+            def fail_once(path: Path, raw: bytes) -> None:
+                nonlocal failed
+                if path.name == "campaign-report-manifest.json" and not failed:
+                    failed = True
+                    raise OSError("injected second publication failure")
+                _replace_private(path, raw)
+
+            def generous(path: Path) -> tuple[int, int]:
+                return path.stat().st_dev, 1 << 40
+
+            with (
+                patch_release_info(fixture.lock),
+                patch("recsys.research.resources.ResourceSupervisor", InlineSupervisor),
+                patch("recsys.research.campaign.storage._filesystem", generous),
+                patch("recsys.research.campaign.runner._replace_private", side_effect=fail_once),
+            ):
+                result = run_campaign(
+                    prepared,
+                    output,
+                    expected_prepared_identity=identity,
+                    code_revision="a" * 40,
+                    glove=glove,
+                    campaign_name="ml02-native-v2",
+                    native_train_device="cpu",
+                    physical_storage_root=root,
+                )
+                manifest = json.loads(result.read_text())
+                report = json.loads((output / "campaign-report.json").read_text())
+                with self.assertRaises(ResearchError):
+                    validate_campaign(
+                        prepared,
+                        output,
+                        expected_prepared_identity=identity,
+                        expected_campaign_identity=manifest["plan_identity"],
+                    )
+            self.assertTrue(failed)
+            self.assertEqual(manifest["status"], "incomplete")
+            self.assertEqual(report["failure_code"], "research_campaign_report_invalid")
+            self.assertEqual(len(list(output.glob("variants/*/attempts/*/1/artifact"))), 32)
+            self.assertEqual(_Journal(output / "journal.jsonl").events[-1]["status"], "incomplete")
+
     def test_projection_storage_gate_refuses_child_and_keeps_all_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             fixture = SeedTrainingFixture(temporary)

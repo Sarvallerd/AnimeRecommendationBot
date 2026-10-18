@@ -43,6 +43,7 @@ CAMPAIGN_SECONDS = 172800.0
 
 
 RSS_LIMIT_BYTES = 8 * 1024**3
+NATIVE_PUBLIC_REPORT_MAX_BYTES = 8 * 1024 * 1024
 
 
 _SAFE_CODE = re.compile(r"research_[a-z0-9_]+\Z")
@@ -120,6 +121,42 @@ def _read_private(path: str | Path, *, limit: int = 16 * 1024 * 1024) -> tuple[o
         _fail()
     if raw != _canonical(value):
         _fail()
+    return value, raw
+
+
+def _native_public_bytes(value: object) -> bytes:
+    raw = _canonical(value)
+    if len(raw) > NATIVE_PUBLIC_REPORT_MAX_BYTES:
+        _fail("research_campaign_report_invalid")
+    return raw
+
+
+def _read_native_public(path: str | Path) -> tuple[object, bytes]:
+    path = Path(path)
+    if path.name not in {"projection.json", "campaign-report.json"}:
+        _fail("research_campaign_report_invalid")
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC)
+        with os.fdopen(fd, "rb") as source:
+            info = os.fstat(source.fileno())
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != os.getuid()
+                or stat.S_IMODE(info.st_mode) != 0o600
+                or info.st_size > NATIVE_PUBLIC_REPORT_MAX_BYTES
+            ):
+                _fail("research_campaign_report_invalid")
+            raw = source.read(NATIVE_PUBLIC_REPORT_MAX_BYTES + 1)
+    except OSError:
+        _fail("research_campaign_report_invalid")
+    if len(raw) > NATIVE_PUBLIC_REPORT_MAX_BYTES:
+        _fail("research_campaign_report_invalid")
+    try:
+        value = json.loads(raw)
+    except (ValueError, UnicodeError):
+        _fail("research_campaign_report_invalid")
+    if raw != _canonical(value):
+        _fail("research_campaign_report_invalid")
     return value, raw
 
 

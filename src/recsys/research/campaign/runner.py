@@ -28,9 +28,11 @@ from recsys.research.campaign.common import (
     _digest,
     _ensure_private,
     _fail,
+    _native_public_bytes,
     _now,
     _parse_iso,
     _private_file,
+    _read_native_public,
     _read_private,
     _replace_private,
     _sync_dir,
@@ -60,6 +62,7 @@ from recsys.research.campaign.storage import (
 )
 from recsys.research.campaign.worker import _worker_request
 from recsys.research.models.spec import require_cpu_backend
+from recsys.research.protocol import ResearchError
 from recsys.research.resources import JobHandle, ProcessResult
 
 
@@ -1359,8 +1362,8 @@ def _run_native_campaign(
                         aggregate_peak = max(aggregate_peak, peak)
                         min_output = min(min_output, out_free)
                         min_physical = min(min_physical, host_free)
-                        projected, projection_raw = _read_private(
-                            root / "projections" / generation / "projection.json", limit=256 * 1024
+                        projected, projection_raw = _read_native_public(
+                            root / "projections" / generation / "projection.json"
                         )
                         if receipt.get("operation") != "project-report" or receipt.get(
                             "projection_identity"
@@ -1434,22 +1437,69 @@ def _run_native_campaign(
                 "projection_resources": projection_resources,
             }
         )
+
+        def prepared_publication(value: dict[str, object]) -> tuple[bytes, bytes]:
+            report_bytes = _native_public_bytes(value)
+            manifest_bytes = _canonical(
+                {
+                    "schema_version": 1,
+                    "kind": "arb-ml02-campaign-report-manifest",
+                    "plan_identity": plan_identity,
+                    "status": value["status"],
+                    "report": {
+                        "bytes": len(report_bytes),
+                        "sha256": hashlib.sha256(report_bytes).hexdigest(),
+                    },
+                }
+            )
+            if len(manifest_bytes) > 4096:
+                _fail("research_campaign_report_invalid")
+            return report_bytes, manifest_bytes
+
+        def minimal_incomplete(code: str) -> dict[str, object]:
+            return {
+                "variants": [],
+                "primary_ndcg5": None,
+                "paired_vs_popularity": None,
+                "status": "incomplete",
+                "failure_code": code,
+                **{
+                    key: report[key]
+                    for key in (
+                        "schema_version",
+                        "kind",
+                        "campaign_id",
+                        "plan_identity",
+                        "prepared_identity",
+                        "diagnostics",
+                        "storage",
+                        "aggregate_peak_rss_bytes",
+                        "projection_resources",
+                    )
+                },
+            }
+
+        if report["status"] == "incomplete" and report["failure_code"] is None:
+            report = minimal_incomplete("research_campaign_report_invalid")
+        try:
+            report_raw, manifest_raw = prepared_publication(report)
+        except ResearchError:
+            report = minimal_incomplete("research_campaign_report_invalid")
+            report_raw, manifest_raw = prepared_publication(report)
+        try:
+            _replace_private(root / "campaign-report.json", report_raw)
+            _replace_private(root / "campaign-report-manifest.json", manifest_raw)
+        except Exception:
+            report = minimal_incomplete("research_campaign_report_invalid")
+            report_raw, manifest_raw = prepared_publication(report)
+            _replace_private(root / "campaign-report.json", report_raw)
+            _replace_private(root / "campaign-report-manifest.json", manifest_raw)
         journal.append(
             "campaign_finished",
             generation=generation,
             status=report["status"],
             code=report["failure_code"],
         )
-        report_raw = _canonical(report)
-        _replace_private(root / "campaign-report.json", report_raw)
-        manifest = {
-            "schema_version": 1,
-            "kind": "arb-ml02-campaign-report-manifest",
-            "plan_identity": plan_identity,
-            "status": report["status"],
-            "report": {"bytes": len(report_raw), "sha256": hashlib.sha256(report_raw).hexdigest()},
-        }
-        _replace_private(root / "campaign-report-manifest.json", _canonical(manifest))
         return root / "campaign-report-manifest.json"
     finally:
         if gate is not None:

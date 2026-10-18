@@ -25,6 +25,7 @@ from recsys.research.campaign.common import (
     _ensure_private,
     _fail,
     _private_file,
+    _read_native_public,
     _read_private,
     _touch_lock,
 )
@@ -563,7 +564,7 @@ def _check_native_report_contents(
 ) -> str:
     """Verifier-side exact public allowlist and published descriptor check."""
     allowed = _native_public_allowed(projection, plan)
-    report_value, report_raw = _read_private(root / "campaign-report.json", limit=256 * 1024)
+    report_value, report_raw = _read_native_public(root / "campaign-report.json")
     if type(report_value) is not dict:
         _fail("research_campaign_report_invalid")
     report = cast("dict[str, object]", report_value)
@@ -648,6 +649,26 @@ def _check_native_report_contents(
         "status": "complete",
         "report": {"bytes": len(report_raw), "sha256": hashlib.sha256(report_raw).hexdigest()},
     }:
+        _fail("research_campaign_report_invalid")
+    journal = _Journal(root / "journal.jsonl")
+    current_generation, _ = _read_private(root / "generation.json", limit=4096)
+    latest_run = next(
+        (event for event in reversed(journal.events) if event["event"] == "run_started"), None
+    )
+    latest_finish = next(
+        (event for event in reversed(journal.events) if event["event"] == "campaign_finished"),
+        None,
+    )
+    if (
+        type(current_generation) is not dict
+        or latest_run is None
+        or latest_finish is None
+        or latest_run.get("generation") != current_generation.get("generation")
+        or latest_finish.get("generation") != current_generation.get("generation")
+        or latest_finish["seq"] <= latest_run["seq"]
+        or latest_finish.get("status") != "complete"
+        or latest_finish.get("code") is not None
+    ):
         _fail("research_campaign_report_invalid")
     return _digest(report_raw)
 
@@ -755,7 +776,7 @@ def _validate_native_campaign(
             if result.outcome != "ok" or result.returncode != 0:
                 _fail("research_campaign_verification_failed")
         receipt, _ = _read_private(directory / "result.json", limit=4096)
-        report_value, report_raw = _read_private(root / "campaign-report.json", limit=256 * 1024)
+        report_value, report_raw = _read_native_public(root / "campaign-report.json")
         if (
             type(receipt) is not dict
             or receipt.get("operation") != "validate-report"
