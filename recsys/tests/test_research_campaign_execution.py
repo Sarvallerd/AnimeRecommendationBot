@@ -269,8 +269,25 @@ class NativeCampaignExecutionTests(unittest.TestCase):
                 prepared_dir: Path,
             ) -> dict[str, object]:
                 projection = _public_projection(campaign_root, plan, successes, prepared_dir)
-                for arm in cast("list[dict[str, object]]", projection["variants"]):
+                arms = cast("list[dict[str, object]]", projection["variants"])
+                names = [cast("str", arm["variant_id"]) for arm in arms]
+                for arm in arms:
                     arm["checked_groups"] = groups
+                projection["primary_users"] = 1000
+                projection["small_cohort_suppressed"] = False
+                projection["primary_ndcg5"] = {
+                    name: {"users": 1000, "mean_ndcg5_by_n": [0.125] * 10} for name in names
+                }
+                projection["paired_vs_popularity"] = {
+                    name: {
+                        "users": 1000,
+                        "mean_difference_by_n": [0.0] * 10,
+                        "pointwise_ci95_by_n": [[-0.01, 0.01] for _ in range(10)],
+                        "bootstrap_replicates": 2000,
+                        "bootstrap_seed": 366,
+                    }
+                    for name in names[1:]
+                }
                 return projection
 
             def generous(path: Path) -> tuple[int, int]:
@@ -321,14 +338,33 @@ class NativeCampaignExecutionTests(unittest.TestCase):
             self.assertTrue(
                 all(len(cast("list[object]", arm["checked_groups"])) == 164 for arm in arms)
             )
+            self.assertEqual(report["primary_users"], 1000)
+            self.assertIs(report["small_cohort_suppressed"], False)
+            primary = cast("dict[str, dict[str, object]]", report["primary_ndcg5"])
+            paired = cast("dict[str, dict[str, object]]", report["paired_vs_popularity"])
+            self.assertEqual(len(primary), 8)
+            self.assertEqual(len(paired), 7)
+            self.assertTrue(
+                all(
+                    len(cast("list[float]", item["mean_ndcg5_by_n"])) == 10
+                    for item in primary.values()
+                )
+            )
+            self.assertTrue(
+                all(
+                    len(cast("list[object]", item["pointwise_ci95_by_n"])) == 10
+                    for item in paired.values()
+                )
+            )
             generation = json.loads((output / "generation.json").read_text())["generation"]
             projected, projection_raw = _read_native_public(
                 output / "projections" / generation / "projection.json"
             )
             published, report_raw = _read_native_public(output / "campaign-report.json")
-            self.assertGreater(len(projection_raw), 256 * 1024)
+            self.assertGreater(len(projection_raw), 5_500_000)
             self.assertLess(len(projection_raw), common.NATIVE_PUBLIC_REPORT_MAX_BYTES)
             self.assertGreater(len(report_raw), len(projection_raw))
+            self.assertLess(len(report_raw), common.NATIVE_PUBLIC_REPORT_MAX_BYTES)
             projected_arms = cast(
                 "list[dict[str, object]]", cast("dict[str, object]", projected)["variants"]
             )
