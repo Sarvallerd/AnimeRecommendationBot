@@ -237,6 +237,8 @@ def run_campaign(
     physical_storage_root: Path | None = None,
 ) -> Path:
     """Run exactly seven fixed validation variants with durable, bounded workers."""
+    if campaign_name == "ml02-native-v2":
+        _fail("research_campaign_profile_retired")
     if campaign_name == NATIVE_CAMPAIGN:
         return _run_native_campaign(
             prepared_dir,
@@ -656,7 +658,7 @@ def _coordinator_rss_bytes() -> int:
 
 
 def _native_storage_check(
-    root: Path, plan: CampaignPlan, remaining_arms: int, *, admission: bool = True
+    root: Path, plan: CampaignPlan, remaining_arms: set[str], *, admission: bool = True
 ) -> tuple[int, int]:
     storage = plan["storage"]
     try:
@@ -669,8 +671,40 @@ def _native_storage_check(
     except OSError:
         _fail("research_campaign_storage_probe_failed")
     require_storage(
-        snapshot, required_bytes=admission_bytes(remaining_arms) if admission else STOP_BYTES
+        snapshot,
+        required_bytes=admission_bytes(remaining_arms, storage["prediction_upper_bytes"])
+        if admission
+        else STOP_BYTES,
     )
+    return snapshot.output_available_bytes, snapshot.physical_available_bytes
+
+
+def _record_storage_admission(
+    root: Path,
+    plan: CampaignPlan,
+    remaining_variants: set[str],
+    journal: _Journal,
+    generation: str,
+    plan_identity: str,
+) -> tuple[int, int]:
+    storage = plan["storage"]
+    snapshot = check_binding(
+        root,
+        Path(storage["physical_storage_root"]),
+        output_device=storage["output_filesystem_device"],
+        physical_device=storage["physical_filesystem_device"],
+    )
+    required = admission_bytes(remaining_variants, storage["prediction_upper_bytes"])
+    journal.append(
+        "storage_admission",
+        generation=generation,
+        plan_identity=plan_identity,
+        remaining_variants=sorted(remaining_variants),
+        required_bytes=required,
+        output_available_bytes=snapshot.output_available_bytes,
+        physical_available_bytes=snapshot.physical_available_bytes,
+    )
+    require_storage(snapshot, required_bytes=required)
     return snapshot.output_available_bytes, snapshot.physical_available_bytes
 
 
@@ -682,7 +716,8 @@ def _run_native_job(
     log_dir: Path,
     remaining_seconds: float,
     plan: CampaignPlan,
-    remaining_arms: int,
+    remaining_arms: set[str],
+    admission: bool = True,
     cuda_fit: bool = False,
     before_start: Callable[[], None] | None = None,
     on_start: Callable[[JobHandle], None] | None = None,
@@ -693,7 +728,7 @@ def _run_native_job(
     owner = cast("ResourceSupervisor", supervisor)
     try:
         available_output, available_physical = _native_storage_check(
-            root, plan, remaining_arms, admission=False
+            root, plan, remaining_arms, admission=admission
         )
     except Exception as error:
         code = str(error)
@@ -803,7 +838,8 @@ def _native_verify_job(
     *,
     operation: str,
     remaining_seconds: float,
-    remaining_arms: int,
+    remaining_arms: set[str],
+    admission: bool = True,
     variant: str | None = None,
     phase: str | None = None,
     attempt: int | None = None,
@@ -839,6 +875,7 @@ def _native_verify_job(
         remaining_seconds=remaining_seconds,
         plan=plan,
         remaining_arms=remaining_arms,
+        admission=admission,
         before_start=before_start,
         on_start=on_start,
     )
@@ -1100,12 +1137,8 @@ def _run_native_campaign(
             entered = True
             if resume and successes:
                 try:
-                    # Recheck every retained artifact in a bounded child. The
-                    # coordinator itself only handles small identities and receipts.
-                    remaining_arms = 8 - sum(
-                        (variant, "predict") in successes for variant in variants
-                    )
-                    _native_storage_check(root, plan, remaining_arms)
+                    # Verify retained outputs before crediting any prediction as complete.
+                    remaining_arms = set(variants)
                     receipt, result, peak, out_free, host_free = _native_verify_job(
                         supervisor,
                         root,
@@ -1119,6 +1152,7 @@ def _run_native_campaign(
                             _parse_iso(plan["deadline_utc"]) - _now()
                         ).total_seconds(),
                         remaining_arms=remaining_arms,
+                        admission=False,
                     )
                     if (
                         receipt.get("operation") != "resume-verify"
@@ -1133,6 +1167,12 @@ def _run_native_campaign(
                     journal.append(
                         "resume_verified", generation=generation, resources=_process_fields(result)
                     )
+                    remaining_arms = {
+                        variant for variant in variants if (variant, "predict") not in successes
+                    }
+                    out_free, host_free = _record_storage_admission(
+                        root, plan, remaining_arms, journal, generation, plan_identity
+                    )
                 except BaseException as error:
                     failure_code = _native_failure_code(
                         error, "research_campaign_verification_failed"
@@ -1141,9 +1181,13 @@ def _run_native_campaign(
                 if _now() >= _parse_iso(plan["deadline_utc"]):
                     failure_code = "research_campaign_wall_limit"
                     break
-                remaining_arms = 8 - sum((variant, "predict") in successes for variant in variants)
+                remaining_arms = {
+                    variant for variant in variants if (variant, "predict") not in successes
+                }
                 try:
-                    out_free, host_free = _native_storage_check(root, plan, remaining_arms)
+                    out_free, host_free = _record_storage_admission(
+                        root, plan, remaining_arms, journal, generation, plan_identity
+                    )
                     min_output, min_physical = (
                         min(min_output, out_free),
                         min(min_physical, host_free),
@@ -1357,7 +1401,7 @@ def _run_native_campaign(
                             journal,
                             operation="project-report",
                             remaining_seconds=remaining,
-                            remaining_arms=0,
+                            remaining_arms=set(),
                         )
                         aggregate_peak = max(aggregate_peak, peak)
                         min_output = min(min_output, out_free)
@@ -1409,7 +1453,7 @@ def _run_native_campaign(
         )
         report.update(
             {
-                "schema_version": 3,
+                "schema_version": 4,
                 "kind": "arb-ml02-campaign-report",
                 "campaign_id": NATIVE_CAMPAIGN,
                 "plan_identity": plan_identity,
@@ -1423,7 +1467,14 @@ def _run_native_campaign(
                 },
                 "storage": {
                     "policy": plan["storage"]["policy"]["kind"],
-                    "admission_estimate_bytes": admission_bytes(8),
+                    "catalog_count": plan["storage"]["prediction_dimensions"]["catalog_count"],
+                    "query_count": plan["storage"]["prediction_dimensions"]["query_count"],
+                    "zero_seed_queries": plan["storage"]["prediction_dimensions"][
+                        "zero_seed_queries"
+                    ],
+                    "prediction_upper_bytes": plan["storage"]["prediction_upper_bytes"],
+                    "fresh_admission_bytes": plan["storage"]["fresh_admission_bytes"],
+                    "estimated_other_bytes": plan["storage"]["policy"]["estimated_other_bytes"],
                     "minimum_output_available_bytes": min_output
                     if min_output != 2**63 - 1
                     else None,

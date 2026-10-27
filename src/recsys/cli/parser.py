@@ -233,6 +233,9 @@ def build_parser() -> argparse.ArgumentParser:
         predict_validation.add_argument(f"--{flag}", required=True)
     predict_validation.add_argument("--backend", choices=("cpu", "gpu"), default="cpu")
     predict_validation.add_argument("--measurement-output")
+    predict_validation.add_argument(
+        "--score-format", choices=("binary-v1", "jsonl-v1"), default="binary-v1"
+    )
     gpu_preflight = research_commands.add_parser(
         "gpu-preflight", help="retired GPU scoring route and historical recovery guidance"
     )
@@ -251,7 +254,9 @@ def build_parser() -> argparse.ArgumentParser:
         campaign_run.add_argument(f"--{flag}", required=True)
     campaign_run.add_argument("--backend", choices=("cpu", "gpu"), default="cpu")
     campaign_run.add_argument(
-        "--campaign", choices=("ml02-cpu-v1", "ml02-native-v2"), default="ml02-cpu-v1"
+        "--campaign",
+        choices=("ml02-cpu-v1", "ml02-native-v2", "ml02-native-v3"),
+        default="ml02-cpu-v1",
     )
     campaign_run.add_argument("--native-train-device", choices=("cpu", "cuda:0"))
     campaign_run.add_argument("--physical-storage-root")

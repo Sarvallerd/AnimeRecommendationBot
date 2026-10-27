@@ -29,6 +29,24 @@ from recsys.research.training.spec import DeviceSpec
 
 
 class CampaignSpecTests(unittest.TestCase):
+    def test_historical_native_v2_retired_before_input_or_output_access(self) -> None:
+        from recsys.research.campaign.runner import run_campaign
+
+        with patch(
+            "recsys.research.models.inputs.read_scoring_inputs",
+            side_effect=AssertionError("scientific input opened"),
+        ):
+            with self.assertRaisesRegex(ResearchError, "research_campaign_profile_retired"):
+                run_campaign(
+                    "/absent/prepared",
+                    "/absent/output",
+                    expected_prepared_identity="sha256:" + "0" * 64,
+                    code_revision="a" * 40,
+                    glove=Path("/absent/glove"),
+                    campaign_name="ml02-native-v2",
+                )
+        self.assertFalse(Path("/absent/output").exists())
+
     def test_legacy_rejects_native_only_controls_before_scientific_inputs(self) -> None:
         with patch(
             "recsys.research.models.inputs.read_scoring_inputs",
@@ -61,13 +79,13 @@ class CampaignSpecTests(unittest.TestCase):
                     glove,
                     2,
                     datetime.now(timezone.utc),
-                    campaign_name="ml02-native-v2",
+                    campaign_name="ml02-native-v3",
                     native_train_device="cpu",
                     physical_storage_root=Path(temporary),
                     output_root=output,
                 )
             _validate_plan_structure(plan)
-            self.assertEqual(plan["schema_version"], 4)
+            self.assertEqual(plan["schema_version"], 5)
             self.assertEqual(plan["execution_config_count"], 8)
             self.assertEqual(len(_expected_nodes(plan)), 32)
             self.assertEqual(plan["variants"][-1]["variant_id"], NATIVE_VARIANT)
@@ -77,6 +95,14 @@ class CampaignSpecTests(unittest.TestCase):
             )
             self.assertEqual(plan["variants"][-1]["training_spec"]["parameters"]["epochs"], 3)
             self.assertEqual(plan["storage"]["physical_storage_root"], temporary)
+            dims = plan["storage"]["prediction_dimensions"]
+            self.assertEqual(dims["catalog_count"], 21)
+            self.assertGreater(dims["query_count"], 0)
+            self.assertLessEqual(dims["zero_seed_queries"], dims["query_count"])
+            self.assertEqual(
+                plan["storage"]["fresh_admission_bytes"],
+                sum(plan["storage"]["prediction_upper_bytes"].values()) + 32 * 1024**3,
+            )
             for field, changed in (
                 ("execution_config_count", 7),
                 ("candidate_resource_identity", "sha256:" + "0" * 64),
@@ -101,16 +127,30 @@ class CampaignSpecTests(unittest.TestCase):
                     malformed["storage"]["physical_filesystem_device"] = True
                 with self.assertRaisesRegex(ResearchError, "research_campaign_plan_mismatch"):
                     _validate_plan_structure(malformed)
+            for mutation in ("catalog-bool", "too-many-zero", "wrong-upper", "wrong-admission"):
+                malformed = copy.deepcopy(plan)
+                storage = malformed["storage"]
+                if mutation == "catalog-bool":
+                    storage["prediction_dimensions"]["catalog_count"] = True
+                elif mutation == "too-many-zero":
+                    storage["prediction_dimensions"]["zero_seed_queries"] = dims["query_count"] + 1
+                elif mutation == "wrong-upper":
+                    storage["prediction_upper_bytes"]["popularity"] += 1
+                else:
+                    storage["fresh_admission_bytes"] += 1
+                with self.subTest(mutation=mutation):
+                    with self.assertRaises(ResearchError):
+                        _validate_plan_structure(malformed)
 
     def test_native_resource_binds_unchanged_parents_and_eight_arms(self) -> None:
-        raw = resource_bytes("campaigns", "research_campaign_native_v2.json")
-        self.assertEqual(len(raw), 1596)
+        raw = resource_bytes("campaigns", "research_campaign_native_v3.json")
+        self.assertEqual(len(raw), 2123)
         self.assertEqual(hashlib.sha256(raw).hexdigest(), NATIVE_RESOURCE_SHA256)
         spec, identity = native_campaign_spec()
         self.assertEqual(identity, "sha256:" + NATIVE_RESOURCE_SHA256)
         self.assertEqual(tuple(spec["arms"]), (*VARIANTS, NATIVE_VARIANT))
         self.assertEqual(campaign_variants("ml02-cpu-v1"), VARIANTS)
-        self.assertEqual(campaign_variants("ml02-native-v2"), (*VARIANTS, NATIVE_VARIANT))
+        self.assertEqual(campaign_variants("ml02-native-v3"), (*VARIANTS, NATIVE_VARIANT))
         self.assertEqual(spec["candidate_resource_identity"], candidate_identity())
         self.assertEqual(
             spec["baseline_campaign_sha256"],
@@ -124,7 +164,7 @@ class CampaignSpecTests(unittest.TestCase):
         self.assertEqual(spec["storage_policy"]["reserve_bytes"], 20 * 1024**3)
 
     def test_raw_tamper_fails_before_consumer_use(self) -> None:
-        raw = resource_bytes("campaigns", "research_campaign_native_v2.json")
+        raw = resource_bytes("campaigns", "research_campaign_native_v3.json")
         with patch("recsys.research.campaign.spec.resource_bytes", return_value=raw + b" "):
             with self.assertRaisesRegex(ResearchError, "research_campaign_spec_invalid"):
                 native_campaign_spec()

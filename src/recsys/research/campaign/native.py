@@ -278,12 +278,14 @@ def predict_native_validation(
             scorer=scorer,
             measurements=measurements,
             storage_guard=storage_guard,
+            score_format="binary-v1",
         )
         published = True
         measurements.update(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "kind": "arb-ml02-native-prediction-measurement",
+                "score_format": "arb-score-blocks-v1",
                 "model_identity": expected_model_identity,
                 "stored_inference_device": verified.spec.inference_device.wire(),
                 "effective_inference_device": scorer.runtime.device.wire(),

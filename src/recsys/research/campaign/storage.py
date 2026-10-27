@@ -9,9 +9,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from recsys.research.campaign.common import _fail
+from recsys.research.score_blocks import MAX_MANIFEST, ScoreDimensions, score_upper_bound
 
 GIB = 1024**3
-SCORE_ESTIMATE_BYTES = 20 * GIB
 OTHER_ESTIMATE_BYTES = 8 * GIB
 RESERVE_BYTES = 20 * GIB
 STOP_MARGIN_BYTES = 4 * GIB
@@ -58,10 +58,25 @@ def require_storage(snapshot: StorageSnapshot, *, required_bytes: int) -> None:
         _fail("research_campaign_storage_low")
 
 
-def admission_bytes(remaining_prediction_arms: int) -> int:
-    if type(remaining_prediction_arms) is not int or not 0 <= remaining_prediction_arms <= 8:
+def prediction_bounds(dimensions: ScoreDimensions, variants: tuple[str, ...]) -> dict[str, int]:
+    if len(variants) != 8 or len(set(variants)) != 8 or "popularity" not in variants:
         _fail("research_campaign_storage_probe_failed")
-    return remaining_prediction_arms * SCORE_ESTIMATE_BYTES + OTHER_ESTIMATE_BYTES + STOP_BYTES
+    return {
+        variant: score_upper_bound(dimensions, popularity_arm=variant == "popularity")
+        + MAX_MANIFEST
+        for variant in variants
+    }
+
+
+def admission_bytes(remaining_variants: set[str], bounds: dict[str, int]) -> int:
+    if (
+        type(remaining_variants) is not set
+        or not remaining_variants <= set(bounds)
+        or len(bounds) != 8
+        or any(type(value) is not int or value < 0 for value in bounds.values())
+    ):
+        _fail("research_campaign_storage_probe_failed")
+    return sum(bounds[name] for name in remaining_variants) + OTHER_ESTIMATE_BYTES + STOP_BYTES
 
 
 def check_binding(

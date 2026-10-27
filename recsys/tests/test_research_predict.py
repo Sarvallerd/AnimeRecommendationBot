@@ -8,7 +8,7 @@ from unittest.mock import patch
 import numpy as np
 from research_model_support import ModelFixture, patch_release_info
 
-from recsys.research.artifacts import read_json, stream_jsonl
+from recsys.research.artifacts import StreamDescriptor, read_json, stream_jsonl
 from recsys.research.evaluation.compare import compare_evaluations
 from recsys.research.evaluation.evaluate import PredictionManifest, evaluate_predictions
 from recsys.research.models.inputs import read_scoring_inputs
@@ -159,7 +159,9 @@ class PredictionTests(unittest.TestCase):
         manifest = cast(
             "PredictionManifest", manifest_value
         )  # Published by predict_validation above.
-        rows = list(stream_jsonl(first / "scores.jsonl.gz", manifest["scores"]))
+        rows = list(
+            stream_jsonl(first / "scores.jsonl.gz", cast("StreamDescriptor", manifest["scores"]))
+        )
         queries = list(
             stream_jsonl(
                 self.prepared / "development/queries.jsonl.gz", manifest["query_descriptor"]

@@ -308,7 +308,7 @@ class NativeCampaignExecutionTests(unittest.TestCase):
                     expected_prepared_identity=identity,
                     code_revision="a" * 40,
                     glove=glove,
-                    campaign_name="ml02-native-v2",
+                    campaign_name="ml02-native-v3",
                     native_train_device="cpu",
                     physical_storage_root=root,
                 )
@@ -408,7 +408,7 @@ class NativeCampaignExecutionTests(unittest.TestCase):
                     expected_prepared_identity=identity,
                     code_revision="a" * 40,
                     glove=glove,
-                    campaign_name="ml02-native-v2",
+                    campaign_name="ml02-native-v3",
                     native_train_device="cpu",
                     physical_storage_root=root,
                 )
@@ -459,7 +459,7 @@ class NativeCampaignExecutionTests(unittest.TestCase):
                     expected_prepared_identity=identity,
                     code_revision="a" * 40,
                     glove=glove,
-                    campaign_name="ml02-native-v2",
+                    campaign_name="ml02-native-v3",
                     native_train_device="cpu",
                     physical_storage_root=root,
                 )
@@ -534,7 +534,7 @@ class NativeCampaignExecutionTests(unittest.TestCase):
                     expected_prepared_identity=identity,
                     code_revision="a" * 40,
                     glove=glove,
-                    campaign_name="ml02-native-v2",
+                    campaign_name="ml02-native-v3",
                     native_train_device="cpu",
                     physical_storage_root=root,
                 )
@@ -571,7 +571,7 @@ class NativeCampaignExecutionTests(unittest.TestCase):
                     expected_prepared_identity=identity,
                     code_revision="a" * 40,
                     glove=glove,
-                    campaign_name="ml02-native-v2",
+                    campaign_name="ml02-native-v3",
                     native_train_device="cpu",
                     physical_storage_root=root,
                 )
@@ -669,7 +669,7 @@ class NativeCampaignExecutionTests(unittest.TestCase):
                             expected_prepared_identity=identity,
                             code_revision="a" * 40,
                             glove=glove,
-                            campaign_name="ml02-native-v2",
+                            campaign_name="ml02-native-v3",
                             native_train_device="cpu",
                             physical_storage_root=root,
                             resume=True,
@@ -718,7 +718,7 @@ class NativeCampaignExecutionTests(unittest.TestCase):
                             expected_prepared_identity=identity,
                             code_revision="a" * 40,
                             glove=glove,
-                            campaign_name="ml02-native-v2",
+                            campaign_name="ml02-native-v3",
                             native_train_device="cpu",
                             physical_storage_root=root,
                             resume=True,
@@ -782,7 +782,7 @@ class NativeCampaignExecutionTests(unittest.TestCase):
                     expected_prepared_identity=identity,
                     code_revision="a" * 40,
                     glove=glove,
-                    campaign_name="ml02-native-v2",
+                    campaign_name="ml02-native-v3",
                     native_train_device="cpu",
                     physical_storage_root=root,
                 )
@@ -796,9 +796,19 @@ class NativeCampaignExecutionTests(unittest.TestCase):
             first = output / "variants" / "popularity" / "attempts" / "fit" / "1"
             self.assertTrue((first / "artifact" / "model-manifest.json").is_file())
             events = _Journal(output / "journal.jsonl").events
-            self.assertEqual(events[2]["verification_spawned"], False)
-            self.assertTrue(cast("dict[str, object]", events[2]["resources"])["cleanup_complete"])
-            self.assertGreater(events[2]["charged_seconds"], 0)
+            self.assertEqual(
+                next(e for e in events if e["event"] == "attempt_finished")["verification_spawned"],
+                False,
+            )
+            self.assertTrue(
+                cast(
+                    "dict[str, object]",
+                    next(e for e in events if e["event"] == "attempt_finished")["resources"],
+                )["cleanup_complete"]
+            )
+            self.assertGreater(
+                next(e for e in events if e["event"] == "attempt_finished")["charged_seconds"], 0
+            )
             with (
                 patch_release_info(fixture.lock),
                 patch("recsys.research.resources.ResourceSupervisor", InlineSupervisor),
@@ -813,7 +823,7 @@ class NativeCampaignExecutionTests(unittest.TestCase):
                     expected_prepared_identity=identity,
                     code_revision="a" * 40,
                     glove=glove,
-                    campaign_name="ml02-native-v2",
+                    campaign_name="ml02-native-v3",
                     native_train_device="cpu",
                     physical_storage_root=root,
                     resume=True,
@@ -883,15 +893,20 @@ class NativeCampaignExecutionTests(unittest.TestCase):
                     expected_prepared_identity=identity,
                     code_revision="a" * 40,
                     glove=glove,
-                    campaign_name="ml02-native-v2",
+                    campaign_name="ml02-native-v3",
                     native_train_device="cpu",
                     physical_storage_root=root,
                 )
             manifest = json.loads(manifest_path.read_text())
             self.assertEqual(manifest["status"], "incomplete")
             events = _Journal(output / "journal.jsonl").events
-            self.assertEqual(events[2]["execution_spawned"], False)
-            self.assertGreater(events[2]["charged_seconds"], 0)
+            self.assertEqual(
+                next(e for e in events if e["event"] == "attempt_finished")["execution_spawned"],
+                False,
+            )
+            self.assertGreater(
+                next(e for e in events if e["event"] == "attempt_finished")["charged_seconds"], 0
+            )
             first = output / "variants" / "popularity" / "attempts" / "fit" / "1"
             self.assertFalse((first / "artifact").exists())
             self.assertFalse((first / "logs").exists())
@@ -909,7 +924,7 @@ class NativeCampaignExecutionTests(unittest.TestCase):
                     expected_prepared_identity=identity,
                     code_revision="a" * 40,
                     glove=glove,
-                    campaign_name="ml02-native-v2",
+                    campaign_name="ml02-native-v3",
                     native_train_device="cpu",
                     physical_storage_root=root,
                     resume=True,
@@ -944,18 +959,18 @@ class NativeCampaignExecutionTests(unittest.TestCase):
                     expected_prepared_identity=identity,
                     code_revision="a" * 40,
                     glove=glove,
-                    campaign_name="ml02-native-v2",
+                    campaign_name="ml02-native-v3",
                     native_train_device="cpu",
                     physical_storage_root=root,
                 )
             manifest = json.loads(manifest_path.read_text())
             self.assertEqual(manifest["status"], "incomplete")
             events = _Journal(output / "journal.jsonl").events
-            self.assertEqual(events[2]["event"], "attempt_interrupted")
-            execution = cast("dict[str, object]", events[2]["resources"])
+            self.assertEqual(events[3]["event"], "attempt_interrupted")
+            execution = cast("dict[str, object]", events[3]["resources"])
             self.assertTrue(execution["cleanup_complete"])
             self.assertEqual(execution["outcome"], "cancelled")
-            spent = events[2]["charged_seconds"]
+            spent = events[3]["charged_seconds"]
             self.assertGreater(spent, 0)
             self.assertFalse(
                 (
@@ -973,7 +988,7 @@ class NativeCampaignExecutionTests(unittest.TestCase):
                     expected_prepared_identity=identity,
                     code_revision="a" * 40,
                     glove=glove,
-                    campaign_name="ml02-native-v2",
+                    campaign_name="ml02-native-v3",
                     native_train_device="cpu",
                     physical_storage_root=root,
                     resume=True,
@@ -1014,7 +1029,7 @@ class NativeCampaignExecutionTests(unittest.TestCase):
                     expected_prepared_identity=identity,
                     code_revision="a" * 40,
                     glove=glove,
-                    campaign_name="ml02-native-v2",
+                    campaign_name="ml02-native-v3",
                     native_train_device="cpu",
                     physical_storage_root=root,
                 )
@@ -1060,7 +1075,7 @@ class NativeCampaignExecutionTests(unittest.TestCase):
                     expected_prepared_identity=identity,
                     code_revision="a" * 40,
                     glove=glove,
-                    campaign_name="ml02-native-v2",
+                    campaign_name="ml02-native-v3",
                     native_train_device="cpu",
                     physical_storage_root=root,
                     resume=True,
@@ -1109,7 +1124,7 @@ class NativeCampaignExecutionTests(unittest.TestCase):
                     expected_prepared_identity=identity,
                     code_revision="a" * 40,
                     glove=glove,
-                    campaign_name="ml02-native-v2",
+                    campaign_name="ml02-native-v3",
                     native_train_device="cpu",
                     physical_storage_root=root,
                 )
@@ -1129,9 +1144,15 @@ class NativeCampaignExecutionTests(unittest.TestCase):
             events = _Journal(output / "journal.jsonl").events
             self.assertEqual(
                 [event["event"] for event in events],
-                ["run_started", "attempt_started", "attempt_interrupted", "campaign_finished"],
+                [
+                    "run_started",
+                    "storage_admission",
+                    "attempt_started",
+                    "attempt_interrupted",
+                    "campaign_finished",
+                ],
             )
-            interruption = events[2]
+            interruption = events[3]
             self.assertTrue(
                 cast("dict[str, object]", interruption["resources"])["cleanup_complete"]
             )
@@ -1156,7 +1177,7 @@ class NativeCampaignExecutionTests(unittest.TestCase):
                     expected_prepared_identity=identity,
                     code_revision="a" * 40,
                     glove=glove,
-                    campaign_name="ml02-native-v2",
+                    campaign_name="ml02-native-v3",
                     native_train_device="cpu",
                     physical_storage_root=root,
                     resume=True,
@@ -1212,7 +1233,7 @@ class NativeCampaignExecutionTests(unittest.TestCase):
                         expected_prepared_identity=identity,
                         code_revision="a" * 40,
                         glove=glove,
-                        campaign_name="ml02-native-v2",
+                        campaign_name="ml02-native-v3",
                         native_train_device="cpu",
                         physical_storage_root=root,
                     )
@@ -1220,7 +1241,7 @@ class NativeCampaignExecutionTests(unittest.TestCase):
                 journal = _Journal(output / "journal.jsonl")
                 self.assertEqual(
                     [event["event"] for event in journal.events],
-                    ["run_started", "attempt_started", "campaign_finished"],
+                    ["run_started", "storage_admission", "attempt_started", "campaign_finished"],
                 )
                 journal.append(
                     "attempt_interrupted",
@@ -1249,7 +1270,7 @@ class NativeCampaignExecutionTests(unittest.TestCase):
                             expected_prepared_identity=identity,
                             code_revision="a" * 40,
                             glove=glove,
-                            campaign_name="ml02-native-v2",
+                            campaign_name="ml02-native-v3",
                             native_train_device="cpu",
                             physical_storage_root=root,
                             resume=True,
@@ -1318,7 +1339,7 @@ class NativeCampaignExecutionTests(unittest.TestCase):
                     expected_prepared_identity=identity,
                     code_revision="a" * 40,
                     glove=glove,
-                    campaign_name="ml02-native-v2",
+                    campaign_name="ml02-native-v3",
                     native_train_device="cpu",
                     physical_storage_root=root,
                 )
@@ -1336,7 +1357,7 @@ class NativeCampaignExecutionTests(unittest.TestCase):
             output = root / "native-low-space"
 
             def low_space(path: Path) -> tuple[int, int]:
-                return path.stat().st_dev, 191 * GIB
+                return path.stat().st_dev, STOP_BYTES - 1
 
             with (
                 patch_release_info(fixture.lock),
@@ -1349,7 +1370,7 @@ class NativeCampaignExecutionTests(unittest.TestCase):
                     expected_prepared_identity=identity,
                     code_revision="a" * 40,
                     glove=glove,
-                    campaign_name="ml02-native-v2",
+                    campaign_name="ml02-native-v3",
                     native_train_device="cpu",
                     physical_storage_root=root,
                 )
@@ -1358,6 +1379,28 @@ class NativeCampaignExecutionTests(unittest.TestCase):
             self.assertEqual(manifest["status"], "incomplete")
             self.assertEqual(report["failure_code"], "research_campaign_storage_low")
             self.assertFalse((output / "variants").exists())
+            admissions = [
+                event
+                for event in _Journal(output / "journal.jsonl").events
+                if event["event"] == "storage_admission"
+            ]
+            self.assertEqual(len(admissions), 1)
+            self.assertEqual(
+                admissions[0]["remaining_variants"],
+                [
+                    "content-max",
+                    "content-mean",
+                    "content-union",
+                    "hybrid",
+                    "item-seed-mean-bpr-v1",
+                    "itemknn",
+                    "popularity",
+                    "puresvd",
+                ],
+            )
+            self.assertLess(
+                admissions[0]["physical_available_bytes"], admissions[0]["required_bytes"]
+            )
 
     def test_coordinator_plus_worker_rss_stops_acceptance(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1385,7 +1428,7 @@ class NativeCampaignExecutionTests(unittest.TestCase):
                     expected_prepared_identity=identity,
                     code_revision="a" * 40,
                     glove=glove,
-                    campaign_name="ml02-native-v2",
+                    campaign_name="ml02-native-v3",
                     native_train_device="cpu",
                     physical_storage_root=root,
                 )
@@ -1431,7 +1474,7 @@ class NativeCampaignExecutionTests(unittest.TestCase):
                     expected_prepared_identity=identity,
                     code_revision="a" * 40,
                     glove=glove,
-                    campaign_name="ml02-native-v2",
+                    campaign_name="ml02-native-v3",
                     native_train_device="cpu",
                     physical_storage_root=root,
                 )
@@ -1472,7 +1515,7 @@ class NativeCampaignExecutionTests(unittest.TestCase):
                     expected_prepared_identity=identity,
                     code_revision="a" * 40,
                     glove=glove,
-                    campaign_name="ml02-native-v2",
+                    campaign_name="ml02-native-v3",
                     native_train_device="cpu",
                     physical_storage_root=root,
                     resume=True,
@@ -1557,7 +1600,7 @@ class NativeCampaignExecutionTests(unittest.TestCase):
                     expected_prepared_identity=identity,
                     code_revision="a" * 40,
                     glove=glove,
-                    campaign_name="ml02-native-v2",
+                    campaign_name="ml02-native-v3",
                     native_train_device="cpu",
                     physical_storage_root=root,
                 )

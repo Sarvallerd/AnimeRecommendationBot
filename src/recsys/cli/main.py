@@ -342,6 +342,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     expected_prepared_identity=parsed.expected_prepared_identity,
                     backend=parsed.backend,
                     measurements=measured,
+                    score_format=parsed.score_format,
                     measurement_output=Path(parsed.measurement_output)
                     if parsed.measurement_output
                     else None,

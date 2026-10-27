@@ -21,6 +21,7 @@ _RESOURCE_NAMES = {
         (
             "research_campaign_v1.json",
             "research_campaign_native_v2.json",
+            "research_campaign_native_v3.json",
             "research_seed_embedding_v1.json",
         )
     ),

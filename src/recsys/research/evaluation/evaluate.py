@@ -34,6 +34,15 @@ from recsys.research.prepare import (
     _checked_preparation_manifest,
 )
 from recsys.research.protocol import ProtocolSpec, exact, fail, finite, load_protocol, sha
+from recsys.research.score_blocks import (
+    FORMAT,
+    MAX_MANIFEST,
+    BlockScoreDescriptor,
+    DecodedScoreRow,
+    check_block_descriptor,
+    iter_score_rows,
+    require_query_binding,
+)
 
 
 class EvaluationQuery(TypedDict):
@@ -101,7 +110,8 @@ class PredictionManifest(TypedDict):
     train_stats: FileDescriptor
     code_revision: str
     zero_seed_policy: str
-    scores: StreamDescriptor
+    scores: StreamDescriptor | BlockScoreDescriptor
+    score_format: str
 
 
 class EvaluationManifest(TypedDict):
@@ -220,9 +230,19 @@ def _predictions(
     fit_identity: str,
 ) -> tuple[PredictionManifest, str]:
     path = safe_path(path, directory=True)
-    if {item.name for item in path.iterdir()} != {"prediction-manifest.json", "scores.jsonl.gz"}:
-        fail()
     value, raw = read_json(path / "prediction-manifest.json")
+    if type(value) is not dict or type(value.get("schema_version")) is not int:
+        fail("research_prediction_invalid")
+    version = value["schema_version"]
+    if version not in (1, 2):
+        fail("research_prediction_invalid")
+    if {item.name for item in path.iterdir()} != {
+        "prediction-manifest.json",
+        "scores.bin" if version == 2 else "scores.jsonl.gz",
+    }:
+        fail("research_prediction_invalid")
+    if version == 2 and len(raw) > MAX_MANIFEST:
+        fail("research_prediction_invalid")
     exact(
         value,
         {
@@ -240,12 +260,13 @@ def _predictions(
             "code_revision",
             "zero_seed_policy",
             "scores",
-        },
+        }
+        | ({"score_format"} if version == 2 else set()),
     )
     manifest = cast("PredictionManifest", value)
     if (
         type(manifest["schema_version"]) is not int
-        or manifest["schema_version"] != 1
+        or manifest["schema_version"] != version
         or manifest["kind"] != "arb-ml-predictions"
         or manifest["prepared_identity"] != prepared_identity
         or manifest["split"] != split
@@ -267,11 +288,13 @@ def _predictions(
         or re.fullmatch(r"[0-9a-f]{40}", manifest["code_revision"]) is None
         or manifest["zero_seed_policy"] != "popularity-train-positive-user-counts"
         or type(manifest["scores"]) is not dict
-        or set(manifest["scores"])
-        != {"bytes", "sha256", "rows", "uncompressed_bytes", "canonical_sha256"}
+        or (version == 2 and manifest["score_format"] != FORMAT)
     ):
         fail("research_prediction_invalid")
-    check_descriptor(manifest["scores"], stream=True)
+    if version == 2:
+        check_block_descriptor(manifest["scores"])
+    else:
+        check_descriptor(manifest["scores"], stream=True)
     check_descriptor(manifest["query_descriptor"], stream=True)
     check_descriptor(manifest["catalog_descriptor"])
     check_descriptor(manifest["train_interactions"], stream=True)
@@ -405,6 +428,15 @@ def _rank(
                 fail("research_prediction_invalid")
             if expected not in excluded and score is not None:
                 yield (-cast("float", score), expected)
+
+    return [item for _, item in nsmallest(10, candidates())]
+
+
+def _rank_binary(row: DecodedScoreRow, ids: list[int], excluded: set[int]) -> list[int]:
+    def candidates() -> Iterator[tuple[int, int]]:
+        for index, mal_id in enumerate(ids):
+            if mal_id not in excluded and row.available[index]:
+                yield (-int(row.values[index]), mal_id)
 
     return [item for _, item in nsmallest(10, candidates())]
 
@@ -567,7 +599,23 @@ def evaluate_predictions(
     label_query = _paired_rows(
         prepared_dir, prep, split, allowed, protocol=protocol, ids=set(catalog["anime"])
     )
-    score_rows = stream_jsonl(prediction_dir / "scores.jsonl.gz", prediction["scores"])
+    binary = prediction["schema_version"] == 2
+    score_rows: Iterator[object]
+    if binary:
+        score_rows = iter_score_rows(
+            prediction_dir / "scores.bin",
+            prediction["scores"],
+            expected_catalog_ids=ids,
+            expected_binding_sha256=sha(
+                canonical_bytes({k: v for k, v in prediction.items() if k != "scores"})
+            ),
+            expected_popularity=tuple(stats["items"][str(item)]["positive_users"] for item in ids),
+            popularity_arm=prediction["model_id"] == "popularity",
+        )
+    else:
+        score_rows = stream_jsonl(
+            prediction_dir / "scores.jsonl.gz", cast("StreamDescriptor", prediction["scores"])
+        )
     stage = open_stage(output_dir)
     try:
         private = StreamWriter(stage / "user-metrics.jsonl.gz")
@@ -579,10 +627,19 @@ def evaluate_predictions(
         for (query, label), row_value in zip(label_query, score_rows, strict=True):
             if test_queries is not None:
                 test_queries.write_json(query)
-            exact(row_value, {"query_id", "scores"})
-            row = cast("dict[str, object]", row_value)
-            if type(row["query_id"]) is not str or row["query_id"] != query["query_id"]:
-                fail("research_prediction_invalid")
+            if binary:
+                binary_row = cast("DecodedScoreRow", row_value)
+                require_query_binding(
+                    binary_row,
+                    query_id=query["query_id"],
+                    n=query["n"],
+                    popularity_arm=prediction["model_id"] == "popularity",
+                )
+            else:
+                exact(row_value, {"query_id", "scores"})
+                row = cast("dict[str, object]", row_value)
+                if type(row["query_id"]) is not str or row["query_id"] != query["query_id"]:
+                    fail("research_prediction_invalid")
             history, targets, seeds = (
                 set(label[key]) for key in ("history_ids", "target_ids", "seed_mal_ids")
             )
@@ -592,10 +649,14 @@ def evaluate_predictions(
             ):
                 fail()
             controlled_excluded = history - targets
-            controlled = _rank(
-                row["scores"], ids, controlled_excluded, n0=query["n"] == 0, stats=stats
-            )
-            product = _rank(row["scores"], ids, seeds, n0=query["n"] == 0, stats=stats)
+            if binary:
+                controlled = _rank_binary(binary_row, ids, controlled_excluded)
+                product = _rank_binary(binary_row, ids, seeds)
+            else:
+                controlled = _rank(
+                    row["scores"], ids, controlled_excluded, n0=query["n"] == 0, stats=stats
+                )
+                product = _rank(row["scores"], ids, seeds, n0=query["n"] == 0, stats=stats)
             for mask, ranking, relevance, excluded in (
                 ("controlled", controlled, targets, controlled_excluded),
                 ("product", product, positive - seeds, seeds),
