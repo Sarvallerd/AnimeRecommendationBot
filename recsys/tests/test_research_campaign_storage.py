@@ -13,27 +13,33 @@ from recsys.research.campaign.storage import (
     StorageSnapshot,
     admission_bytes,
     check_binding,
+    prediction_bounds,
     require_storage,
     score_write_guard,
 )
 from recsys.research.protocol import ResearchError
+from recsys.research.score_blocks import ScoreDimensions
 
 
 class CampaignStorageTests(unittest.TestCase):
     def test_conditional_admission_and_both_volumes(self) -> None:
-        self.assertEqual(admission_bytes(8), 192 * GIB)
-        self.assertEqual(admission_bytes(3), 92 * GIB)
-        self.assertEqual(admission_bytes(0), 32 * GIB)
+        variants = ("popularity", "a", "b", "c", "d", "e", "f", "g")
+        bounds = prediction_bounds(ScoreDimensions(28_955, 45_938, 0), variants)
+        self.assertEqual(bounds["popularity"], 1_906_586)
+        self.assertEqual(bounds["a"], 10_809_430_482)
+        required = admission_bytes(set(variants), bounds)
+        self.assertEqual(required, 110_027_658_328)
+        self.assertEqual(admission_bytes(set(), bounds), 32 * GIB)
         require_storage(
-            StorageSnapshot(output_available_bytes=192 * GIB, physical_available_bytes=192 * GIB),
-            required_bytes=admission_bytes(8),
+            StorageSnapshot(required, required),
+            required_bytes=required,
         )
         for snapshot in (
-            StorageSnapshot(192 * GIB - 1, 192 * GIB),
-            StorageSnapshot(192 * GIB, 192 * GIB - 1),
+            StorageSnapshot(required - 1, required),
+            StorageSnapshot(required, required - 1),
         ):
             with self.assertRaisesRegex(ResearchError, "research_campaign_storage_low"):
-                require_storage(snapshot, required_bytes=admission_bytes(8))
+                require_storage(snapshot, required_bytes=required)
 
     def test_emit_guard_checks_next_bytes_and_mount_binding(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

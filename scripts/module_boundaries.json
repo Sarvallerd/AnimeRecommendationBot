@@ -81,7 +81,8 @@
         "recsys.research",
         "recsys.research.artifacts",
         "recsys.research.protocol",
-        "recsys.research.resources"
+        "recsys.research.resources",
+        "recsys.research.score_blocks"
       ],
       "depends_on": [
         "core"

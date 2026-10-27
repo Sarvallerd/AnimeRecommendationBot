@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import IO, cast
@@ -8,13 +9,21 @@ from unittest.mock import patch
 import numpy as np
 from research_model_support import ModelFixture, patch_release_info
 
-from recsys.research.artifacts import read_json, stream_jsonl
+from recsys.research.artifacts import StreamDescriptor, read_json, stream_jsonl
 from recsys.research.evaluation.compare import compare_evaluations
 from recsys.research.evaluation.evaluate import PredictionManifest, evaluate_predictions
 from recsys.research.models.inputs import read_scoring_inputs
-from recsys.research.models.types import ScoreVector
-from recsys.research.predict import _encode_vector, _query, predict_validation
+from recsys.research.models.types import Scorer, ScoreVector, TrainItem, TrainStats
+from recsys.research.predict import (
+    PredictionModelMetadata,
+    _encode_vector,
+    _query,
+    _score_stream,
+    predict_validation,
+    prediction_dimensions,
+)
 from recsys.research.protocol import ResearchError, load_protocol
+from recsys.research.score_blocks import BlockScoreWriter, iter_score_rows
 
 
 class PredictionTests(unittest.TestCase):
@@ -159,7 +168,9 @@ class PredictionTests(unittest.TestCase):
         manifest = cast(
             "PredictionManifest", manifest_value
         )  # Published by predict_validation above.
-        rows = list(stream_jsonl(first / "scores.jsonl.gz", manifest["scores"]))
+        rows = list(
+            stream_jsonl(first / "scores.jsonl.gz", cast("StreamDescriptor", manifest["scores"]))
+        )
         queries = list(
             stream_jsonl(
                 self.prepared / "development/queries.jsonl.gz", manifest["query_descriptor"]
@@ -205,6 +216,57 @@ class PredictionTests(unittest.TestCase):
             expected_prepared_identity=self.prepared_identity,
         )
         self.assertTrue((self.fixture.root / "comparison/comparison.json").exists())
+
+    def test_binary_stream_uses_writer_popularity_without_legacy_pairs(self) -> None:
+        class ForbiddenItems(dict[str, TrainItem]):
+            def __getitem__(self, key: str) -> TrainItem:
+                raise AssertionError(f"binary stream looked up legacy popularity pair {key}")
+
+        with patch_release_info(self.fixture.lock):
+            inputs = read_scoring_inputs(
+                self.prepared, expected_prepared_identity=self.prepared_identity
+            )
+        manifest, _ = read_json(self.prepared / "prepare-manifest.json")
+        assert isinstance(manifest, dict) and isinstance(manifest["files"], dict)
+        query_desc = cast("StreamDescriptor", manifest["files"]["development/queries.jsonl.gz"])
+        dimensions = prediction_dimensions(self.prepared, query_desc, inputs.mal_ids)
+        expected_popularity = tuple(
+            inputs.train_stats["items"][str(item)]["positive_users"] for item in inputs.mal_ids
+        )
+        path = self.fixture.root / "binary-no-legacy-pairs.bin"
+        writer = BlockScoreWriter(
+            path,
+            catalog_ids=inputs.mal_ids,
+            dimensions=dimensions,
+            popularity=expected_popularity,
+            popularity_arm=True,
+            binding_sha256="a" * 64,
+        )
+        guarded_stats = cast("TrainStats", {**inputs.train_stats, "items": ForbiddenItems()})
+        guarded_inputs = replace(inputs, train_stats=guarded_stats)
+        descriptor, query_count, score_count, _, _ = _score_stream(
+            self.prepared,
+            inputs=guarded_inputs,
+            model=PredictionModelMetadata("popularity", "a" * 64, "a" * 40),
+            scorer=cast("Scorer", object()),
+            writer=writer,
+        )
+        rows = list(
+            iter_score_rows(
+                path,
+                descriptor,
+                expected_catalog_ids=inputs.mal_ids,
+                expected_binding_sha256="a" * 64,
+                expected_popularity=expected_popularity,
+                popularity_arm=True,
+            )
+        )
+        self.assertEqual(
+            (query_count, score_count), (dimensions.query_count, len(rows) * len(inputs.mal_ids))
+        )
+        self.assertEqual(len(rows), dimensions.query_count)
+        self.assertTrue(all(row.mode == "popularity" for row in rows))
+        self.assertTrue(all(tuple(row.values.tolist()) == expected_popularity for row in rows))
 
     def test_query_and_score_vector_fail_closed(self) -> None:
         valid = {

@@ -67,7 +67,8 @@ def _verify_native_prediction_measurement(
         "queries",
         "score_pairs",
         "synchronized_scoring_seconds",
-        "encoding_gzip_write_seconds",
+        "encoding_write_seconds",
+        "score_format",
         "staging_wall_seconds",
         "publication_wall_seconds",
     }
@@ -76,13 +77,14 @@ def _verify_native_prediction_measurement(
     measurement = cast("dict[str, object]", value)
     if (
         type(measurement["schema_version"]) is not int
-        or measurement["schema_version"] != 1
+        or measurement["schema_version"] != 2
         or measurement["kind"] != "arb-ml02-native-prediction-measurement"
         or measurement["model_identity"] != model_identity
         or measurement["stored_inference_device"] != {"kind": "cpu", "index": None}
         or measurement["effective_inference_device"] != {"kind": "cpu", "index": None}
         or measurement["backend"] != "cpu"
         or measurement["status"] != "published"
+        or measurement["score_format"] != "arb-score-blocks-v1"
         or type(measurement["queries"]) is not int
         or measurement["queries"] != query_count
         or type(measurement["score_pairs"]) is not int
@@ -91,7 +93,7 @@ def _verify_native_prediction_measurement(
         _fail(code)
     for key in (
         "synchronized_scoring_seconds",
-        "encoding_gzip_write_seconds",
+        "encoding_write_seconds",
         "staging_wall_seconds",
         "publication_wall_seconds",
     ):
@@ -299,7 +301,7 @@ def _read_receipt(
 ) -> WorkerReceipt:
     result, _ = _read_private(attempt_dir / "result.json", limit=4096)
     common = {
-        "schema_version": 2 if native_campaign else 1,
+        "schema_version": 3 if native_campaign else 1,
         "kind": "arb-ml02-campaign-worker-receipt",
         "phase": phase,
         "variant": variant,
@@ -358,7 +360,7 @@ def _read_receipt(
         if (
             type(request) is not dict
             or set(request) != expected_request_fields
-            or request.get("schema_version") != 2
+            or request.get("schema_version") != 3
             or request.get("kind") != "arb-ml02-campaign-worker"
             or request.get("campaign_id") != NATIVE_CAMPAIGN
             or request.get("root") != str(attempt_dir.parents[4])
@@ -468,10 +470,57 @@ def _verify_phase(
             prediction["model_id"] != variant
             or prediction["config_sha256"] != hashlib.sha256(model_raw).hexdigest()
             or prediction["code_revision"] != plan["code_revision"]
-            or file_descriptor(artifact / "scores.jsonl.gz")
+            or file_descriptor(artifact / ("scores.bin" if native_campaign else "scores.jsonl.gz"))
             != {key: prediction["scores"][key] for key in ("bytes", "sha256")}
+            or prediction["schema_version"] != (2 if native_campaign else 1)
         ):
             _fail("research_campaign_prediction_invalid")
+        if native_campaign:
+            from recsys.contracts.bundle import canonical_bytes
+            from recsys.research.artifacts import stream_jsonl
+            from recsys.research.campaign.storage import score_write_guard
+            from recsys.research.predict import _query
+            from recsys.research.protocol import load_protocol, sha
+            from recsys.research.score_blocks import iter_score_rows, require_query_binding
+
+            query_desc = plan["storage"]["prediction_dimensions"]["query_descriptor"]
+            if prediction["query_descriptor"] != query_desc:
+                _fail("research_campaign_prediction_invalid")
+            expected_popularity = tuple(
+                inputs.train_stats["items"][str(item)]["positive_users"] for item in inputs.mal_ids
+            )
+            source = stream_jsonl(prepared_dir / "development/queries.jsonl.gz", query_desc)
+            score_rows = iter_score_rows(
+                artifact / "scores.bin",
+                prediction["scores"],
+                expected_catalog_ids=inputs.mal_ids,
+                expected_binding_sha256=sha(
+                    canonical_bytes(
+                        {key: value for key, value in prediction.items() if key != "scores"}
+                    )
+                ),
+                expected_popularity=expected_popularity,
+                popularity_arm=variant == "popularity",
+                progress_guard=score_write_guard(
+                    root, Path(plan["storage"]["physical_storage_root"])
+                ),
+            )
+            seen: set[str] = set()
+            count = zero = 0
+            for query_value, row in zip(source, score_rows, strict=True):
+                query = cast("dict[str, object]", query_value)
+                seeds = _query(query_value, set(inputs.mal_ids), seen, load_protocol())
+                require_query_binding(
+                    row,
+                    query_id=cast("str", query["query_id"]),
+                    n=len(seeds),
+                    popularity_arm=variant == "popularity",
+                )
+                count += 1
+                zero += not bool(seeds)
+            dims = plan["storage"]["prediction_dimensions"]
+            if (count, zero) != (dims["query_count"], dims["zero_seed_queries"]):
+                _fail("research_campaign_prediction_invalid")
         if variant == NATIVE_VARIANT and native_campaign:
             from recsys.research.training.artifacts import verify_training_artifact
 

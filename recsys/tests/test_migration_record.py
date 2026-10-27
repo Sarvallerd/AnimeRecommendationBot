@@ -19,6 +19,7 @@ NATIVE_RECORD = ROOT / "docs/migrations/arb060-native-pytorch-training-v1.json"
 NATIVE_CAMPAIGN_RECORD = ROOT / "docs/migrations/arb062-native-validation-campaign-v2.json"
 NATIVE_REPORT_CAP_RECORD = ROOT / "docs/migrations/arb063-native-campaign-report-cap-v1.json"
 BOUNDED_EVALUATION_RECORD = ROOT / "docs/migrations/arb064-bounded-evaluation-v1.json"
+BINARY_PREDICTION_RECORD = ROOT / "docs/migrations/arb065-binary-predictions-v1.json"
 LEGACY_RECORD_SHA256 = "27dd3f274a4cee02b0d6e7cf43fa9f4fcfbfe755e04d0c43d68d6c319ced5016"
 TRAINING_RECORD_SHA256 = "9a891c85f97340713be41319aeed559285c8cab54363fb8ede1f94ad76dff221"
 LOCK = ROOT / "src/recsys/resources/releases/release_neelagiri_2025_nafiul_2026_v1.json"
@@ -31,6 +32,66 @@ F2_NATIVE_REPORT_CAP_SHA256 = "03fa9f95e786437fe139d7877ded095dcaab816bb7e31626f
 
 
 class MigrationRecordTests(unittest.TestCase):
+    def test_binary_prediction_migration_keeps_historical_bytes_and_pins_new_contract(self) -> None:
+        previous = json.loads(BOUNDED_EVALUATION_RECORD.read_bytes())
+        current = json.loads(BINARY_PREDICTION_RECORD.read_bytes())
+        self.assertEqual(current["migration_id"], "arb065-binary-predictions-v1")
+        self.assertEqual(
+            current["task_baseline_commit"], "a06e369b21f96c5d8ee37765e3116448e1d12b6e"
+        )
+        self.assertEqual(
+            current["historical_native_v2_recovery_commit"], current["task_baseline_commit"]
+        )
+        self.assertEqual(
+            (current["package_version_from"], current["package_version_to"]), ("0.5.2", __version__)
+        )
+        self.assertEqual(current["previous_source_inventory"], previous["source_inventory"])
+        self.assertEqual(current["source_inventory"], list(SOURCE_FILES))
+        self.assertEqual(len(SOURCE_FILES), 91)
+        self.assertEqual(
+            current["added_sources"],
+            ["research/score_blocks.py", "resources/campaigns/research_campaign_native_v3.json"],
+        )
+        self.assertEqual(len(current["preserved_resource_sha256"]), 13)
+        self.assertEqual(
+            current["preserved_resource_sha256"], previous["preserved_resource_sha256"]
+        )
+        for path, digest in current["preserved_resource_sha256"].items():
+            self.assertEqual(hashlib.sha256((ROOT / path).read_bytes()).hexdigest(), digest)
+        self.assertEqual(
+            current["previous_migration_sha256"],
+            {
+                str(BOUNDED_EVALUATION_RECORD.relative_to(ROOT)): hashlib.sha256(
+                    BOUNDED_EVALUATION_RECORD.read_bytes()
+                ).hexdigest()
+            },
+        )
+        resource = current["new_campaign_resource"]
+        raw = (ROOT / resource["path"]).read_bytes()
+        self.assertEqual(
+            (len(raw), hashlib.sha256(raw).hexdigest()),
+            (2123, "7e8096e2065db3e4431d3baaa862be642752ded22c98855b79e5bb846c1418f6"),
+        )
+        self.assertEqual(current["artifact_versions"]["native_v3_plan"], 5)
+        self.assertEqual(current["artifact_versions"]["native_v3_report"], 4)
+        self.assertEqual(current["artifact_versions"]["binary_prediction"], 2)
+        self.assertEqual(current["artifact_versions"]["binary_score_container"], 1)
+        self.assertEqual(current["score_format"], "arb-score-blocks-v1")
+        self.assertIs(current["scientific_profile_changed"], False)
+        self.assertIs(current["acceptance"]["full_ml02"], False)
+        for path, hashes in current["changed_producer_source_sha256"].items():
+            self.assertEqual(set(hashes), {"from", "to"})
+            self.assertNotEqual(hashes["from"], hashes["to"])
+            self.assertEqual(hashlib.sha256((ROOT / path).read_bytes()).hexdigest(), hashes["to"])
+        self.assertEqual(
+            current["new_codec_source_sha256"],
+            {
+                "src/recsys/research/score_blocks.py": hashlib.sha256(
+                    (ROOT / "src/recsys/research/score_blocks.py").read_bytes()
+                ).hexdigest()
+            },
+        )
+
     def test_native_report_cap_migration_preserves_science_and_history(self) -> None:
         previous = json.loads(NATIVE_CAMPAIGN_RECORD.read_bytes())
         current = json.loads(NATIVE_REPORT_CAP_RECORD.read_bytes())
@@ -49,7 +110,10 @@ class MigrationRecordTests(unittest.TestCase):
             ("0.5.0", "0.5.1"),
         )
         self.assertEqual(current["source_layout"], SOURCE_LAYOUT)
-        self.assertEqual(current["source_inventory"], list(SOURCE_FILES))
+        self.assertEqual(
+            current["source_inventory"],
+            json.loads(BOUNDED_EVALUATION_RECORD.read_bytes())["source_inventory"],
+        )
         self.assertEqual(len(current["source_inventory"]), 89)
         self.assertEqual(current["artifact_versions"], previous["artifact_versions"])
         self.assertEqual(
@@ -102,9 +166,7 @@ class MigrationRecordTests(unittest.TestCase):
                     ][path]["from"],
                 )
             else:
-                self.assertEqual(
-                    hashlib.sha256((ROOT / path).read_bytes()).hexdigest(), digests["to"]
-                )
+                self.assertEqual(len(digests["to"]), 64)
         self.assertEqual(
             current["acceptance"],
             {
@@ -136,11 +198,11 @@ class MigrationRecordTests(unittest.TestCase):
         )
         self.assertEqual(current["task_baseline_tree"], "505688886fecd356b70ec41e1cda8c1058a17c6e")
         self.assertEqual(
-            (current["package_version_from"], current["package_version_to"], __version__),
-            (previous["package_version_to"], "0.5.2", "0.5.2"),
+            (current["package_version_from"], current["package_version_to"]),
+            (previous["package_version_to"], "0.5.2"),
         )
         self.assertEqual(current["source_layout"], SOURCE_LAYOUT)
-        self.assertEqual(current["source_inventory"], list(SOURCE_FILES))
+        self.assertEqual(current["source_inventory"], previous["source_inventory"])
         self.assertEqual(len(current["source_inventory"]), 89)
         self.assertEqual(current["artifact_versions"], previous["artifact_versions"])
         self.assertEqual(
@@ -177,7 +239,7 @@ class MigrationRecordTests(unittest.TestCase):
         for path, digests in changed.items():
             self.assertEqual(set(digests), {"from", "to"})
             self.assertNotEqual(digests["from"], digests["to"])
-            self.assertEqual(hashlib.sha256((ROOT / path).read_bytes()).hexdigest(), digests["to"])
+            self.assertEqual(len(digests["to"]), 64)
         lock_packages = tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8"))["package"]
         third_party = [
             item for item in lock_packages if item["name"] != "anime-recommendation-recsys"
@@ -195,7 +257,7 @@ class MigrationRecordTests(unittest.TestCase):
                 for item in lock_packages
                 if item["name"] == "anime-recommendation-recsys"
             ),
-            "0.5.2",
+            __version__,
         )
 
     def test_training_record_preserves_historical_authority(self) -> None:
@@ -422,10 +484,13 @@ class MigrationRecordTests(unittest.TestCase):
         )
         self.assertEqual(current["previous_source_inventory"], previous["source_inventory"])
         self.assertEqual(len(current["previous_source_inventory"]), 84)
-        self.assertEqual(current["source_inventory"], list(SOURCE_FILES))
-        self.assertEqual(len(SOURCE_FILES), 89)
         self.assertEqual(
-            sorted(set(SOURCE_FILES) - set(previous["source_inventory"])),
+            current["source_inventory"],
+            json.loads(NATIVE_REPORT_CAP_RECORD.read_bytes())["source_inventory"],
+        )
+        self.assertEqual(len(current["source_inventory"]), 89)
+        self.assertEqual(
+            sorted(set(current["source_inventory"]) - set(previous["source_inventory"])),
             current["added_sources"],
         )
         for path, digest in current["previous_migration_sha256"].items():

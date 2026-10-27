@@ -14,7 +14,7 @@ from native_campaign_support import replace_validation_queries
 from research_model_support import patch_release_info
 from training_support import SeedTrainingFixture
 
-from recsys.research.artifacts import identity, read_json, stream_jsonl
+from recsys.research.artifacts import identity, read_json
 from recsys.research.campaign.artifacts import (
     _read_receipt,
     _verify_native_prediction_measurement,
@@ -133,18 +133,45 @@ class NativeCampaignTests(unittest.TestCase):
             self.assertTrue(guarded_emits)
             self.assertTrue(all(value >= 0 for value in guarded_emits))
             self.assertEqual(
-                (prediction / "scores.jsonl.gz").read_bytes(),
-                (score_only_output / "scores.jsonl.gz").read_bytes(),
+                (prediction / "scores.bin").read_bytes(),
+                (score_only_output / "scores.bin").read_bytes(),
             )
             manifest, _ = read_json(prediction_manifest)
             assert isinstance(manifest, dict)
             self.assertEqual(manifest["model_id"], NATIVE_VARIANT)
             self.assertEqual(manifest["config_sha256"], model_identity.removeprefix("sha256:"))
             self.assertEqual(manifest["scores"]["rows"], len(queries))
-            rows = cast(
-                "list[dict[str, object]]",
-                list(stream_jsonl(prediction / "scores.jsonl.gz", manifest["scores"])),
+            from recsys.contracts.bundle import canonical_bytes
+            from recsys.research.protocol import sha
+            from recsys.research.score_blocks import iter_score_rows
+
+            decoded = list(
+                iter_score_rows(
+                    prediction / "scores.bin",
+                    manifest["scores"],
+                    expected_catalog_ids=inputs.mal_ids,
+                    expected_binding_sha256=sha(
+                        canonical_bytes({k: v for k, v in manifest.items() if k != "scores"})
+                    ),
+                    expected_popularity=tuple(
+                        inputs.train_stats["items"][str(item)]["positive_users"]
+                        for item in inputs.mal_ids
+                    ),
+                    popularity_arm=False,
+                )
             )
+            rows = [
+                {
+                    "query_id": row.query_id,
+                    "scores": [
+                        [item, int(value) if available else None]
+                        for item, value, available in zip(
+                            inputs.mal_ids, row.values, row.available, strict=True
+                        )
+                    ],
+                }
+                for row in decoded
+            ]
             self.assertEqual([row["query_id"] for row in rows], [q["query_id"] for q in queries])
             by_case: dict[tuple[int, ...], list[list[int | None]]] = {
                 tuple(q["seed_mal_ids"]): cast("list[list[int | None]]", row["scores"])
@@ -204,7 +231,7 @@ class NativeReceiptTests(unittest.TestCase):
             _private_file(root / "campaign-plan.json", plan_raw)
             _private_file(resources / "measurement.json", _canonical({"count": 9}))
             request = {
-                "schema_version": 2,
+                "schema_version": 3,
                 "kind": "arb-ml02-campaign-worker",
                 "root": str(root),
                 "plan_identity": _digest(plan_raw),
@@ -219,13 +246,13 @@ class NativeReceiptTests(unittest.TestCase):
                 "content_model": None,
                 "svd_model": None,
                 "output_dir": str(attempt / "artifact"),
-                "campaign_id": "ml02-native-v2",
+                "campaign_id": "ml02-native-v3",
                 "request_token": "e" * 64,
             }
             request_path = attempt / "request.json"
             _private_file(request_path, _canonical(request))
             result = {
-                "schema_version": 2,
+                "schema_version": 3,
                 "kind": "arb-ml02-campaign-worker-receipt",
                 "phase": "fit",
                 "variant": NATIVE_VARIANT,
@@ -356,7 +383,7 @@ class NativeRuntimeVerificationTests(unittest.TestCase):
         plan = self._plan(framework)
         model_identity = "sha256:" + "a" * 64
         valid = {
-            "schema_version": 1,
+            "schema_version": 2,
             "kind": "arb-ml02-native-prediction-measurement",
             "model_identity": model_identity,
             "stored_inference_device": {"kind": "cpu", "index": None},
@@ -367,7 +394,8 @@ class NativeRuntimeVerificationTests(unittest.TestCase):
             "queries": 5,
             "score_pairs": 105,
             "synchronized_scoring_seconds": 0.1,
-            "encoding_gzip_write_seconds": 0.2,
+            "encoding_write_seconds": 0.2,
+            "score_format": "arb-score-blocks-v1",
             "staging_wall_seconds": 0.4,
             "publication_wall_seconds": 0.5,
         }
@@ -384,7 +412,7 @@ class NativeRuntimeVerificationTests(unittest.TestCase):
             ("backend", "gpu"),
             ("score_pairs", 104),
             ("synchronized_scoring_seconds", float("nan")),
-            ("encoding_gzip_write_seconds", -0.1),
+            ("encoding_write_seconds", -0.1),
             ("staging_wall_seconds", True),
             ("publication_wall_seconds", float("inf")),
             ("publication_wall_seconds", 0.3),

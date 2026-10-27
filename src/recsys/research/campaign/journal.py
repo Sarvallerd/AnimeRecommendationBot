@@ -44,6 +44,11 @@ class CampaignEvent(TypedDict):
     verification_identity: NotRequired[str | None]
     execution_spawned: NotRequired[bool]
     verification_spawned: NotRequired[bool]
+    plan_identity: NotRequired[str]
+    remaining_variants: NotRequired[list[str]]
+    required_bytes: NotRequired[int]
+    output_available_bytes: NotRequired[int]
+    physical_available_bytes: NotRequired[int]
 
 
 type PhaseKey = tuple[str, str]
@@ -95,6 +100,30 @@ def _validated_event(value: object) -> CampaignEvent:
                 _fail()
     if "resumed" in event and type(event["resumed"]) is not bool:
         _fail()
+    if event["event"] == "storage_admission":
+        if (
+            set(event)
+            != {
+                "seq",
+                "event",
+                "utc",
+                "generation",
+                "plan_identity",
+                "remaining_variants",
+                "required_bytes",
+                "output_available_bytes",
+                "physical_available_bytes",
+            }
+            or type(event["remaining_variants"]) is not list
+            or len(cast("list[object]", event["remaining_variants"])) > 8
+            or any(type(name) is not str for name in event["remaining_variants"])
+            or event["remaining_variants"] != sorted(set(event["remaining_variants"]))
+            or any(
+                type(event[key]) is not int or cast("int", event[key]) < 0
+                for key in ("required_bytes", "output_available_bytes", "physical_available_bytes")
+            )
+        ):
+            _fail()
     if "execution_spawned" in event or "verification_spawned" in event:
         if (
             event["event"] != "attempt_finished"

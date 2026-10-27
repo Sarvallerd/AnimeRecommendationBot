@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import NotRequired, TypedDict, cast
 
 from recsys.contracts.provenance import SOURCE_LAYOUT, source_fingerprints
-from recsys.research.artifacts import FileDescriptor
+from recsys.research.artifacts import FileDescriptor, StreamDescriptor, check_descriptor, read_json
 from recsys.research.campaign.common import (
     CAMPAIGN_SECONDS,
     EVALUATION_SECONDS,
@@ -40,6 +40,8 @@ from recsys.research.campaign.spec import (
     campaign_variants,
     native_campaign_spec,
 )
+from recsys.research.campaign.storage import admission_bytes, prediction_bounds
+from recsys.research.score_blocks import ScoreDimensions
 from recsys.research.training.candidate import load_candidate
 from recsys.research.training.spec import DeviceSpec, DeviceWire, TrainingSpecWire
 
@@ -100,6 +102,16 @@ class CampaignStorage(TypedDict):
     output_filesystem_device: int
     physical_filesystem_device: int
     policy: StoragePolicy
+    prediction_dimensions: PredictionDimensionReceipt
+    prediction_upper_bytes: dict[str, int]
+    fresh_admission_bytes: int
+
+
+class PredictionDimensionReceipt(TypedDict):
+    catalog_count: int
+    query_count: int
+    zero_seed_queries: int
+    query_descriptor: StreamDescriptor
 
 
 def _expected_nodes(plan: CampaignPlan | None = None) -> set[tuple[str, str]]:
@@ -179,9 +191,11 @@ def _plan_fields_valid(plan: dict[str, object]) -> bool:
 
 
 def _validate_plan_structure(plan: object) -> None:
-    if type(plan) is dict and plan.get("schema_version") == 4:
+    if type(plan) is dict and plan.get("schema_version") == 5:
         _validate_native_plan_structure(plan)
         return
+    if type(plan) is dict and plan.get("schema_version") == 4:
+        _fail("research_campaign_profile_retired")
     if (
         type(plan) is not dict
         or type(plan.get("schema_version")) is not int
@@ -319,6 +333,8 @@ def _plan(
         native_train_device is not None or physical_storage_root is not None
     ):
         _fail("research_campaign_profile_unsupported")
+    if campaign_name == "ml02-native-v2":
+        _fail("research_campaign_profile_retired")
     if campaign_name not in (LEGACY_CAMPAIGN, NATIVE_CAMPAIGN):
         _fail("research_campaign_profile_unsupported")
     if (
@@ -381,11 +397,20 @@ def _plan(
     }
     if campaign_name == LEGACY_CAMPAIGN:
         return legacy_plan
+    from recsys.research.predict import prediction_dimensions
+
+    prep, _ = read_json(Path(prepared_dir) / "prepare-manifest.json")
+    if type(prep) is not dict or type(prep.get("files")) is not dict:
+        _fail("research_campaign_plan_mismatch")
+    query_desc = cast("StreamDescriptor", prep["files"]["development/queries.jsonl.gz"])
+    dims = prediction_dimensions(Path(prepared_dir), query_desc, inputs.mal_ids)
     return _native_plan(
         legacy_plan,
         native_train_device=native_train_device,
         physical_storage_root=physical_storage_root,
         output_root=output_root,
+        dimensions=dims,
+        query_descriptor=query_desc,
     )
 
 
@@ -395,6 +420,8 @@ def _native_plan(
     native_train_device: NativeTrainDevice | None,
     physical_storage_root: Path | None,
     output_root: Path | None,
+    dimensions: ScoreDimensions,
+    query_descriptor: StreamDescriptor,
 ) -> CampaignPlan:
     spec, spec_identity = native_campaign_spec()
     selected = (
@@ -452,9 +479,10 @@ def _native_plan(
             "training_spec": training_spec.wire(),
         }
     )
+    upper = prediction_bounds(dimensions, campaign_variants(NATIVE_CAMPAIGN))
     return {
         **legacy_plan,
-        "schema_version": 4,
+        "schema_version": 5,
         "campaign_id": NATIVE_CAMPAIGN,
         "campaign_spec_sha256": spec_identity,
         "candidate_resource_identity": spec["candidate_resource_identity"],
@@ -467,6 +495,14 @@ def _native_plan(
             "output_filesystem_device": output_info.st_dev,
             "physical_filesystem_device": physical_info.st_dev,
             "policy": spec["storage_policy"],
+            "prediction_dimensions": {
+                "catalog_count": dimensions.catalog_count,
+                "query_count": dimensions.query_count,
+                "zero_seed_queries": dimensions.zero_seed_queries,
+                "query_descriptor": query_descriptor,
+            },
+            "prediction_upper_bytes": upper,
+            "fresh_admission_bytes": admission_bytes(set(upper), upper),
         },
     }
 
@@ -535,12 +571,39 @@ def _validate_native_plan_structure(plan: dict[str, object]) -> None:
             "output_filesystem_device",
             "physical_filesystem_device",
             "policy",
+            "prediction_dimensions",
+            "prediction_upper_bytes",
+            "fresh_admission_bytes",
         }
         or type(storage.get("physical_storage_root")) is not str
         or not Path(storage["physical_storage_root"]).is_absolute()
         or type(storage.get("output_filesystem_device")) is not int
         or type(storage.get("physical_filesystem_device")) is not int
         or storage.get("policy") != spec["storage_policy"]
+    ):
+        _fail("research_campaign_plan_mismatch")
+    dim = storage["prediction_dimensions"]
+    if (
+        type(dim) is not dict
+        or set(dim) != {"catalog_count", "query_count", "zero_seed_queries", "query_descriptor"}
+        or any(
+            type(dim[key]) is not int
+            for key in ("catalog_count", "query_count", "zero_seed_queries")
+        )
+    ):
+        _fail("research_campaign_plan_mismatch")
+    check_descriptor(dim["query_descriptor"], stream=True)
+    try:
+        dimensions = ScoreDimensions(
+            dim["catalog_count"], dim["query_count"], dim["zero_seed_queries"]
+        )
+        upper = prediction_bounds(dimensions, campaign_variants(NATIVE_CAMPAIGN))
+    except (ValueError, TypeError):
+        _fail("research_campaign_plan_mismatch")
+    if (
+        storage["prediction_upper_bytes"] != upper
+        or type(storage["fresh_admission_bytes"]) is not int
+        or storage["fresh_admission_bytes"] != admission_bytes(set(upper), upper)
     ):
         _fail("research_campaign_plan_mismatch")
     physical = Path(storage["physical_storage_root"])

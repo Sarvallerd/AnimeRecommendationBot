@@ -345,7 +345,9 @@ class EvaluateTests(unittest.TestCase):
         manifest_path = self.prediction / "prediction-manifest.json"
         original_manifest = _prediction_manifest(manifest_path)
         score_path = self.prediction / "scores.jsonl.gz"
-        original_rows = _score_rows(score_path, original_manifest["scores"])
+        original_rows = _score_rows(
+            score_path, cast("StreamDescriptor", original_manifest["scores"])
+        )
         cases: tuple[tuple[str, Callable[[list[list[int | None]]], object]], ...] = (
             ("missing", lambda scores: scores.pop()),
             ("duplicate", lambda scores: scores.__setitem__(1, scores[0])),
@@ -374,7 +376,7 @@ class EvaluateTests(unittest.TestCase):
         manifest_path = self.prediction / "prediction-manifest.json"
         manifest = _prediction_manifest(manifest_path)
         score_path = self.prediction / "scores.jsonl.gz"
-        rows = _score_rows(score_path, manifest["scores"])
+        rows = _score_rows(score_path, cast("StreamDescriptor", manifest["scores"]))
         score_path.unlink()
         writer = StreamWriter(score_path)
         for index, row in enumerate(rows):

@@ -79,7 +79,7 @@ def _validated_worker_request(value: object) -> WorkerRequest:
     if type(value) is not dict:
         _fail()
     raw = cast("dict[str, object]", value)
-    if raw.get("schema_version") == 2:
+    if raw.get("schema_version") == 3:
         wanted.update(("campaign_id", "request_token"))
     if set(raw) != wanted:
         _fail()
@@ -103,7 +103,7 @@ def _validated_worker_request(value: object) -> WorkerRequest:
         raw[field] is not None and type(raw[field]) is not str for field in optional_path_fields
     ):
         _fail()
-    if raw["schema_version"] == 2:
+    if raw["schema_version"] == 3:
         token = raw["request_token"]
         if (
             raw["campaign_id"] != NATIVE_CAMPAIGN
@@ -156,7 +156,7 @@ def _worker_request(
         "output_dir": str(artifact),
     }
     if campaign_name == NATIVE_CAMPAIGN:
-        request["schema_version"] = 2
+        request["schema_version"] = 3
         request["campaign_id"] = NATIVE_CAMPAIGN
         request["request_token"] = secrets.token_hex(32)
         request["model_dir"] = str(model_dir) if phase == "predict" and model_dir else None
@@ -335,6 +335,7 @@ def _worker_main_native(request_path: Path, request: WorkerRequest) -> int:
                 measurements=measured,
                 measurement_output=measurement_path,
                 storage_guard=bound_score_guard,
+                score_format="binary-v1",
             )
         else:
             from recsys.research.evaluation.evaluate import evaluate_predictions
@@ -352,7 +353,7 @@ def _worker_main_native(request_path: Path, request: WorkerRequest) -> int:
         if variant == NATIVE_VARIANT and phase in ("fit", "predict") and measurement is None:
             _fail("research_campaign_measurement_invalid")
         receipt = {
-            "schema_version": 2,
+            "schema_version": 3,
             "kind": "arb-ml02-campaign-worker-receipt",
             "status": "ok",
             "manifest_sha256": _digest(manifest_path.read_bytes()),
@@ -371,7 +372,7 @@ def _worker_main_native(request_path: Path, request: WorkerRequest) -> int:
         if _SAFE_CODE.fullmatch(code) is None and _TRAIN_SAFE_CODE.fullmatch(code) is None:
             code = "research_campaign_worker_failed"
         receipt = {
-            "schema_version": 2,
+            "schema_version": 3,
             "kind": "arb-ml02-campaign-worker-receipt",
             "status": "failed",
             "code": code,
@@ -397,7 +398,7 @@ def _worker_main(request_path: Path) -> int:
     """A closed phase dispatcher; acquire the shared generation lock first."""
     request_value, _ = _read_private(request_path, limit=16 * 1024)
     request = _validated_worker_request(request_value)
-    if request["schema_version"] == 2:
+    if request["schema_version"] == 3:
         return _worker_main_native(request_path, request)
     if (
         request["schema_version"] != 1
@@ -514,6 +515,7 @@ def _worker_main(request_path: Path) -> int:
                 backend=backend,
                 measurements=measured,
                 measurement_output=expected / "resources" / "measurement.json",
+                score_format="jsonl-v1",
             )
         else:
             from recsys.research.evaluation.evaluate import evaluate_predictions

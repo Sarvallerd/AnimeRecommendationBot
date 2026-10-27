@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from itertools import islice
 from pathlib import Path
 from time import perf_counter_ns
-from typing import TypedDict, cast
+from typing import Literal, TypedDict, cast
 
 from recsys.contracts.bundle import canonical_bytes
 from recsys.research.artifacts import (
@@ -40,6 +40,14 @@ from recsys.research.models.types import (
     ScoringInputs,
 )
 from recsys.research.protocol import ProtocolSpec, exact, fail, load_protocol, sha
+from recsys.research.score_blocks import (
+    FORMAT,
+    MAX_MANIFEST,
+    BlockScoreDescriptor,
+    BlockScoreWriter,
+    EncodedVector,
+    ScoreDimensions,
+)
 
 
 class PredictionQuery(TypedDict):
@@ -145,7 +153,7 @@ def _query(query: object, ids: set[int], seen: set[str], protocol: ProtocolSpec)
     return tuple(seeds)
 
 
-def _encode_vector(vector: object, n: int, ids: tuple[int, ...]) -> EncodedScores:
+def _checked_vector(vector: object, n: int, ids: tuple[int, ...]) -> EncodedVector:
     import numpy as np
 
     if (
@@ -164,9 +172,16 @@ def _encode_vector(vector: object, n: int, ids: tuple[int, ...]) -> EncodedScore
     scaled = np.rint(vector.values * 1_000_000_000)
     if not np.isfinite(scaled).all() or np.any(np.abs(scaled[vector.available]) > 2**53):
         fail("research_prediction_invalid")
+    scaled[~vector.available] = 0
+    values = scaled.astype(np.int64)
+    return EncodedVector(values, vector.available)
+
+
+def _encode_vector(vector: object, n: int, ids: tuple[int, ...]) -> EncodedScores:
+    checked = _checked_vector(vector, n, ids)
     return [
         [item, int(value) if available else None]
-        for item, value, available in zip(ids, scaled, vector.available, strict=True)
+        for item, value, available in zip(ids, checked.values, checked.available, strict=True)
     ]
 
 
@@ -189,8 +204,8 @@ def _score_stream(
     inputs: ScoringInputs,
     model: PredictionModelMetadata,
     scorer: Scorer,
-    writer: GzipOneWriter,
-) -> tuple[StreamDescriptor, int, int, int, int]:
+    writer: GzipOneWriter | BlockScoreWriter,
+) -> tuple[StreamDescriptor | BlockScoreDescriptor, int, int, int, int]:
     prep, _ = read_json(prepared_dir / "prepare-manifest.json")
     if not isinstance(prep, dict) or not isinstance(prep.get("files"), dict):
         fail("research_prediction_invalid")
@@ -198,7 +213,11 @@ def _score_stream(
     ids = inputs.mal_ids
     id_set = set(ids)
     protocol = load_protocol()
-    popularity = [[item, inputs.train_stats["items"][str(item)]["positive_users"]] for item in ids]
+    legacy_popularity: EncodedScores | None = None
+    if isinstance(writer, GzipOneWriter):
+        legacy_popularity = [
+            [item, inputs.train_stats["items"][str(item)]["positive_users"]] for item in ids
+        ]
     seen: set[str] = set()
     source = stream_jsonl(prepared_dir / "development/queries.jsonl.gz", query_desc)
     validated = (
@@ -212,17 +231,40 @@ def _score_stream(
         scoring_ns += perf_counter_ns() - tick
         for query, seeds in block:
             tick = perf_counter_ns()
-            scores = (
-                popularity
-                if not seeds or model.variant_id == "popularity"
-                else _encode_vector(next(scored), len(seeds), ids)
-            )
-            writer.write_json({"query_id": query["query_id"], "scores": scores})
+            if isinstance(writer, BlockScoreWriter):
+                vector = (
+                    None
+                    if not seeds or model.variant_id == "popularity"
+                    else _checked_vector(next(scored), len(seeds), ids)
+                )
+                writer.write_query(query["query_id"], len(seeds), vector)
+            else:
+                assert legacy_popularity is not None
+                scores = (
+                    legacy_popularity
+                    if not seeds or model.variant_id == "popularity"
+                    else _encode_vector(next(scored), len(seeds), ids)
+                )
+                writer.write_json({"query_id": query["query_id"], "scores": scores})
             writing_ns += perf_counter_ns() - tick
             query_count += 1
-            score_count += len(scores)
+            score_count += len(ids)
     scores_desc = writer.close()
     return scores_desc, query_count, score_count, scoring_ns, writing_ns
+
+
+def prediction_dimensions(
+    prepared_dir: Path, query_desc: StreamDescriptor, ids: tuple[int, ...]
+) -> ScoreDimensions:
+    protocol = load_protocol()
+    seen: set[str] = set()
+    id_set = set(ids)
+    queries = zero = 0
+    for value in stream_jsonl(prepared_dir / "development/queries.jsonl.gz", query_desc):
+        seeds = _query(value, id_set, seen, protocol)
+        queries += 1
+        zero += not bool(seeds)
+    return ScoreDimensions(len(ids), queries, zero)
 
 
 def _measurement_target(
@@ -254,9 +296,10 @@ def _write_validation_scores(
     storage_guard: Callable[[int], None] | None,
     start: int,
     info: dict[str, object],
+    score_format: Literal["binary-v1", "jsonl-v1"],
 ) -> Path:
     stage: Path | None = None
-    writer: GzipOneWriter | None = None
+    writer: GzipOneWriter | BlockScoreWriter | None = None
     published = False
     query_count = score_count = 0
     try:
@@ -264,14 +307,8 @@ def _write_validation_scores(
         if not isinstance(prep, dict) or not isinstance(prep.get("files"), dict):
             fail("research_prediction_invalid")
         query_desc = cast("StreamDescriptor", prep["files"]["development/queries.jsonl.gz"])
-        stage = open_stage(output_dir)
-        writer = GzipOneWriter(stage / "scores.jsonl.gz", storage_guard)
-        scores_desc, query_count, score_count, scoring_ns, writing_ns = _score_stream(
-            prepared_dir, inputs=inputs, model=model, scorer=scorer, writer=writer
-        )
-        writer = None
-        manifest = {
-            "schema_version": 1,
+        manifest: dict[str, object] = {
+            "schema_version": 2 if score_format == "binary-v1" else 1,
             "kind": "arb-ml-predictions",
             "prepared_identity": inputs.prepared_identity,
             "query_descriptor": query_desc,
@@ -284,15 +321,45 @@ def _write_validation_scores(
             "train_stats": inputs.train_stats_descriptor,
             "code_revision": model.code_revision,
             "zero_seed_policy": "popularity-train-positive-user-counts",
-            "scores": scores_desc,
         }
+        if score_format == "binary-v1":
+            manifest["score_format"] = FORMAT
+            dimensions = prediction_dimensions(prepared_dir, query_desc, inputs.mal_ids)
+            popularity_values = tuple(
+                inputs.train_stats["items"][str(item)]["positive_users"] for item in inputs.mal_ids
+            )
+        stage = open_stage(output_dir)
+        if score_format == "binary-v1":
+            writer = BlockScoreWriter(
+                stage / "scores.bin",
+                catalog_ids=inputs.mal_ids,
+                dimensions=dimensions,
+                popularity=popularity_values,
+                popularity_arm=model.variant_id == "popularity",
+                binding_sha256=sha(canonical_bytes(manifest)),
+                storage_guard=storage_guard,
+            )
+        else:
+            writer = GzipOneWriter(stage / "scores.jsonl.gz", storage_guard)
+        scores_desc, query_count, score_count, scoring_ns, writing_ns = _score_stream(
+            prepared_dir, inputs=inputs, model=model, scorer=scorer, writer=writer
+        )
+        writer = None
+        manifest["scores"] = scores_desc
+        manifest_raw = canonical_bytes(manifest)
+        if score_format == "binary-v1" and len(manifest_raw) > MAX_MANIFEST:
+            fail("research_resource_limit")
+        if storage_guard is not None:
+            storage_guard(len(manifest_raw))
         write_json(stage / "prediction-manifest.json", manifest)
         info.update(
             {
                 "queries": query_count,
                 "score_pairs": score_count,
                 "synchronized_scoring_seconds": scoring_ns / 1e9,
-                "encoding_gzip_write_seconds": writing_ns / 1e9,
+                "encoding_write_seconds"
+                if score_format == "binary-v1"
+                else "encoding_gzip_write_seconds": writing_ns / 1e9,
                 "staging_wall_seconds": (perf_counter_ns() - start) / 1e9,
             }
         )
@@ -336,6 +403,7 @@ def write_validation_scores(
     measurements: dict[str, object] | None = None,
     measurement_output: Path | None = None,
     storage_guard: Callable[[int], None] | None = None,
+    score_format: Literal["binary-v1", "jsonl-v1"] = "binary-v1",
 ) -> Path:
     """Publish one verified scorer's full validation stream with the frozen encoder."""
     separate(prepared_dir, output_dir)
@@ -343,6 +411,8 @@ def write_validation_scores(
     if measurements is not None and (type(measurements) is not dict or measurements):
         fail("research_prediction_invalid")
     if model.variant_id == "" or len(model.config_sha256) != 64:
+        fail("research_prediction_invalid")
+    if score_format not in ("binary-v1", "jsonl-v1"):
         fail("research_prediction_invalid")
     start = perf_counter_ns()
     return _write_validation_scores(
@@ -356,6 +426,7 @@ def write_validation_scores(
         storage_guard=storage_guard,
         start=start,
         info={"backend": "cpu"},
+        score_format=score_format,
     )
 
 
@@ -369,8 +440,11 @@ def predict_validation(
     measurements: dict[str, object] | None = None,
     measurement_output: str | Path | None = None,
     storage_guard: Callable[[int], None] | None = None,
+    score_format: Literal["binary-v1", "jsonl-v1"] = "binary-v1",
 ) -> Path:
     require_cpu_backend(backend)
+    if score_format not in ("binary-v1", "jsonl-v1"):
+        fail("research_prediction_invalid")
     prepared_dir, model_dir, output_dir = map(Path, (prepared_dir, model_dir, output_dir))
     separate(prepared_dir, model_dir, output_dir)
     measurement_path = Path(measurement_output) if measurement_output is not None else None
@@ -409,6 +483,7 @@ def predict_validation(
             storage_guard=storage_guard,
             start=start,
             info=info,
+            score_format=score_format,
         )
     except BaseException:
         if not entered_writer:

@@ -10,7 +10,7 @@ Telegram-бот для личных чатов на русском: поиск �
 | `src/recsys/cli/`, `src/recsys/contracts/` | Python CLI, проверка артефактов и происхождения |
 | `src/recsys/data/`, `src/recsys/content/`, `src/recsys/release/` | Источники, векторы и сборка выпуска |
 | `src/recsys/research/`, `src/recsys/historical/` | Подготовка, модели, оценка, кампания и исторические методы |
-| `src/recsys/resources/` | 13 закреплённых JSON/prompt ресурсов: реестры, протоколы, кандидаты, ожидания и lock |
+| `src/recsys/resources/` | 14 закреплённых JSON/prompt ресурсов: реестры, протоколы, кандидаты, ожидания и lock |
 | `recsys/tests/`, `contracts/`, `deploy/`, `dev/` | Тесты, межъязыковой контракт, эксплуатация и проверка окружения |
 
 Справочники: [архитектура и разработка](https://app.notion.com/p/3f03908d6b1f81a1863bee31d0e66ec9), [данные и выпуски](https://app.notion.com/p/3fb3908d6b1f8136a1dfff3c4a12108e), [исследования](https://app.notion.com/p/3fb3908d6b1f81989401e704cbc4c97b), [бот и PostgreSQL](https://app.notion.com/p/3fb3908d6b1f81d582eadb84bca22973), [эксплуатация и приёмка](https://app.notion.com/p/3fb3908d6b1f8165a819fb91f377e4b6), [архив](https://app.notion.com/p/3fb3908d6b1f81788538fd13e11401a7). Правила работы — [AGENTS.md](AGENTS.md); версия layout и исторические хеши — [migration record](docs/migrations/arb054-recsys-layout-v2.json).
@@ -27,7 +27,7 @@ UV_PROJECT_ENVIRONMENT=.tools/lint-venv uv run --locked --only-group lint ruff c
 UV_PROJECT_ENVIRONMENT=.tools/lint-venv uv run --locked --only-group lint ruff format --check .
 UV_PROJECT_ENVIRONMENT=.tools/typing-venv uv sync --locked --no-install-project --no-default-groups --group typing --extra quality --extra torch-cpu
 UV_PROJECT_ENVIRONMENT=.tools/typing-venv uv run --locked --no-sync python -m mypy
-uv run --locked --no-editable --extra quality python -m unittest discover -s recsys/tests -p 'test_*.py'
+ARB_TEST_TORCH=1 uv run --locked --no-editable --extra quality --extra torch-cpu python -m unittest discover -s recsys/tests -p 'test_*.py'
 cargo test --locked
 python3 scripts/check_agent_setup.py
 python3 deploy/tests/level1-acceptance.py
@@ -35,22 +35,26 @@ python3 deploy/tests/level1-acceptance.py
 
 Последняя команда требует Docker: FakeTelegram, временная PostgreSQL и малые фикстуры A→B→A. Это не полная или живая приёмка. Полный запуск ML-02 выполняется отдельно после проверки инженерной кампании; выбранной модели/N пока нет. Научные входы, результаты, секреты и локальные инструменты остаются вне Git.
 
-Пакет 0.5.2 ускоряет validation evaluator на полном каталоге: проверка принадлежности MAL ID использует множество, а ранжирование выбирает десять лучших кандидатов после полной проверки вектора. На синтетических данных медиана полной оценки при C=28 955 и Q=41 снизилась с 1,882625 до 1,438217 с (в 1,31 раза быстрее); при C=21 и Q=1740 выросла с 0,559213 до 0,574044 с (на 2,65% медленнее). Это два чередующихся повтора для каждого сценария; они не доказывают завершение полной кампании ML-02 в прежнем часовом лимите. Маски, метрики, порядок ранжирования, форматы артефактов и лимиты кампании сохранены. Новый producer SHA требует свежей подготовки и нового запуска; результаты прежнего producer нельзя возобновлять под новой версией. Полное сравнение качества и выбор N пока не завершены. Связь с предыдущими байтами и версиями закреплена в [миграции ARB-064](docs/migrations/arb064-bounded-evaluation-v1.json).
+Пакет 0.6.0 записывает валидационные прогнозы по умолчанию в lossless `scores.bin` (`arb-score-blocks-v1`, prediction schema 2). Один popularity-вектор применяется ко всем нулевым seed-запросам и popularity arm, а signed int64 и bitmap сохраняют точные баллы и отличие null от нуля. `research predict-validation --score-format jsonl-v1` выбирает прежний JSONL; исходный `ml02-cpu-v1` остаётся семивариантным JSONL-профилем. Новый восьмивариантный `ml02-native-v3` использует бинарный формат; исторический `ml02-native-v2` требует checkout `a06e369b21f96c5d8ee37765e3116448e1d12b6e` и не возобновляется в новом producer. Новый план, отчёт и предсказание имеют версии 5, 4 и 2. Fresh admission вычисляется из проверенных C/Q/Q0 и верхней границы байтов каждого варианта с запасом 20 GiB, margin 4 GiB и условной оценкой 8 GiB прочих артефактов. Проверяются оба тома и stop 24 GiB; это не гарантия завершения. Формат, формула, границы и синтетический benchmark описаны в [score blocks v1](docs/score-blocks-v1.md), происхождение — в [миграции ARB-065](docs/migrations/arb065-binary-predictions-v1.json). Full ML-02 quality и выбор N пока не завершены.
 
-Пакет 0.5.1 допустил до 8 MiB для публичной проекции и отчёта `ml02-native-v2`, включая полный проверяемый envelope. Научные форматы и лимиты вычислений не изменились; историческое изменение закреплено в [миграции ARB-063](docs/migrations/arb063-native-campaign-report-cap-v1.json).
-
-Пакет 0.5.0 добавляет закрытый профиль `ml02-native-v2` полной validation-кампании: семь прежних CPU-моделей и предобъявленный PyTorch-кандидат. Старый профиль `ml02-cpu-v1` остаётся значением по умолчанию со своими форматами. Новый план/отчёт имеют версии 4/3, а исходный ресурс и его SHA-256 закреплены в [миграции ARB-062](docs/migrations/arb062-native-validation-campaign-v2.json). Для native training нужен отдельный `torch-cuda` environment; предсказания по полному каталогу выполняются на CPU. Перед запуском укажите физический том и проверьте условный запас 192 GiB. Это оценка для допуска, а не гарантия завершения: запись останавливается при достижении порога 24 GiB свободного места. При прерывании сохраняйте каталог кампании для проверки и возобновления.
+Для нового native-запуска подготовьте данные новым producer, установите ровно один PyTorch extra (ниже показан CUDA) и задайте физический том. Admission вычисляется для конкретных размеров подготовленных данных и оставшихся вариантов; прежняя фиксированная оценка 192 GiB к этому профилю не относится.
 
 ```bash
 uv sync --locked --no-editable --extra quality --extra torch-cuda
 uv run --locked --no-editable --extra quality --extra torch-cuda recsys research campaign-run \
-  --campaign ml02-native-v2 --native-train-device cuda:0 \
+  --campaign ml02-native-v3 --native-train-device cuda:0 \
   --physical-storage-root /mnt/c --prepared-dir /absolute/prepared \
   --expected-prepared-identity sha256:... --code-revision FULL_40_HEX_SHA \
   --glove /absolute/glove.6B.300d.txt --output-dir /absolute/new-campaign
 ```
 
-Это интерфейс после новой подготовки с тем же финальным SHA исходников; прежние подготовленные артефакты другого producer использовать нельзя. Команда не открывает test labels и не выбирает N. Протокол, лимиты и статус выполнения ведутся в [исследовательском справочнике](https://app.notion.com/p/3fb3908d6b1f81989401e704cbc4c97b) и [задаче ARB-062](https://app.notion.com/p/3fd3908d6b1f81a2bd6ae0ddd6538f2c).
+Команда не открывает test labels и не выбирает N. Протокол, лимиты и статус выполнения ведутся в [исследовательском справочнике](https://app.notion.com/p/3fb3908d6b1f81989401e704cbc4c97b) и [задаче ARB-065](https://app.notion.com/p/4063908d6b1f811581a7c93b9469ba3a).
+
+Пакет 0.5.2 ускоряет validation evaluator на полном каталоге: проверка принадлежности MAL ID использует множество, а ранжирование выбирает десять лучших кандидатов после полной проверки вектора. На синтетических данных медиана полной оценки при C=28 955 и Q=41 снизилась с 1,882625 до 1,438217 с (в 1,31 раза быстрее); при C=21 и Q=1740 выросла с 0,559213 до 0,574044 с (на 2,65% медленнее). Это два чередующихся повтора для каждого сценария; они не доказывают завершение полной кампании ML-02 в прежнем часовом лимите. Маски, метрики, порядок ранжирования, форматы артефактов и лимиты кампании сохранены. Новый producer SHA требует свежей подготовки и нового запуска; результаты прежнего producer нельзя возобновлять под новой версией. Полное сравнение качества и выбор N пока не завершены. Связь с предыдущими байтами и версиями закреплена в [миграции ARB-064](docs/migrations/arb064-bounded-evaluation-v1.json).
+
+Пакет 0.5.1 допустил до 8 MiB для публичной проекции и отчёта `ml02-native-v2`, включая полный проверяемый envelope. Научные форматы и лимиты вычислений не изменились; историческое изменение закреплено в [миграции ARB-063](docs/migrations/arb063-native-campaign-report-cap-v1.json).
+
+Исторически пакет 0.5.0 добавил закрытый профиль `ml02-native-v2` полной validation-кампании: семь прежних CPU-моделей и предобъявленный PyTorch-кандидат. Его план/отчёт имели версии 4/3, а исходный ресурс и его SHA-256 закреплены в [миграции ARB-062](docs/migrations/arb062-native-validation-campaign-v2.json). Условная оценка 192 GiB относилась только к этому историческому профилю. Для восстановления используйте отдельный закреплённый checkout `a06e369b21f96c5d8ee37765e3116448e1d12b6e` и соответствующие ему подготовленные артефакты.
 
 Пакет 0.4.0 добавляет предобъявленного PyTorch-кандидата `item-seed-mean-bpr-v1` для офлайн-обучения на train-only взаимодействиях. Он принимает до десяти MAL ID нового пользователя и возвращает один ограниченный запрос; веса остаются отдельным проверяемым `safetensors`-артефактом. Это инженерная синтетическая приёмка, а не выбор модели для выпуска. Обычная установка и CPU baseline не устанавливают и не импортируют PyTorch. Выберите ровно один optional extra: `torch-cpu` или `torch-cuda` (официальные индексы и версии зафиксированы в `pyproject.toml` и `uv.lock`). Перед установкой проверьте свободное место на томе с запасом не менее 20 GiB сверх ожидаемого объёма.
 

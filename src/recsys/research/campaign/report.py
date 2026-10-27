@@ -124,8 +124,9 @@ def _public_projection(
             or evaluation["prediction_code_revision"] != plan["code_revision"]
             or evaluation["selection_identity"] is not None
             or prediction["split"] != "validation"
-            or file_descriptor(paths["predict"] / "scores.jsonl.gz")
+            or file_descriptor(paths["predict"] / ("scores.bin" if native else "scores.jsonl.gz"))
             != {key: prediction["scores"][key] for key in ("bytes", "sha256")}
+            or prediction["schema_version"] != (2 if native else 1)
         ):
             _fail("research_campaign_chain_invalid")
         for name in ("report.json", "user-metrics.jsonl.gz", "evaluation-manifest.json"):
@@ -200,8 +201,6 @@ def _public_projection(
             "replay_identity": _digest((paths["replay"] / "evaluation-manifest.json").read_bytes()),
             "evaluation_replay_bytes_equal": True,
             "queries": initial_report["queries"],
-            "scores_compressed_bytes": prediction["scores"]["bytes"],
-            "scores_uncompressed_bytes": prediction["scores"]["uncompressed_bytes"],
             "resources": phase_resources,
             "fit_budget": {
                 "primary_charged_seconds": charged.get((variant, "fit"), 0.0),
@@ -211,6 +210,16 @@ def _public_projection(
             "checked_groups": recomputed,
         }
         if native:
+            from recsys.research.score_blocks import BlockScoreDescriptor
+
+            block_desc = cast("BlockScoreDescriptor", prediction["scores"])
+            variant_row.update(
+                scores_stored_bytes=block_desc["bytes"],
+                scores_decoded_bytes=block_desc["uncompressed_bytes"],
+                score_format=prediction["score_format"],
+                dense_rows=block_desc["dense_rows"],
+                query_block_count=block_desc["query_block_count"],
+            )
             entry = plan["variants"][names.index(variant)]
             evaluation_charge = sum(charged.get((variant, step), 0.0) for step in PHASES[1:])
             variant_row.update(
@@ -256,6 +265,11 @@ def _public_projection(
                     initial_weights_sha256=training["initial_weights_sha256"],
                     final_weights_sha256=training["final_weights_sha256"],
                 )
+        else:
+            variant_row.update(
+                scores_compressed_bytes=prediction["scores"]["bytes"],
+                scores_uncompressed_bytes=prediction["scores"]["uncompressed_bytes"],
+            )
         variants.append(variant_row)
     hybrid_path = _required_phase_path(root, successes, "hybrid", "fit")
     hybrid_value, _ = read_json(hybrid_path / "model-manifest.json")
@@ -467,8 +481,11 @@ def _native_public_allowed(projection: object, plan: CampaignPlan) -> dict[str, 
         "replay_identity",
         "evaluation_replay_bytes_equal",
         "queries",
-        "scores_compressed_bytes",
-        "scores_uncompressed_bytes",
+        "scores_stored_bytes",
+        "scores_decoded_bytes",
+        "score_format",
+        "dense_rows",
+        "query_block_count",
         "resources",
         "fit_budget",
         "checked_groups",
@@ -505,8 +522,13 @@ def _native_public_allowed(projection: object, plan: CampaignPlan) -> dict[str, 
             or item.get("evaluation_replay_bytes_equal") is not True
             or type(item.get("queries")) is not int
             or item["queries"] < 1
-            or type(item.get("scores_compressed_bytes")) is not int
-            or type(item.get("scores_uncompressed_bytes")) is not int
+            or type(item.get("scores_stored_bytes")) is not int
+            or type(item.get("scores_decoded_bytes")) is not int
+            or item.get("score_format") != "arb-score-blocks-v1"
+            or type(item.get("dense_rows")) is not int
+            or type(item.get("query_block_count")) is not int
+            or item["scores_stored_bytes"]
+            > plan["storage"]["prediction_upper_bytes"][item["variant_id"]]
             or type(item.get("resources")) is not dict
             or set(item["resources"]) != set(PHASES)
         ):
@@ -569,7 +591,7 @@ def _check_native_report_contents(
         _fail("research_campaign_report_invalid")
     report = cast("dict[str, object]", report_value)
     expected = {
-        "schema_version": 3,
+        "schema_version": 4,
         "kind": "arb-ml02-campaign-report",
         "campaign_id": NATIVE_CAMPAIGN,
         "plan_identity": plan_identity,
@@ -599,22 +621,27 @@ def _check_native_report_contents(
         or set(storage)
         != {
             "policy",
-            "admission_estimate_bytes",
+            "catalog_count",
+            "query_count",
+            "zero_seed_queries",
+            "prediction_upper_bytes",
+            "fresh_admission_bytes",
             "minimum_output_available_bytes",
             "minimum_physical_available_bytes",
             "reserve_bytes",
             "stop_margin_bytes",
+            "estimated_other_bytes",
         }
         or storage["policy"] != policy["kind"]
         or storage["reserve_bytes"] != policy["reserve_bytes"]
         or storage["stop_margin_bytes"] != policy["stop_margin_bytes"]
-        or storage["admission_estimate_bytes"]
-        != (
-            8 * policy["estimated_scores_bytes_per_arm"]
-            + policy["estimated_other_bytes"]
-            + policy["reserve_bytes"]
-            + policy["stop_margin_bytes"]
-        )
+        or storage["catalog_count"] != plan["storage"]["prediction_dimensions"]["catalog_count"]
+        or storage["query_count"] != plan["storage"]["prediction_dimensions"]["query_count"]
+        or storage["zero_seed_queries"]
+        != plan["storage"]["prediction_dimensions"]["zero_seed_queries"]
+        or storage["prediction_upper_bytes"] != plan["storage"]["prediction_upper_bytes"]
+        or storage["fresh_admission_bytes"] != plan["storage"]["fresh_admission_bytes"]
+        or storage["estimated_other_bytes"] != policy["estimated_other_bytes"]
         or any(
             type(storage[key]) is not int or storage[key] < 0
             for key in ("minimum_output_available_bytes", "minimum_physical_available_bytes")

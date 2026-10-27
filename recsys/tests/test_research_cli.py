@@ -40,14 +40,14 @@ class ResearchCliTests(unittest.TestCase):
             [
                 *arguments,
                 "--campaign",
-                "ml02-native-v2",
+                "ml02-native-v3",
                 "--native-train-device",
                 "cpu",
                 "--physical-storage-root",
                 "/mnt/c",
             ]
         )
-        self.assertEqual((native.campaign, native.native_train_device), ("ml02-native-v2", "cpu"))
+        self.assertEqual((native.campaign, native.native_train_device), ("ml02-native-v3", "cpu"))
         with patch(
             "recsys.research.campaign.runner.run_campaign", return_value=Path("result")
         ) as run:
@@ -57,7 +57,7 @@ class ResearchCliTests(unittest.TestCase):
                         [
                             *arguments,
                             "--campaign",
-                            "ml02-native-v2",
+                            "ml02-native-v3",
                             "--native-train-device",
                             "cpu",
                             "--physical-storage-root",
@@ -66,7 +66,7 @@ class ResearchCliTests(unittest.TestCase):
                     ),
                     0,
                 )
-            self.assertEqual(run.call_args.kwargs["campaign_name"], "ml02-native-v2")
+            self.assertEqual(run.call_args.kwargs["campaign_name"], "ml02-native-v3")
             self.assertEqual(run.call_args.kwargs["native_train_device"], "cpu")
             self.assertEqual(run.call_args.kwargs["physical_storage_root"], Path("/mnt/c"))
         with contextlib.redirect_stderr(io.StringIO()):

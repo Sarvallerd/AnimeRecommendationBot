@@ -35,7 +35,11 @@ class ModelFixture(ResearchFixture):
         directory = self.root / name
         with patch_release_info(self.lock):
             predict_validation(
-                prepared, model, directory, expected_prepared_identity=prepared_identity
+                prepared,
+                model,
+                directory,
+                expected_prepared_identity=prepared_identity,
+                score_format="jsonl-v1",
             )
         return directory
 
