@@ -213,7 +213,11 @@ def _score_stream(
     ids = inputs.mal_ids
     id_set = set(ids)
     protocol = load_protocol()
-    popularity = [[item, inputs.train_stats["items"][str(item)]["positive_users"]] for item in ids]
+    legacy_popularity: EncodedScores | None = None
+    if isinstance(writer, GzipOneWriter):
+        legacy_popularity = [
+            [item, inputs.train_stats["items"][str(item)]["positive_users"]] for item in ids
+        ]
     seen: set[str] = set()
     source = stream_jsonl(prepared_dir / "development/queries.jsonl.gz", query_desc)
     validated = (
@@ -235,8 +239,9 @@ def _score_stream(
                 )
                 writer.write_query(query["query_id"], len(seeds), vector)
             else:
+                assert legacy_popularity is not None
                 scores = (
-                    popularity
+                    legacy_popularity
                     if not seeds or model.variant_id == "popularity"
                     else _encode_vector(next(scored), len(seeds), ids)
                 )
