@@ -29,7 +29,7 @@ UV_PROJECT_ENVIRONMENT=.tools/typing-venv uv sync --locked --no-install-project 
 UV_PROJECT_ENVIRONMENT=.tools/typing-venv uv run --locked --no-sync python -m mypy
 ARB_TEST_TORCH=1 uv run --locked --no-editable --extra quality --extra torch-cpu python -m unittest discover -s recsys/tests -p 'test_*.py'
 cargo test --locked
-python3 scripts/check_agent_setup.py
+python3 scripts/check_repo_hygiene.py
 python3 deploy/tests/level1-acceptance.py
 ```
 
