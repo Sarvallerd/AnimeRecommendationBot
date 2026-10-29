@@ -208,7 +208,7 @@
     },
     "src/recsys/cli/main.py": {
       "from": "a84b8cea8c741dbc5afa33a4843da3cd21402bfde77e013b9c486e80af9f59b9",
-      "to": "105030185dc2c3512d30ffbb793d6d20c56183a43c5b1aea10603682c37106bd"
+      "to": "328d15af21af4fd903cf7e5b1e2c99c35bbe60cb5cb11003b560348e1319e561"
     },
     "src/recsys/cli/parser.py": {
       "from": "2f179ecbb56557dc7765b90e0c4c3bba0ab2ece2afdacbcaca5ce31d9eec2174",
@@ -224,7 +224,7 @@
     }
   },
   "new_source_sha256": {
-    "src/recsys/release/itemknn.py": "376db90570ff5a27d100b11aedbb0cdb41a9857a1c2a3629c0b5b3f57c976546"
+    "src/recsys/release/itemknn.py": "f486667c2518039a8fc6da8a9e98773736e0e77ff9a7446a4dec5d9a8707e4ec"
   },
   "preserved_resource_sha256": {
     "src/recsys/resources/campaigns/research_campaign_native_v2.json": "4c395e475dc23e1c3faebb0ed0458fceb1bcc3c5d2af43318d0394acd729a13d",

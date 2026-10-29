@@ -4,15 +4,17 @@ import gzip
 import hashlib
 import json
 import shutil
+import stat
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 from scipy.sparse import csr_matrix
 
 from recsys.contracts.bundle import ContractError, check_bundle
-from recsys.release.itemknn import ALGORITHM, derive_itemknn_bundle, top_neighbors
+from recsys.release.itemknn import ALGORITHM, derive_current, derive_itemknn_bundle, top_neighbors
 from recsys.research.models.collaborative import _fit_knn
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -108,6 +110,10 @@ class DeriveBundleTests(unittest.TestCase):
         path, identity, count = self.derive()
         self.assertEqual(check_bundle(path), (identity, count))
         self.assertEqual(count, 8)
+        # Readable by the bot container's own UID, like bundles from `release prepare`.
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o755)
+        for name in ("catalog.json", "neighbors.json", "manifest.json"):
+            self.assertEqual(stat.S_IMODE((path / name).stat().st_mode), 0o644)
         base_catalog = (self.base / "catalog.json").read_bytes()
         self.assertEqual((path / "catalog.json").read_bytes(), base_catalog)
         neighbors = json.loads((path / "neighbors.json").read_bytes())["neighbors"]
@@ -156,6 +162,40 @@ class DeriveBundleTests(unittest.TestCase):
             )[0],
             path,
         )
+
+    def test_derive_current_uses_the_pinned_release_layout(self) -> None:
+        data = self.root / "data"
+        lock = {
+            "reference": {"bundle_identity": self.base_identity},
+            "inputs": {"base": {"identity": self.dataset_identity}},
+        }
+        with patch("recsys.release.lock.release_info", return_value=lock):
+            with self.assertRaisesRegex(ContractError, "run `recsys release prepare` first"):
+                derive_current(data)
+            shutil.copytree(self.base, data / "bundles" / self.base_identity.replace(":", "-"))
+            shutil.copytree(
+                self.dataset, data / "datasets" / self.dataset_identity.replace(":", "-")
+            )
+            with self.assertRaisesRegex(ContractError, "differs from the pinned identity"):
+                derive_current(data)
+            expected = self.derive()[1]
+            with patch("recsys.release.itemknn.CURRENT_IDENTITY", expected):
+                path, identity, count = derive_current(data)
+        self.assertEqual((path.parent, identity, count), (data / "bundles", expected, 8))
+
+    def test_rejects_dataset_manifest_without_interaction_fields(self) -> None:
+        manifest = json.loads((self.dataset / "dataset-manifest.json").read_bytes())
+        del manifest["files"]["interactions.tsv.gz"]["rows"]
+        raw = json.dumps(manifest).encode()
+        (self.dataset / "dataset-manifest.json").write_bytes(raw)
+        with self.assertRaisesRegex(ContractError, "missing rows"):
+            derive_itemknn_bundle(
+                self.base,
+                self.dataset,
+                self.store,
+                expected_base_identity=self.base_identity,
+                expected_dataset_identity="sha256:" + sha(raw),
+            )
 
     def test_rejects_unexpected_or_changed_inputs(self) -> None:
         with self.assertRaisesRegex(ContractError, "unexpected base bundle"):

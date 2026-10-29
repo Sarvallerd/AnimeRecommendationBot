@@ -52,6 +52,12 @@ def _object(value: object, location: str) -> dict[str, object]:
     return {str(key): item for key, item in value.items()}
 
 
+def _field(value: dict[str, object], key: str, location: str) -> object:
+    if key not in value:
+        raise ContractError(f"{location}: missing {key}")
+    return value[key]
+
+
 def positive_matrix(
     raw_gz: bytes, columns: dict[int, int], expected_rows: int
 ) -> tuple[NDArray[np.int64], NDArray[np.int32]]:
@@ -148,11 +154,14 @@ def derive_itemknn_bundle(
         str(dataset_dir),
         "unexpected dataset",
     )
-    files = _object(_object(json.loads(manifest_raw), "dataset-manifest.json")["files"], "files")
-    descriptor = _object(files["interactions.tsv.gz"], "files.interactions.tsv.gz")
+    dataset = _object(json.loads(manifest_raw), "dataset-manifest.json")
+    files = _object(_field(dataset, "files", "dataset-manifest.json"), "files")
+    location = "files.interactions.tsv.gz"
+    descriptor = _object(_field(files, "interactions.tsv.gz", "files"), location)
     raw_gz = (dataset_dir / "interactions.tsv.gz").read_bytes()
     require(
-        len(raw_gz) == descriptor["bytes"] and _sha(raw_gz) == descriptor["sha256"],
+        len(raw_gz) == _field(descriptor, "bytes", location)
+        and _sha(raw_gz) == _field(descriptor, "sha256", location),
         "interactions.tsv.gz",
         "bytes differ from the dataset manifest",
     )
@@ -160,7 +169,7 @@ def derive_itemknn_bundle(
     catalog = _object(json.loads(base["catalog.json"]), "catalog.json")
     glove = _object(_object(json.loads(base["neighbors.json"]), "neighbors.json")["neighbors"], "n")
     ids = sorted(int(key) for key in _object(catalog["anime"], "catalog.json.anime"))
-    rows = descriptor["rows"]
+    rows = _field(descriptor, "rows", location)
     if not isinstance(rows, int):
         raise ContractError("files.interactions.tsv.gz.rows: expected integer")
     columns = {mal_id: column for column, mal_id in enumerate(ids)}
@@ -224,7 +233,12 @@ def derive_itemknn_bundle(
         identity,
         "derived bundle differs from the pinned identity",
     )
-    return _publish(store, output, identity, count), identity, count
+    from recsys.release.prepare import _published_permissions
+
+    published = _publish(store, output, identity, count)
+    # The bot and prepare containers read the bundle as another UID.
+    _published_permissions(published)
+    return published, identity, count
 
 
 def derive_current(data_dir: Path) -> tuple[Path, str, int]:
@@ -234,8 +248,11 @@ def derive_current(data_dir: Path) -> tuple[Path, str, int]:
     lock = release_info("current")
     base_identity = lock["reference"]["bundle_identity"]
     dataset_identity = lock["inputs"]["base"]["identity"]
+    base_bundle = data_dir / "bundles" / base_identity.replace(":", "-")
+    if not base_bundle.is_dir():
+        raise ContractError(f"{base_bundle}: run `recsys release prepare` first")
     return derive_itemknn_bundle(
-        data_dir / "bundles" / base_identity.replace(":", "-"),
+        base_bundle,
         data_dir / "datasets" / dataset_identity.replace(":", "-"),
         data_dir / "bundles",
         expected_base_identity=base_identity,
