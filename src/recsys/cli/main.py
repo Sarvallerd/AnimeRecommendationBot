@@ -166,6 +166,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 path, identity, count = prepare_release(Path(parsed.data_dir), parsed.release)
                 print(f"{path} {identity} records={count}")
                 print(f"ARB_BUNDLE_DIR={path}")
+            elif parsed.release_command == "itemknn":
+                from recsys.release.itemknn import derive_current
+
+                path, identity, count = derive_current(Path(parsed.data_dir))
+                print(f"{path} {identity} records={count}")
+                print(f"ARB_BUNDLE_DIR={path}")
             elif parsed.release_command == "compose":
                 manifest = compose_release(
                     Path(parsed.base_dir),

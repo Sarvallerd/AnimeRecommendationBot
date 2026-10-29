@@ -1,6 +1,6 @@
 # AnimeRecommendationBot
 
-Telegram-бот для личных чатов на русском: поиск аниме → подтверждение MAL ID → до пяти рекомендаций, оценки аниме 1–10, полезности 0–5 и текстовые отзывы. Rust обслуживает Telegram и PostgreSQL; Python заранее готовит неизменяемый JSON-пакет из Neelagiri 2025, алиасов Nafiul 2026 и GloVe. Персонализации в v1 нет.
+Telegram-бот для личных чатов на русском: поиск аниме → подтверждение MAL ID → до пяти рекомендаций, оценки аниме 1–10, полезности 0–5 и текстовые отзывы. Rust обслуживает Telegram и PostgreSQL; Python заранее готовит неизменяемый JSON-пакет из Neelagiri 2025, алиасов Nafiul 2026 и GloVe; рекомендуемый пакет строит соседей ItemKNN по оценкам пользователей. Персонализации в v1 нет.
 
 ## Код и документация
 
@@ -124,11 +124,14 @@ COMPOSE_FILE="$PWD/compose.yaml"
 compose() { docker compose --env-file "$SETTINGS" -p "$PROJECT" -f "$COMPOSE_FILE" "$@"; }
 compose --profile tools build builder bot
 compose --profile tools run --rm --no-deps --entrypoint /usr/local/bin/prepare-artifacts builder
-# /data смонтирован из ARB_DATA_DIR: задайте ARB_BUNDLE_DIR=<ARB_DATA_DIR>/bundles/sha256-... по напечатанному пути.
+compose --profile tools run --rm --no-deps builder release itemknn --data-dir /data
+# /data смонтирован из ARB_DATA_DIR: задайте ARB_BUNDLE_DIR=<ARB_DATA_DIR>/bundles/sha256-... по пути, напечатанному последней командой.
 compose run --rm --no-deps --entrypoint /usr/local/bin/check_bundle prepare /artifacts
 compose up -d bot
 compose ps
 ```
+
+`release itemknn` берёт проверенный GloVe-пакет текущего выпуска и закреплённые оценки датасета, строит для каждого тайтла пять соседей ItemKNN (все пользователи, завершённые тайтлы с оценкой ≥ 8, сжатие 10) и подставляет соседей GloVe там, где ItemKNN их не находит. `catalog.json` совпадает с GloVe-пакетом побайтно; повторная сборка обязана дать ту же identity. Выбор алгоритма обоснован [отчётом ML-02](recsys/reports/ml02-validation-v1/README.md).
 
 Один токен обслуживает один poller. `prepare` проверяет выбранный bundle и применяет миграции до запуска бота; PostgreSQL хранит историю в постоянном томе. Обычный перезапуск — `compose restart bot`. Для обновления сначала сохраните прежний bundle и выполните:
 

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Never, TypedDict, cast
 
 MAX_ID = 2_147_483_647
+ALGORITHMS = ("glove-mean-cosine", "itemknn-shrunk-cosine")
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 CATALOG_FIELDS = {"title", "aliases", "genres", "score", "year", "type", "episodes", "synopsis"}
 
@@ -262,9 +263,9 @@ def check_manifest(value: object, raw: bytes, file_bytes: dict[str, bytes]) -> s
         "manifest.json.algorithm",
     )
     require(
-        algorithm["name"] == "glove-mean-cosine",
+        algorithm["name"] in ALGORITHMS,
         "manifest.json.algorithm.name",
-        "expected glove-mean-cosine",
+        "expected " + " or ".join(ALGORITHMS),
     )
     nonblank(algorithm["version"], "manifest.json.algorithm.version")
     integer(algorithm["max_neighbors"], "manifest.json.algorithm.max_neighbors", 5, 5)

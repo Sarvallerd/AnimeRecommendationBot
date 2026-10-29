@@ -10,6 +10,9 @@ use std::path::Path;
 
 pub type MalId = i32;
 
+/// Neighbor algorithms a bundle manifest may declare; the bot only relies on list order.
+const ALGORITHMS: &[&str] = &["glove-mean-cosine", "itemknn-shrunk-cosine"];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BundleError {
     location: String,
@@ -331,6 +334,16 @@ fn sha(value: &Tree, path: &str) -> Result<String> {
     }
     Ok(s.clone())
 }
+fn one_of(value: &Tree, path: &str, allowed: &[&str]) -> Result<()> {
+    if matches!(value, Tree::String(s) if allowed.contains(&s.as_str())) {
+        Ok(())
+    } else {
+        Err(BundleError::new(
+            path,
+            format!("expected {}", allowed.join(" or ")),
+        ))
+    }
+}
 fn exact(value: &Tree, path: &str, expected: &str) -> Result<()> {
     if matches!(value, Tree::String(s) if s == expected) {
         Ok(())
@@ -356,10 +369,10 @@ fn validate_manifest(value: &Tree) -> Result<BTreeMap<String, String>> {
             "parameters",
         ],
     )?;
-    exact(
+    one_of(
         at(algorithm, "name"),
         "manifest.json.algorithm.name",
-        "glove-mean-cosine",
+        ALGORITHMS,
     )?;
     string(at(algorithm, "version"), "manifest.json.algorithm.version")?;
     bounded_integer(

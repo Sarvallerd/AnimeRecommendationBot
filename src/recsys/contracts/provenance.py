@@ -48,6 +48,7 @@ SOURCE_FILES = (
     "release/build.py",
     "release/catalog.py",
     "release/export.py",
+    "release/itemknn.py",
     "release/lock.py",
     "release/prepare.py",
     "research/__init__.py",
