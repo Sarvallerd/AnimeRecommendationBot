@@ -166,6 +166,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 path, identity, count = prepare_release(Path(parsed.data_dir), parsed.release)
                 print(f"{path} {identity} records={count}")
                 print(f"ARB_BUNDLE_DIR={path}")
+            elif parsed.release_command == "itemknn":
+                from recsys.contracts.bundle import ContractError
+                from recsys.release.itemknn import derive_current
+
+                try:
+                    path, identity, count = derive_current(Path(parsed.data_dir))
+                except ContractError as exc:
+                    # Checks name the failed input; the generic code would hide which one.
+                    print(f"recsys release itemknn: {exc}", file=sys.stderr)
+                    return 1
+                print(f"{path} {identity} records={count}")
+                print(f"ARB_BUNDLE_DIR={path}")
             elif parsed.release_command == "compose":
                 manifest = compose_release(
                     Path(parsed.base_dir),

@@ -51,6 +51,7 @@
         "recsys.release.build",
         "recsys.release.catalog",
         "recsys.release.export",
+        "recsys.release.itemknn",
         "recsys.release.prepare"
       ],
       "depends_on": [

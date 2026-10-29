@@ -243,6 +243,16 @@ class BundleContractTests(unittest.TestCase):
         )
         self.rejected("fields differ")
 
+    def test_declared_algorithm_names(self) -> None:
+        original, _ = check_bundle(self.bundle)
+        self.change(
+            "manifest.json", lambda x: _object(x["algorithm"]).update(name="itemknn-shrunk-cosine")
+        )
+        itemknn, _ = check_bundle(self.bundle)
+        self.assertNotEqual(original, itemknn)
+        self.change("manifest.json", lambda x: _object(x["algorithm"]).update(name="other"))
+        self.rejected("expected glove-mean-cosine or itemknn-shrunk-cosine")
+
     def test_valid_content_and_provenance_changes_change_identity(self) -> None:
         original, _ = check_bundle(self.bundle)
         self.change("catalog.json", lambda x: _anime_item(x, "1").update(title="Новое название"))

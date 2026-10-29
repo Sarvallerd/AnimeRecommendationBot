@@ -34,7 +34,7 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(result.stderr, "")
 
     def test_release_commands_require_explicit_trusted_inputs(self) -> None:
-        for command in ("compose", "validate", "build", "export", "prepare"):
+        for command in ("compose", "validate", "build", "export", "prepare", "itemknn"):
             with self.subTest(command=command):
                 result = self.run_cli("release", command)
                 self.assertEqual(result.returncode, 2)

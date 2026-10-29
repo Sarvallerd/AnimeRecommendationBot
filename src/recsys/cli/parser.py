@@ -87,6 +87,11 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("current", "neelagiri-2025-nafiul-2026-v1", "mal-2020-glove-v1"),
     )
     release_prepare.add_argument("--data-dir", required=True)
+    release_itemknn = release_commands.add_parser(
+        "itemknn",
+        help="derive the ItemKNN bundle from the prepared current release and its ratings",
+    )
+    release_itemknn.add_argument("--data-dir", required=True)
     release_compose = release_commands.add_parser("compose")
     for flag in (
         "base-dir",

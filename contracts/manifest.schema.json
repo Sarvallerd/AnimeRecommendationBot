@@ -12,7 +12,7 @@
       "required": ["name", "version", "max_neighbors", "similarity", "parameters"],
       "additionalProperties": false,
       "properties": {
-        "name": {"const": "glove-mean-cosine"},
+        "name": {"enum": ["glove-mean-cosine", "itemknn-shrunk-cosine"]},
         "version": {"$ref": "#/$defs/nonblank"},
         "max_neighbors": {"const": 5, "type": "integer"},
         "similarity": {"const": "cosine"},

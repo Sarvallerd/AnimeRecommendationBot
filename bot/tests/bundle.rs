@@ -226,6 +226,22 @@ fn manifest_rules() {
     fails(dir.path(), "sources[1]");
 }
 #[test]
+fn manifest_accepts_itemknn_algorithm() {
+    let dir = fixture();
+    modify(dir.path(), "manifest.json", |v| {
+        v["algorithm"]["name"] = json!("itemknn-shrunk-cosine")
+    });
+    let bundle = Bundle::load(dir.path()).unwrap();
+    assert_eq!(bundle.catalog().len(), 8);
+    modify(dir.path(), "manifest.json", |v| {
+        v["algorithm"]["name"] = json!("other")
+    });
+    fails(
+        dir.path(),
+        "manifest.json.algorithm.name: expected glove-mean-cosine or itemknn-shrunk-cosine",
+    );
+}
+#[test]
 fn catalog_field_rules_and_huge_episodes() {
     let cases: &[Mutation] = &[
         ("title", |v| v["anime"]["1"]["title"] = json!(" ")),
