@@ -129,7 +129,7 @@ def payloads(base):
             for path in base.rglob('*') if path.is_file() and path.suffix in suffixes}
 source_payload = payloads(source)
 installed_payload = payloads(package)
-assert len(source_payload) == 91, len(source_payload)
+assert len(source_payload) == 92, len(source_payload)
 assert sum(name.startswith('resources/') for name in source_payload) == 14
 assert source_payload and source_payload == installed_payload, (
     set(source_payload) - set(installed_payload),
