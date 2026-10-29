@@ -19,13 +19,7 @@ target
 .tools/
 .worktrees/
 
-.codex/*
-!.codex/config.toml
-!.codex/agents/
-.codex/agents/*
-!.codex/agents/architect.toml
-!.codex/agents/implementer.toml
-!.codex/agents/reviewer.toml
+.codex/
 
 .arb/
 deploy/.env.bot
