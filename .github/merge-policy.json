@@ -30,7 +30,7 @@
         "strict_required_status_checks_policy": true,
         "do_not_enforce_on_create": false,
         "required_status_checks": [
-          {"context": "agent-setup", "integration_id": 15368},
+          {"context": "repo-checks", "integration_id": 15368},
           {"context": "rust", "integration_id": 15368},
           {"context": "python", "integration_id": 15368},
           {"context": "compose", "integration_id": 15368},

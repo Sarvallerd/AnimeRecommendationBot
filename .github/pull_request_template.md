@@ -1,36 +1,13 @@
 ## Task
 
-- Task ID and Notion link:
-- Problem:
-- Resulting behavior:
-- Acceptance criteria:
+- Notion card:
+- What changes and why:
 
-## Scope and design
+## Checks
 
-- Task branch:
-- Worktree:
-- Full baseline commit SHA:
-- Scoped paths:
-- Architect's exact design:
-- Justified deviations from that design:
+- Local:
+- CI:
 
-## Verification
+## Review
 
-| Check | Result | Evidence (command, run, or link) |
-| --- | --- | --- |
-| Local checks | | |
-| Required CI | | |
-
-## Independent review
-
-- Reviewer:
-- Verdict:
-- Full reviewed head commit SHA:
-- Fixes included in the reviewed SHA:
-
-## Merge gate
-
-- [ ] One task, branch, worktree, and pull request.
-- [ ] Independent final review passes for the current full head SHA.
-- [ ] Required CI is green for that head SHA.
-- [ ] Pull request head still matches the reviewed SHA before the coordinator squash merges.
+- Self-review or independent reviewer (independent review is required for the PostgreSQL schema or migrations, the bundle contract, data inputs and the release lock):
