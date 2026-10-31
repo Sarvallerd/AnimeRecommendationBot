@@ -256,6 +256,7 @@ fn sent_texts(api: &FakeTelegram) -> Vec<String> {
 #[derive(Default)]
 struct FakeRepo {
     rows: Mutex<Vec<DeliveredPosition>>,
+    plans: Mutex<Vec<(RequestId, Vec<i32>)>>,
     resolves: Mutex<Vec<(i64, i32, String)>>,
     next: Mutex<i64>,
     scores: Mutex<Vec<(i64, PositionId, i16)>>,
@@ -305,6 +306,24 @@ impl Repository for FakeRepo {
             Ok(WriteOutcome::Created(()))
         })
     }
+    fn save_plan<'a>(
+        &'a self,
+        _: i64,
+        request: RequestId,
+        mal_ids: &'a [i32],
+    ) -> DbFuture<'a, WriteOutcome<()>> {
+        Box::pin(async move {
+            let mut plans = self.plans.lock().unwrap();
+            match plans.iter().find(|(id, _)| *id == request) {
+                Some((_, plan)) if plan == mal_ids => Ok(WriteOutcome::AlreadyRecorded(())),
+                Some(_) => Err(DbError::Conflict),
+                None => {
+                    plans.push((request, mal_ids.to_vec()));
+                    Ok(WriteOutcome::Created(()))
+                }
+            }
+        })
+    }
     fn record_delivery<'a>(
         &'a self,
         _: i64,
@@ -316,6 +335,14 @@ impl Repository for FakeRepo {
             if failure == 1 {
                 return Err(DbError::DatabaseFailure);
             }
+            let planned = self.plans.lock().unwrap().iter().any(|(id, plan)| {
+                *id == request
+                    && usize::try_from(input.rank - 1)
+                        .ok()
+                        .and_then(|index| plan.get(index))
+                        == Some(&input.mal_id)
+            });
+            assert!(planned, "delivery outside the saved plan");
             let mut rows = self.rows.lock().unwrap();
             let outcome = if let Some(row) = rows
                 .iter()

@@ -21,6 +21,12 @@ pub trait Repository: Send + Sync {
         mal_id: i32,
         bundle_id: &'a str,
     ) -> DbFuture<'a, WriteOutcome<()>>;
+    fn save_plan<'a>(
+        &'a self,
+        user_id: i64,
+        request_id: RequestId,
+        mal_ids: &'a [i32],
+    ) -> DbFuture<'a, WriteOutcome<()>>;
     fn record_delivery<'a>(
         &'a self,
         user_id: i64,
@@ -72,6 +78,14 @@ impl Repository for Db {
         b: &'a str,
     ) -> DbFuture<'a, WriteOutcome<()>> {
         Box::pin(async move { Db::resolve_request(self, u, r, m, b).await })
+    }
+    fn save_plan<'a>(
+        &'a self,
+        u: i64,
+        r: RequestId,
+        m: &'a [i32],
+    ) -> DbFuture<'a, WriteOutcome<()>> {
+        Box::pin(async move { Db::save_plan(self, u, r, m).await })
     }
     fn record_delivery<'a>(
         &'a self,

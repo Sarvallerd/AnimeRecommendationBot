@@ -168,14 +168,7 @@ async fn migration_preserves_legacy_and_rejects_unknown_versions() {
             .unwrap();
         assert!(row.get::<_, bool>(0), "{table}");
     }
-    assert_eq!(
-        f.direct
-            .query_one("SELECT count(*) FROM arb_schema_migrations", &[])
-            .await
-            .unwrap()
-            .get::<_, i64>(0),
-        1
-    );
+    assert_eq!(versions(&f).await, [1, 2]);
     f.db.insert_user(
         "2147483648".into(),
         "ru".into(),
@@ -214,6 +207,284 @@ async fn migration_preserves_legacy_and_rejects_unknown_versions() {
         .await
         .unwrap();
     assert_eq!(f.db.migrate().await, Err(DbError::Conflict));
+    cleanup(f).await;
+}
+
+async fn versions(f: &Fixture) -> Vec<i64> {
+    f.direct
+        .query(
+            "SELECT version FROM arb_schema_migrations ORDER BY version",
+            &[],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| row.get(0))
+        .collect()
+}
+
+#[tokio::test]
+#[ignore = "requires explicit ARB_TEST_DATABASE_URL"]
+async fn migration_2_keeps_v1_history_and_plans_what_was_delivered() {
+    let f = fixture(false).await;
+    // A database left by the previous release: schema 1 with delivered history.
+    f.direct
+        .batch_execute(&format!(
+            "CREATE TABLE arb_schema_migrations (version BIGINT PRIMARY KEY,
+             applied_at TIMESTAMPTZ NOT NULL DEFAULT now());
+             {}
+             INSERT INTO arb_schema_migrations(version) VALUES (1);
+             INSERT INTO arb_users(tg_id,first_name) VALUES (5,'Мария');
+             INSERT INTO arb_requests(tg_id,action_key,raw_query,seed_mal_id,bundle_id,resolved_at)
+             VALUES (5,'q1','космос',1,'{BUNDLE_A}',now()), (5,'q2','море',3,'{BUNDLE_A}',now());
+             INSERT INTO arb_delivered_positions(request_id,tg_id,rank,mal_id,chat_id,message_id)
+             SELECT id,tg_id,1,2,tg_id,100 FROM arb_requests;
+             INSERT INTO arb_delivered_positions(request_id,tg_id,rank,mal_id,chat_id,message_id)
+             SELECT id,tg_id,3,4,tg_id,101 FROM arb_requests WHERE action_key='q1';
+             INSERT INTO arb_recommendation_ratings(position_id,tg_id,score)
+             SELECT id,tg_id,5 FROM arb_delivered_positions;",
+            include_str!("../../migrations/0001_feedback_v1.sql")
+        ))
+        .await
+        .unwrap();
+    let snapshot = "SELECT jsonb_build_object(
+        'requests',(SELECT jsonb_agg(to_jsonb(t) ORDER BY id) FROM arb_requests t),
+        'delivered',(SELECT jsonb_agg(to_jsonb(t) ORDER BY id) FROM arb_delivered_positions t),
+        'ratings',(SELECT jsonb_agg(to_jsonb(t) ORDER BY position_id) FROM arb_recommendation_ratings t)
+    )::text";
+    let before: String = f.direct.query_one(snapshot, &[]).await.unwrap().get(0);
+    f.db.migrate().await.unwrap();
+    f.db.migrate().await.unwrap();
+    assert_eq!(versions(&f).await, [1, 2]);
+    let after: String = f.direct.query_one(snapshot, &[]).await.unwrap().get(0);
+    assert_eq!(after, before);
+    let plans: Vec<(String, i16, i32)> = f
+        .direct
+        .query(
+            "SELECT r.action_key, p.rank, p.mal_id FROM arb_request_plans p
+             JOIN arb_requests r ON r.id=p.request_id ORDER BY 1, 2",
+            &[],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| (row.get(0), row.get(1), row.get(2)))
+        .collect();
+    assert_eq!(
+        plans,
+        [
+            ("q1".into(), 1, 2),
+            ("q1".into(), 3, 4),
+            ("q2".into(), 1, 2)
+        ]
+    );
+    let request: i64 = f
+        .direct
+        .query_one("SELECT id FROM arb_requests WHERE action_key='q2'", &[])
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(f.db.request_plan(5, request).await.unwrap(), [2]);
+    // The delivered history is the plan; another title cannot be delivered for it.
+    assert_eq!(
+        f.db.record_delivery(
+            5,
+            request,
+            &DeliveryInput {
+                rank: 2,
+                mal_id: 9,
+                chat_id: 5,
+                message_id: 102
+            }
+        )
+        .await,
+        Err(DbError::Conflict)
+    );
+    assert_eq!(
+        f.db.save_plan(5, request, &[2, 9]).await,
+        Err(DbError::Conflict)
+    );
+    // A schema without version 1 is not one this release created.
+    f.direct
+        .execute("DELETE FROM arb_schema_migrations WHERE version=1", &[])
+        .await
+        .unwrap();
+    assert_eq!(f.db.migrate().await, Err(DbError::Conflict));
+    cleanup(f).await;
+}
+
+#[tokio::test]
+#[ignore = "requires explicit ARB_TEST_DATABASE_URL"]
+async fn title_lists_plans_and_watched_marks() {
+    let f = fixture(true).await;
+    let (id, other) = (77_i64, 78_i64);
+    f.db.upsert_user(&profile(other)).await.unwrap();
+    let first = user_and_request(&f, id, "a", BUNDLE_A).await;
+    let resolved = |key: &'static str, mal_id: i32, bundle_id: &'static str| {
+        let db = &f.db;
+        async move {
+            let request = created(db.record_query(id, key, "запрос").await.unwrap());
+            db.resolve_request(id, request, mal_id, bundle_id)
+                .await
+                .unwrap();
+            request
+        }
+    };
+    let second = resolved("b", 7, BUNDLE_A).await;
+    let third = resolved("c", 8, BUNDLE_A).await;
+    let stale = resolved("d", 9, BUNDLE_B).await;
+    let same_title = resolved("e", 7, BUNDLE_A).await;
+    let pending = created(f.db.record_query(id, "f", "без выбора").await.unwrap());
+
+    for seeds in [
+        vec![],
+        vec![second, first],
+        vec![first, second, second],
+        vec![first, 2, 3, 4, 5, 6],
+    ] {
+        assert!(matches!(
+            f.db.save_request_seeds(id, first, &seeds).await,
+            Err(DbError::InvalidInput(_))
+        ));
+    }
+    for seeds in [
+        vec![first, stale],
+        vec![first, second, same_title],
+        vec![first, pending],
+    ] {
+        assert_eq!(
+            f.db.save_request_seeds(id, first, &seeds).await,
+            Err(DbError::Conflict)
+        );
+    }
+    assert_eq!(
+        f.db.save_request_seeds(other, first, &[first]).await,
+        Err(DbError::NotFound)
+    );
+    assert_eq!(
+        f.db.save_request_seeds(id, first, &[first, 999_999]).await,
+        Err(DbError::NotFound)
+    );
+    assert_eq!(
+        f.db.save_request_seeds(id, first, &[first, second, third])
+            .await
+            .unwrap(),
+        WriteOutcome::Created(())
+    );
+    assert_eq!(
+        f.db.save_request_seeds(id, first, &[first, second, third])
+            .await
+            .unwrap(),
+        WriteOutcome::AlreadyRecorded(())
+    );
+    assert_eq!(
+        f.db.save_request_seeds(id, first, &[first, second]).await,
+        Err(DbError::Conflict)
+    );
+    // A search belongs to one list only.
+    assert_eq!(
+        f.db.save_request_seeds(id, same_title, &[same_title, third])
+            .await,
+        Err(DbError::Conflict)
+    );
+
+    for plan in [vec![], vec![1, 2, 3, 4, 5, 6], vec![1, 1], vec![0]] {
+        assert!(matches!(
+            f.db.save_plan(id, first, &plan).await,
+            Err(DbError::InvalidInput(_))
+        ));
+    }
+    for seed in [42, 7, 8] {
+        assert_eq!(
+            f.db.save_plan(id, first, &[1, seed]).await,
+            Err(DbError::Conflict),
+            "seed {seed} is never recommended"
+        );
+    }
+    assert_eq!(
+        f.db.save_plan(id, pending, &[1]).await,
+        Err(DbError::Conflict)
+    );
+    assert_eq!(
+        f.db.save_plan(other, first, &[1]).await,
+        Err(DbError::NotFound)
+    );
+    assert_eq!(
+        f.db.request_plan(id, first).await.unwrap(),
+        Vec::<i32>::new()
+    );
+    assert_eq!(
+        f.db.save_plan(id, first, &[11, 12, 13]).await.unwrap(),
+        WriteOutcome::Created(())
+    );
+    assert_eq!(
+        f.db.save_plan(id, first, &[11, 12, 13]).await.unwrap(),
+        WriteOutcome::AlreadyRecorded(())
+    );
+    assert_eq!(
+        f.db.save_plan(id, first, &[11, 12]).await,
+        Err(DbError::Conflict)
+    );
+    assert_eq!(f.db.request_plan(id, first).await.unwrap(), [11, 12, 13]);
+    assert_eq!(
+        f.db.request_plan(other, first).await,
+        Err(DbError::NotFound)
+    );
+    // Titles cannot be listed after recommendations are planned.
+    f.db.save_plan(id, stale, &[11]).await.unwrap();
+    assert_eq!(
+        f.db.save_request_seeds(id, stale, &[stale]).await,
+        Err(DbError::Conflict)
+    );
+
+    let card = |rank: i16, mal_id: i32| DeliveryInput {
+        rank,
+        mal_id,
+        chat_id: id,
+        message_id: 200 + i32::from(rank),
+    };
+    assert_eq!(
+        f.db.record_delivery(id, first, &card(2, 13)).await,
+        Err(DbError::Conflict)
+    );
+    assert_eq!(
+        f.db.record_delivery(id, first, &card(4, 14)).await,
+        Err(DbError::Conflict)
+    );
+    let position = created(f.db.record_delivery(id, first, &card(1, 11)).await.unwrap());
+    let next = created(f.db.record_delivery(id, first, &card(2, 12)).await.unwrap());
+
+    assert_eq!(
+        f.db.mark_watched(id, position).await.unwrap(),
+        WriteOutcome::Created(11)
+    );
+    assert_eq!(
+        f.db.mark_watched(id, position).await.unwrap(),
+        WriteOutcome::AlreadyRecorded(11)
+    );
+    assert_eq!(f.db.mark_watched(other, next).await, Err(DbError::NotFound));
+    assert_eq!(f.db.mark_watched(id, 999_999).await, Err(DbError::NotFound));
+    // The same title delivered for another request is already marked.
+    f.db.save_plan(id, third, &[11]).await.unwrap();
+    let again = created(f.db.record_delivery(id, third, &card(1, 11)).await.unwrap());
+    assert_eq!(
+        f.db.mark_watched(id, again).await.unwrap(),
+        WriteOutcome::AlreadyRecorded(11)
+    );
+    assert_eq!(f.db.known_titles(id).await.unwrap(), [11]);
+    f.db.rate_anime(id, first, 9).await.unwrap();
+    assert_eq!(f.db.known_titles(id).await.unwrap(), [11, 42]);
+    assert_eq!(f.db.known_titles(other).await.unwrap(), Vec::<i32>::new());
+    let marked: i64 = f
+        .direct
+        .query_one(
+            "SELECT position_id FROM arb_watched_marks WHERE tg_id=$1",
+            &[&id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(marked, position);
     cleanup(f).await;
 }
 
@@ -286,6 +557,15 @@ async fn records_replays_and_provenance() {
     assert_eq!(
         f.db.resolve_request(id, request, 43, BUNDLE_A).await,
         Err(DbError::Conflict)
+    );
+    assert_eq!(
+        f.db.record_delivery(id, request, &input).await,
+        Err(DbError::Conflict),
+        "a position outside the plan is rejected"
+    );
+    assert_eq!(
+        f.db.save_plan(id, request, &[100, 101]).await.unwrap(),
+        WriteOutcome::Created(())
     );
     assert_eq!(
         f.db.record_delivery(
@@ -522,6 +802,7 @@ async fn boundaries_concurrency_and_reconnect() {
             Err(DbError::InvalidInput(_))
         ));
     }
+    f.db.save_plan(id, request, &[i32::MAX]).await.unwrap();
     let position = created(
         f.db.record_delivery(
             id,
@@ -617,11 +898,12 @@ async fn boundaries_concurrency_and_reconnect() {
         .query_one("SELECT pg_terminate_backend($1)", &[&backend])
         .await
         .unwrap();
-    for _ in 0..1000 {
+    // The connection task notices the terminated backend asynchronously; give it real time.
+    for _ in 0..500 {
         if f.db.client.lock().await.is_closed() {
             break;
         }
-        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     assert!(f.db.client.lock().await.is_closed());
     assert!(matches!(

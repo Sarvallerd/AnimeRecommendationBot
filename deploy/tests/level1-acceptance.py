@@ -19,6 +19,8 @@ PG_TESTS = {
     "db::tests::migration_preserves_legacy_and_rejects_unknown_versions",
     "db::tests::records_replays_and_provenance",
     "db::tests::boundaries_concurrency_and_reconnect",
+    "db::tests::migration_2_keeps_v1_history_and_plans_what_was_delivered",
+    "db::tests::title_lists_plans_and_watched_marks",
     "postgres_public_router_records_profile_query_and_stable_resolution",
     "postgres_records_real_coordinates_and_provenance",
     "arb016_postgres_public_router_persists_scores_with_provenance",
