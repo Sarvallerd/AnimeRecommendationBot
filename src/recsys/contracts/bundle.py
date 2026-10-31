@@ -1,4 +1,9 @@
-"""Validate a v1 offline recommendation bundle with only Python's standard library."""
+"""Validate a v1 or v2 offline recommendation bundle with only Python's standard library.
+
+Version 2 keeps up to 50 neighbors per title as [mal_id, similarity] pairs and maps every
+title that is not the first entry of its franchise to that first entry. Neighbors are first
+entries only and never the source's own franchise.
+"""
 
 import argparse
 import hashlib
@@ -13,6 +18,8 @@ MAX_ID = 2_147_483_647
 ALGORITHMS = ("glove-mean-cosine", "itemknn-shrunk-cosine")
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 CATALOG_FIELDS = {"title", "aliases", "genres", "score", "year", "type", "episodes", "synopsis"}
+# Neighbors allowed per title by each bundle schema version.
+MAX_NEIGHBORS = {1: 5, 2: 50}
 
 type JSONValue = None | bool | int | float | str | list[JSONValue] | dict[str, JSONValue]
 
@@ -208,9 +215,28 @@ def check_catalog(value: object) -> set[str]:
     return set(anime)
 
 
-def check_neighbors(value: object, catalog_keys: set[str]) -> None:
-    value = exact_fields(value, {"schema_version", "neighbors"}, "neighbors.json")
-    integer(value["schema_version"], "neighbors.json.schema_version", 1, 1)
+def check_franchises(value: object, catalog_keys: set[str]) -> dict[str, int]:
+    """Return the first entry of every title that is not the first entry of its franchise."""
+    require(isinstance(value, dict), "neighbors.json.franchises", "expected object")
+    value = cast("dict[str, object]", value)  # Checked object above.
+    for key, first in value.items():
+        loc = f"neighbors.json.franchises.{key}"
+        mal_id(key, loc)
+        require(key in catalog_keys, loc, "title missing from catalog")
+        integer(first, loc, 1, MAX_ID)
+        require(str(first) in catalog_keys, loc, "first entry missing from catalog")
+        require(str(first) != key, loc, "a first entry is not listed")
+        require(str(first) not in value, loc, "first entry is not a first entry")
+    return cast("dict[str, int]", value)  # Every value was checked as an integer.
+
+
+def check_neighbors(value: object, catalog_keys: set[str], version: int = 1) -> None:
+    require(version in MAX_NEIGHBORS, "neighbors.json", f"unsupported version {version}")
+    required = {"schema_version", "neighbors"} | ({"franchises"} if version == 2 else set())
+    value = exact_fields(value, required, "neighbors.json")
+    integer(value["schema_version"], "neighbors.json.schema_version", version, version)
+    first_entries = check_franchises(value["franchises"], catalog_keys) if version == 2 else {}
+    limit = MAX_NEIGHBORS[version]
     neighbors = value["neighbors"]
     require(isinstance(neighbors, dict), "neighbors.json.neighbors", "expected object")
     neighbors = cast("dict[str, object]", neighbors)  # Checked object above.
@@ -223,13 +249,24 @@ def check_neighbors(value: object, catalog_keys: set[str]) -> None:
     )
     for source, items in neighbors.items():
         loc = f"neighbors.json.neighbors.{source}"
-        require(isinstance(items, list) and len(items) <= 5, loc, "expected array of at most 5")
+        require(
+            isinstance(items, list) and len(items) <= limit,
+            loc,
+            f"expected array of at most {limit}",
+        )
         items = cast("list[object]", items)  # Checked bounded array above.
+        own = first_entries.get(source, int(source))
         seen: set[int] = set()
         previous: tuple[int | float, int] | None = None
         for index, item in enumerate(items):
             item_loc = f"{loc}[{index}]"
-            item = exact_fields(item, {"mal_id", "similarity"}, item_loc)
+            if version == 1:
+                item = exact_fields(item, {"mal_id", "similarity"}, item_loc)
+            else:
+                require(
+                    isinstance(item, list) and len(item) == 2, item_loc, "expected [mal_id, score]"
+                )
+                item = dict(zip(("mal_id", "similarity"), cast("list[object]", item), strict=True))
             target = item["mal_id"]
             integer(target, f"{item_loc}.mal_id", 1, MAX_ID)
             target = cast("int", target)  # Validated integer above.
@@ -238,6 +275,13 @@ def check_neighbors(value: object, catalog_keys: set[str]) -> None:
             )
             require(str(target) != source, f"{item_loc}.mal_id", "self-neighbor")
             require(target not in seen, f"{item_loc}.mal_id", "duplicate neighbor")
+            if version == 2:
+                require(
+                    str(target) not in first_entries,
+                    f"{item_loc}.mal_id",
+                    "neighbor is not the first entry of its franchise",
+                )
+                require(target != own, f"{item_loc}.mal_id", "neighbor from the own franchise")
             seen.add(target)
             score = item["similarity"]
             number(score, f"{item_loc}.similarity", 0, 1, exclusive_low=True)
@@ -255,7 +299,8 @@ def check_manifest(value: object, raw: bytes, file_bytes: dict[str, bytes]) -> s
     value = exact_fields(
         value, {"schema_version", "algorithm", "sources", "files"}, "manifest.json"
     )
-    integer(value["schema_version"], "manifest.json.schema_version", 1, 1)
+    integer(value["schema_version"], "manifest.json.schema_version", 1, 2)
+    version = cast("int", value["schema_version"])  # Checked integer 1..2 above.
     algorithm = value["algorithm"]
     algorithm = exact_fields(
         algorithm,
@@ -268,7 +313,8 @@ def check_manifest(value: object, raw: bytes, file_bytes: dict[str, bytes]) -> s
         "expected " + " or ".join(ALGORITHMS),
     )
     nonblank(algorithm["version"], "manifest.json.algorithm.version")
-    integer(algorithm["max_neighbors"], "manifest.json.algorithm.max_neighbors", 5, 5)
+    limit = MAX_NEIGHBORS[version]
+    integer(algorithm["max_neighbors"], "manifest.json.algorithm.max_neighbors", limit, limit)
     require(
         algorithm["similarity"] == "cosine", "manifest.json.algorithm.similarity", "expected cosine"
     )
@@ -311,6 +357,11 @@ def check_manifest(value: object, raw: bytes, file_bytes: dict[str, bytes]) -> s
     return "sha256:" + hashlib.sha256(raw).hexdigest()
 
 
+def manifest_version(manifest: JSONValue) -> int:
+    """Return the schema version of a manifest that check_manifest accepted."""
+    return cast("int", cast("dict[str, JSONValue]", manifest)["schema_version"])
+
+
 def check_bundle_bytes(
     catalog_raw: bytes, neighbors_raw: bytes, manifest_raw: bytes
 ) -> tuple[str, int]:
@@ -322,7 +373,8 @@ def check_bundle_bytes(
         manifest, manifest_raw, {"catalog.json": catalog_raw, "neighbors.json": neighbors_raw}
     )
     keys = check_catalog(catalog)
-    check_neighbors(neighbors, keys)
+    # The neighbors file must carry the manifest's schema version.
+    check_neighbors(neighbors, keys, manifest_version(manifest))
     return identity, len(keys)
 
 
@@ -345,7 +397,7 @@ def check_bundle(bundle_dir: str | Path) -> tuple[str, int]:
         manifest, manifest_raw, {"catalog.json": catalog_raw, "neighbors.json": neighbors_raw}
     )
     keys = check_catalog(catalog)
-    check_neighbors(neighbors, keys)
+    check_neighbors(neighbors, keys, manifest_version(manifest))
     return identity, len(keys)
 
 

@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://anime-recommendation-bot.local/contracts/neighbors-v2.schema.json",
+  "title": "Anime neighbors v2",
+  "description": "Up to 50 [mal_id, similarity] pairs per title. franchises maps every title that is not the first entry of its franchise to that first entry. Neighbors are first entries only and never the source's own franchise; these cross-field rules are checked by contracts/check_bundle.py and the Rust loader.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "neighbors",
+    "franchises"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 2,
+      "type": "integer"
+    },
+    "neighbors": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[1-9][0-9]*$"
+      },
+      "additionalProperties": {
+        "type": "array",
+        "maxItems": 50,
+        "items": {
+          "type": "array",
+          "prefixItems": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 2147483647
+            },
+            {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "maximum": 1
+            }
+          ],
+          "minItems": 2,
+          "maxItems": 2
+        }
+      }
+    },
+    "franchises": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[1-9][0-9]*$"
+      },
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 2147483647
+      }
+    }
+  }
+}

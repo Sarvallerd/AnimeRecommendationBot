@@ -19,7 +19,11 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
 NAME = "itemknn-shrunk-cosine"
-MAX_NEIGHBORS = 5
+# Bundle v2 keeps 50 neighbors per title so the bot can combine several titles; 6 significant
+# digits of similarity keep neighbors.json near 25 MB.
+BUNDLE_VERSION = 2
+MAX_NEIGHBORS = 50
+SIMILARITY_DIGITS = 6
 POSITIVE_MIN_RATING = 8
 SHRINKAGE = 10
 USER_CHUNK = 16384
@@ -41,7 +45,7 @@ SERIES = frozenset({"TV", "TV_SHORT"})
 MAIN_ENTRIES = frozenset({"MOVIE", "ONA", "OVA"})
 ALGORITHM = {
     "name": NAME,
-    "version": "arb069-v2",
+    "version": "arb069-v3",
     "max_neighbors": MAX_NEIGHBORS,
     "similarity": "cosine",
     "parameters": {
@@ -59,6 +63,7 @@ ALGORITHM = {
         "positive_min_rating": POSITIVE_MIN_RATING,
         "positive_status": "completed",
         "shrinkage": SHRINKAGE,
+        "similarity_significant_digits": SIMILARITY_DIGITS,
         "tie_break": "numeric_MAL_ID_ascending",
         "users": "all-dataset-users",
         "weight": "c/sqrt(p_i*p_j)*c/(c+shrinkage)",
@@ -67,7 +72,7 @@ ALGORITHM = {
 RELATIONS_SNAPSHOT = "anilist-relations-2026-v1"
 RELATIONS_SHA256 = "e4a42d0618446cc02ef95076ea1bb1309e39f778070d9eb93205260184389348"
 # Identity of the bundle derived from the pinned current release; a rebuild must reproduce it.
-CURRENT_IDENTITY = "sha256:6eec1413efcfdb129cbb51618917972efd01392ba815534e81bbe5fb5336cbf2"
+CURRENT_IDENTITY = "sha256:c9c740f20aa43ae9246b6238029de0cfa26fb29434f9661424f689fe6bca6ac0"
 
 
 def _sha(raw: bytes) -> str:
@@ -313,13 +318,17 @@ def top_neighbors(
 
 
 def _as_first_entries(
-    pairs: list[tuple[int, float]], ids: list[int], groups: list[int], representatives: list[int]
-) -> list[dict[str, object]]:
-    shown = [(ids[representatives[groups[column]]], weight) for column, weight in pairs]
-    return [
-        {"mal_id": mal_id, "similarity": weight}
-        for mal_id, weight in sorted(shown, key=lambda pair: (-pair[1], pair[0]))
+    pairs: Sequence[tuple[int, float]],
+    ids: list[int],
+    groups: list[int],
+    representatives: list[int],
+) -> list[list[int | float]]:
+    # Rounding can create ties, so the contract order is restored afterwards.
+    shown = [
+        (ids[representatives[groups[column]]], float(f"{weight:.{SIMILARITY_DIGITS}g}"))
+        for column, weight in pairs
     ]
+    return [[mal_id, weight] for mal_id, weight in sorted(shown, key=lambda p: (-p[1], p[0]))]
 
 
 def derive_itemknn_bundle(
@@ -399,7 +408,14 @@ def derive_itemknn_bundle(
         else:
             itemknn_items += 1
         neighbors[str(mal_id)] = _as_first_entries(pairs, ids, groups, representatives)
-    neighbors_raw = canonical_bytes({"schema_version": 1, "neighbors": neighbors})
+    first_entries = {
+        str(mal_id): ids[representatives[groups[column]]]
+        for column, mal_id in enumerate(ids)
+        if representatives[groups[column]] != column
+    }
+    neighbors_raw = canonical_bytes(
+        {"schema_version": BUNDLE_VERSION, "neighbors": neighbors, "franchises": first_entries}
+    )
     sources: list[dict[str, object]] = []
     if relations is not None:
         sources.append(
@@ -434,7 +450,7 @@ def derive_itemknn_bundle(
     ]
     manifest = canonical_bytes(
         {
-            "schema_version": 1,
+            "schema_version": BUNDLE_VERSION,
             "algorithm": ALGORITHM,
             "sources": sources,
             "files": {
