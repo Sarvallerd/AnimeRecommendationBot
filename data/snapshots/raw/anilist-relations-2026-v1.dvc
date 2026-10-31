@@ -1,0 +1,6 @@
+outs:
+- md5: 8b43ea970cbeffc6b1aafbb0b648b245.dir
+  size: 224143
+  nfiles: 2
+  hash: md5
+  path: anilist-relations-2026-v1
