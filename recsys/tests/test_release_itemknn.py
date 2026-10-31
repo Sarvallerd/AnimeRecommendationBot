@@ -16,6 +16,7 @@ from scipy.sparse import csr_matrix
 from recsys.contracts.bundle import ContractError, check_bundle
 from recsys.release.itemknn import (
     ALGORITHM,
+    _as_first_entries,
     derive_current,
     derive_itemknn_bundle,
     franchise_groups,
@@ -222,6 +223,28 @@ class PositiveMatrixTests(unittest.TestCase):
         indptr, indices, watchers = positive_matrix(raw, {1: 0, 2: 1}, len(rows))
         self.assertEqual((indptr.tolist(), indices.tolist()), ([0, 1], [1]))
         self.assertEqual(watchers, [2, 2])
+
+
+class FirstEntryTests(unittest.TestCase):
+    def test_rounding_ties_are_ordered_by_the_shown_mal_id(self) -> None:
+        ids = [5, 7, 9]
+        # 9 is slightly stronger than 5, but both round to 0.123456.
+        pairs = [(2, 0.1234564), (0, 0.1234561), (1, 0.05)]
+        self.assertEqual(
+            _as_first_entries(pairs, ids, [0, 1, 2], [0, 1, 2]),
+            [[5, 0.123456], [9, 0.123456], [7, 0.05]],
+        )
+
+    def test_ties_at_the_cut_off_follow_the_shown_entry(self) -> None:
+        # Item 0 is liked once with 1 and once with 2, so both tie. Column 1 belongs to the
+        # franchise shown as 3, column 2 is shown as itself: the smaller shown entry wins.
+        indptr = np.array([0, 2, 4], dtype=np.int64)
+        indices = np.array([0, 1, 0, 2], dtype=np.int32)
+        groups, shown = [0, 1, 2, 1], [0, 3, 2, 3]
+        tied = top_neighbors(indptr, indices, 4, limit=1, groups=groups)
+        self.assertEqual([column for column, _ in tied[0]], [1])
+        chosen = top_neighbors(indptr, indices, 4, limit=1, groups=groups, shown=shown)
+        self.assertEqual([column for column, _ in chosen[0]], [2])
 
 
 class TopNeighborParityTests(unittest.TestCase):

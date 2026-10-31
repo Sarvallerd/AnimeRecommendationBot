@@ -11,6 +11,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from recsys.contracts.bundle import MAX_NEIGHBORS as BUNDLE_NEIGHBORS
 from recsys.contracts.bundle import ContractError, canonical_bytes, check_bundle_bytes, require
 from recsys.release.export import _publish
 
@@ -22,7 +23,7 @@ NAME = "itemknn-shrunk-cosine"
 # Bundle v2 keeps 50 neighbors per title so the bot can combine several titles; 6 significant
 # digits of similarity keep neighbors.json near 25 MB.
 BUNDLE_VERSION = 2
-MAX_NEIGHBORS = 50
+MAX_NEIGHBORS = BUNDLE_NEIGHBORS[BUNDLE_VERSION]
 SIMILARITY_DIGITS = 6
 POSITIVE_MIN_RATING = 8
 SHRINKAGE = 10
@@ -72,7 +73,7 @@ ALGORITHM = {
 RELATIONS_SNAPSHOT = "anilist-relations-2026-v1"
 RELATIONS_SHA256 = "e4a42d0618446cc02ef95076ea1bb1309e39f778070d9eb93205260184389348"
 # Identity of the bundle derived from the pinned current release; a rebuild must reproduce it.
-CURRENT_IDENTITY = "sha256:c9c740f20aa43ae9246b6238029de0cfa26fb29434f9661424f689fe6bca6ac0"
+CURRENT_IDENTITY = "sha256:853860ea9bc36887a6e96a4e8012dddf0393eeebddd296214c94ed99aab034e0"
 
 
 def _sha(raw: bytes) -> str:
@@ -263,14 +264,17 @@ def top_neighbors(
     items: int,
     limit: int = MAX_NEIGHBORS,
     groups: Sequence[int] | None = None,
+    shown: Sequence[int] | None = None,
 ) -> list[list[tuple[int, float]]]:
     """Return each item's strongest (column, similarity) pairs, ordered like the research model.
 
     With ``groups``, the item's own group is skipped and only the strongest member of each
-    other group is kept.
+    other group is kept. ``shown`` gives the column each candidate is shown as; equal
+    similarities are then ordered by it, so ties at the cut-off follow the shown MAL ID.
     """
     import numpy as np
 
+    tie_key = np.asarray(shown, dtype=np.int64) if shown is not None else None
     users = len(indptr) - 1
     lengths = np.diff(indptr)
     positive = np.bincount(indices, minlength=items)
@@ -299,7 +303,10 @@ def top_neighbors(
             * shared
             / (shared + SHRINKAGE)
         )
-        order = np.lexsort((candidate, -similarity))
+        if tie_key is None:
+            order = np.lexsort((candidate, -similarity))
+        else:
+            order = np.lexsort((candidate, tie_key[candidate], -similarity))
         if groups is None:
             chosen = order[:limit].tolist()
         else:
@@ -392,7 +399,8 @@ def derive_itemknn_bundle(
         franchise_stats: dict[str, int] = {}
     else:
         groups, representatives, franchise_stats = franchise_groups(relations_raw, ids, watchers)
-    fitted = top_neighbors(indptr, indices, len(ids), groups=groups)
+    shown = [representatives[group] for group in groups]
+    fitted = top_neighbors(indptr, indices, len(ids), groups=groups, shown=shown)
 
     neighbors: dict[str, object] = {}
     itemknn_items = fallback_items = 0

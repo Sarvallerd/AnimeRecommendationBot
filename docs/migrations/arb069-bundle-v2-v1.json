@@ -211,7 +211,7 @@
     },
     "src/recsys/release/itemknn.py": {
       "from": "dad8c6fc22adc1647106e04523ba1f751a7eef969129022058ca29a663db3cb3",
-      "to": "d5c1022f936d597ea9044d9c5fa02dc766f36880e7aaed4bc1591f037c9f30df"
+      "to": "b83a913513d98cb6ff1868ef07dc40900a296c43f52981e67ecd60ed392b93c9"
     }
   },
   "preserved_resource_sha256": {
@@ -259,16 +259,17 @@
     "schema_version": 2,
     "max_neighbors": 50,
     "similarity_significant_digits": 6,
-    "identity": "sha256:c9c740f20aa43ae9246b6238029de0cfa26fb29434f9661424f689fe6bca6ac0",
+    "identity": "sha256:853860ea9bc36887a6e96a4e8012dddf0393eeebddd296214c94ed99aab034e0",
     "neighbor_pairs": 1410502,
     "franchise_map_entries": 7497,
-    "neighbors_json_bytes": 24010492,
+    "neighbors_json_bytes": 23984395,
     "franchises": 2607,
     "grouped_titles": 10104,
     "crossovers": 31,
     "itemknn_items": 28135,
     "fallback_items": 813,
-    "empty_items": 7
+    "empty_items": 7,
+    "tie_break_at_cut_off": "shown-first-entry-MAL-ID"
   },
   "bundle_contract_changed": true,
   "release_lock_changed": false,

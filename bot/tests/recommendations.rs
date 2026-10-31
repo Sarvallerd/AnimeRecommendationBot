@@ -202,6 +202,45 @@ fn bundle_with(
     (dir, loaded)
 }
 
+/// A v2 bundle in which title 1 has eight neighbors, three more than a card set.
+fn bundle_v2() -> (tempfile::TempDir, Arc<Bundle>) {
+    let dir = tempfile::tempdir().unwrap();
+    let base = Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/bundle-v2"
+    ));
+    let read = |name: &str| -> Value {
+        serde_json::from_slice(&std::fs::read(base.join(name)).unwrap()).unwrap()
+    };
+    let (mut catalog, mut neighbors, mut manifest) = (
+        read("catalog.json"),
+        read("neighbors.json"),
+        read("manifest.json"),
+    );
+    for id in ["100", "101", "102"] {
+        catalog["anime"][id] = catalog["anime"]["20"].clone();
+        neighbors["neighbors"][id] = json!([]);
+    }
+    neighbors["neighbors"]["1"] = json!([
+        [2, 0.9],
+        [3, 0.8],
+        [12, 0.7],
+        [20, 0.6],
+        [99, 0.5],
+        [100, 0.4],
+        [101, 0.3],
+        [102, 0.2]
+    ]);
+    for (name, value) in [("catalog.json", &catalog), ("neighbors.json", &neighbors)] {
+        let bytes = format!("{value}\n").into_bytes();
+        std::fs::write(dir.path().join(name), &bytes).unwrap();
+        manifest["files"][name]["sha256"] = json!(format!("{:x}", Sha256::digest(&bytes)));
+    }
+    std::fs::write(dir.path().join("manifest.json"), format!("{manifest}\n")).unwrap();
+    let loaded = Arc::new(Bundle::load(dir.path()).unwrap());
+    (dir, loaded)
+}
+
 fn english_bundle() -> (tempfile::TempDir, Arc<Bundle>) {
     bundle_with(5, false, |catalog| {
         catalog["anime"]["1"]["title"] = json!("Shingeki no Kyojin");
@@ -548,6 +587,31 @@ async fn canonical_five_two_and_empty_card_sets() {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn v2_bundle_shows_the_first_five_of_fifty_neighbors() {
+    let (_dir, bundle) = bundle_v2();
+    assert_eq!(bundle.neighbors(1).unwrap().len(), 8);
+    let repo = Arc::new(FakeRepo::default());
+    let ctx = context(bundle.clone(), repo.clone());
+    let api = FakeTelegram::new();
+    let sel = selection(&bundle, 1, 1);
+    let mut session = session(&sel);
+    for _ in 0..2 {
+        recommendations::begin(&api.bot(), &ctx, ACTOR, &mut session, &sel)
+            .await
+            .unwrap();
+    }
+    let rows = repo.rows.lock().unwrap().clone();
+    assert_eq!(
+        rows.iter().map(|row| row.mal_id).collect::<Vec<_>>(),
+        [2, 3, 12, 20, 99]
+    );
+    assert_eq!(*repo.plans.lock().unwrap(), [(1, vec![2, 3, 12, 20, 99])]);
+    let texts = sent_texts(&api);
+    assert_eq!(texts.len(), 5);
+    assert!(texts[4].contains("Рекомендация 5/5"));
 }
 
 #[tokio::test]
