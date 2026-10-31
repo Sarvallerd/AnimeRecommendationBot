@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 from array import array
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -23,13 +24,30 @@ POSITIVE_MIN_RATING = 8
 SHRINKAGE = 10
 USER_CHUNK = 16384
 HEADER = b"dataset_user_key\tmal_id\trating\twatch_status\n"
+# AniList relation types that keep two anime in one franchise; spin-offs and crossovers do not.
+LINKING = frozenset(
+    {
+        "ALTERNATIVE",
+        "COMPILATION",
+        "CONTAINS",
+        "PARENT",
+        "PREQUEL",
+        "SEQUEL",
+        "SIDE_STORY",
+        "SUMMARY",
+    }
+)
 ALGORITHM = {
     "name": NAME,
-    "version": "arb069-v1",
+    "version": "arb069-v2",
     "max_neighbors": MAX_NEIGHBORS,
     "similarity": "cosine",
     "parameters": {
         "fallback": "glove-mean-cosine-when-no-itemknn-neighbor",
+        "franchise": "one-card-per-franchise-shown-as-first-entry-seed-franchise-excluded",
+        "franchise_relations": sorted(LINKING),
+        "franchise_crossovers": "parents-in-several-franchises-stay-alone",
+        "franchise_representative": "most-rated-rated-TV-without-TV-prequel-else-earliest-start",
         "positive_min_rating": POSITIVE_MIN_RATING,
         "positive_status": "completed",
         "shrinkage": SHRINKAGE,
@@ -38,8 +56,10 @@ ALGORITHM = {
         "weight": "c/sqrt(p_i*p_j)*c/(c+shrinkage)",
     },
 }
+RELATIONS_SNAPSHOT = "anilist-relations-2026-v1"
+RELATIONS_SHA256 = "983cd6817046b15218f5521444629a17f379be08b220d707c31b907504749814"
 # Identity of the bundle derived from the pinned current release; a rebuild must reproduce it.
-CURRENT_IDENTITY = "sha256:a9f4cf27520460a10d9dc2ec18d3d0e556730fbfb61f6e60f666733ce166e2a2"
+CURRENT_IDENTITY = "sha256:71922992ff102b418edc1ba10bd054495b016f2491d2e0fa01b910f032714331"
 
 
 def _sha(raw: bytes) -> str:
@@ -90,10 +110,128 @@ def positive_matrix(
     return np.frombuffer(indptr, dtype=np.int64), np.frombuffer(indices, dtype=np.int32)
 
 
+def _start_key(record: dict[str, object]) -> tuple[int, int, int]:
+    parts = record.get("start_date")
+    values = parts if isinstance(parts, list) and len(parts) == 3 else [None, None, None]
+    year, month, day = (
+        value if isinstance(value, int) and not isinstance(value, bool) else unknown
+        for value, unknown in zip(values, (9999, 99, 99), strict=True)
+    )
+    return year, month, day
+
+
+def franchise_groups(
+    raw_gz: bytes, ids: list[int], popularity: Sequence[int] | None = None
+) -> tuple[list[int], list[int], dict[str, int]]:
+    """Group catalog columns into franchises and pick the card that stands for each one.
+
+    Returns the group of every column, the representative column of every group and counts.
+    Titles without a usable relation stay in a group of their own. The representative is the
+    most rated first season: a TV series with no TV prequel in the franchise, so a remake such
+    as Fullmetal Alchemist: Brotherhood wins over the older series. Franchises without a TV
+    series show their earliest entry.
+    """
+    columns = {mal_id: column for column, mal_id in enumerate(ids)}
+    parent = list(range(len(ids)))
+
+    def root(column: int) -> int:
+        while parent[column] != column:
+            parent[column] = parent[parent[column]]
+            column = parent[column]
+        return column
+
+    def union(a: int, b: int) -> None:
+        a, b = root(a), root(b)
+        if a != b:
+            parent[max(a, b)] = min(a, b)
+
+    records: dict[int, dict[str, object]] = {}
+    edges: list[tuple[int, int, str]] = []
+    for line in gzip.decompress(raw_gz).splitlines():
+        record = _object(json.loads(line), "relations.jsonl")
+        mal_id = record.get("mal_id")
+        if not isinstance(mal_id, int) or mal_id not in columns:
+            raise ContractError("relations.jsonl: MAL ID missing from catalog")
+        records[columns[mal_id]] = record
+        relations = record.get("relations")
+        if not isinstance(relations, list):
+            raise ContractError("relations.jsonl: expected relations array")
+        for relation in relations:
+            if not isinstance(relation, list) or len(relation) != 2:
+                raise ContractError("relations.jsonl: expected [type, MAL ID] pairs")
+            kind, target = relation
+            if isinstance(kind, str) and isinstance(target, int) and target in columns:
+                edges.append((columns[mal_id], columns[target], kind))
+
+    parents: dict[int, set[int]] = {}
+    for source, target, kind in edges:
+        if kind == "PARENT":
+            parents.setdefault(source, set()).add(target)
+    # A title with several parents joins only if they turn out to share one franchise; a
+    # crossover such as Lupin III vs. Detective Conan must not merge two franchises.
+    pending = {column for column, found in parents.items() if len(found) > 1}
+    for source, target, kind in edges:
+        if kind in LINKING and source not in pending and target not in pending:
+            union(source, target)
+    crossovers = 0
+    for column in sorted(pending):
+        roots = {root(target) for target in parents[column]}
+        if len(roots) == 1:
+            union(column, roots.pop())
+        else:
+            crossovers += 1
+
+    tv = [records.get(column, {}).get("format") == "TV" for column in range(len(ids))]
+    continued = set()
+    for source, target, kind in edges:
+        if root(source) == root(target) and tv[source] and tv[target]:
+            if kind == "PREQUEL":
+                continued.add(source)
+            elif kind == "SEQUEL":
+                continued.add(target)
+    # Without popularity every title counts as rated, so TV series keep their preference.
+    rated = popularity if popularity is not None else [1] * len(ids)
+
+    def preference(column: int) -> tuple[int, int, tuple[int, int, int], int]:
+        # An announced or unwatched TV series gets no TV preference over a rated movie.
+        watched_tv = tv[column] and rated[column] > 0
+        rank = 0 if watched_tv and column not in continued else 1 if watched_tv else 2
+        # Popularity decides among TV entries only; other franchises keep their earliest entry.
+        weight = -rated[column] if rank < 2 else 0
+        return (rank, weight, _start_key(records.get(column, {})), ids[column])
+
+    members: dict[int, list[int]] = {}
+    for column in range(len(ids)):
+        members.setdefault(root(column), []).append(column)
+    groups = [0] * len(ids)
+    representatives: list[int] = []
+    for index, cluster in enumerate(sorted(members.values())):
+        for column in cluster:
+            groups[column] = index
+        representatives.append(min(cluster, key=preference))
+    sizes = [len(cluster) for cluster in members.values()]
+    stats = {
+        "titles_with_relations": len(records),
+        "franchises": sum(size > 1 for size in sizes),
+        "grouped_titles": sum(size for size in sizes if size > 1),
+        "largest_franchise": max(sizes),
+        "crossovers": crossovers,
+    }
+    return groups, representatives, stats
+
+
 def top_neighbors(
-    indptr: NDArray[np.int64], indices: NDArray[np.int32], items: int, limit: int = MAX_NEIGHBORS
+    indptr: NDArray[np.int64],
+    indices: NDArray[np.int32],
+    items: int,
+    limit: int = MAX_NEIGHBORS,
+    groups: Sequence[int] | None = None,
 ) -> list[list[tuple[int, float]]]:
-    """Return each item's strongest (column, similarity) pairs, ordered like the research model."""
+    """Return each item's strongest (column, similarity) pairs, ordered like the research model.
+
+    With ``groups``, the item's own group is skipped and only the strongest member of each
+    other group is kept.
+    """
     import numpy as np
 
     users = len(indptr) - 1
@@ -124,9 +262,31 @@ def top_neighbors(
             * shared
             / (shared + SHRINKAGE)
         )
-        chosen = np.lexsort((candidate, -similarity))[:limit]
+        order = np.lexsort((candidate, -similarity))
+        if groups is None:
+            chosen = order[:limit].tolist()
+        else:
+            seen = {groups[column]}
+            chosen = []
+            for i in order.tolist():
+                group = groups[int(candidate[i])]
+                if group not in seen:
+                    seen.add(group)
+                    chosen.append(i)
+                    if len(chosen) == limit:
+                        break
         result.append([(int(candidate[i]), float(similarity[i])) for i in chosen])
     return result
+
+
+def _as_first_entries(
+    pairs: list[tuple[int, float]], ids: list[int], groups: list[int], representatives: list[int]
+) -> list[dict[str, object]]:
+    shown = [(ids[representatives[groups[column]]], weight) for column, weight in pairs]
+    return [
+        {"mal_id": mal_id, "similarity": weight}
+        for mal_id, weight in sorted(shown, key=lambda pair: (-pair[1], pair[0]))
+    ]
 
 
 def derive_itemknn_bundle(
@@ -137,10 +297,13 @@ def derive_itemknn_bundle(
     expected_base_identity: str,
     expected_dataset_identity: str,
     expected_identity: str = "",
+    relations: Path | None = None,
+    expected_relations_sha256: str = "",
 ) -> tuple[Path, str, int]:
     """Publish the derived bundle and return (path, identity, catalog record count).
 
-    A nonempty ``expected_identity`` must match before anything is published.
+    A nonempty ``expected_identity`` must match before anything is published. ``relations``
+    is an AniList relations snapshot; without it every title is its own franchise.
     """
     base = {name: (base_bundle / name).read_bytes() for name in ("catalog.json", "neighbors.json")}
     base_manifest = (base_bundle / "manifest.json").read_bytes()
@@ -173,22 +336,51 @@ def derive_itemknn_bundle(
     if not isinstance(rows, int):
         raise ContractError("files.interactions.tsv.gz.rows: expected integer")
     columns = {mal_id: column for column, mal_id in enumerate(ids)}
+    relations_raw = b""
+    if relations is not None:
+        relations_raw = (relations / "relations.jsonl.gz").read_bytes()
+        require(
+            _sha(relations_raw) == expected_relations_sha256,
+            str(relations),
+            "unexpected relations snapshot",
+        )
     indptr, indices = positive_matrix(raw_gz, columns, rows)
-    fitted = top_neighbors(indptr, indices, len(ids))
+    if relations is None:
+        groups, representatives = list(range(len(ids))), list(range(len(ids)))
+        franchise_stats: dict[str, int] = {}
+    else:
+        import numpy as np
+
+        popularity = np.bincount(indices, minlength=len(ids)).tolist()
+        groups, representatives, franchise_stats = franchise_groups(relations_raw, ids, popularity)
+    fitted = top_neighbors(indptr, indices, len(ids), groups=groups)
 
     neighbors: dict[str, object] = {}
     itemknn_items = fallback_items = 0
-    for mal_id, pairs in zip(ids, fitted, strict=True):
-        if pairs:
-            itemknn_items += 1
-            neighbors[str(mal_id)] = [
-                {"mal_id": ids[column], "similarity": weight} for column, weight in pairs
-            ]
+    for column, (mal_id, pairs) in enumerate(zip(ids, fitted, strict=True)):
+        if not pairs:
+            seen = {groups[column]}
+            for entry in _glove_list(glove[str(mal_id)]):
+                target = columns[entry[0]]
+                if groups[target] not in seen and len(pairs) < MAX_NEIGHBORS:
+                    seen.add(groups[target])
+                    pairs.append((target, entry[1]))
+            fallback_items += bool(pairs)
         else:
-            fallback_items += bool(glove[str(mal_id)])
-            neighbors[str(mal_id)] = glove[str(mal_id)]
+            itemknn_items += 1
+        neighbors[str(mal_id)] = _as_first_entries(pairs, ids, groups, representatives)
     neighbors_raw = canonical_bytes({"schema_version": 1, "neighbors": neighbors})
-    sources = [
+    sources: list[dict[str, object]] = []
+    if relations is not None:
+        sources.append(
+            {
+                "name": "anilist_relations",
+                "version": "1",
+                "sha256": _sha(relations_raw),
+                "metadata": {"snapshot_id": RELATIONS_SNAPSHOT, **franchise_stats},
+            }
+        )
+    sources += [
         {
             "name": "glove_bundle",
             "version": "1",
@@ -241,6 +433,19 @@ def derive_itemknn_bundle(
     return published, identity, count
 
 
+def _glove_list(value: object) -> list[tuple[int, int | float]]:
+    if not isinstance(value, list):
+        raise ContractError("neighbors.json: expected neighbor list")
+    pairs = []
+    for entry in value:
+        entry = _object(entry, "neighbors.json")
+        mal_id, weight = entry.get("mal_id"), entry.get("similarity")
+        if not isinstance(mal_id, int) or not isinstance(weight, int | float):
+            raise ContractError("neighbors.json: invalid neighbor")
+        pairs.append((mal_id, weight))
+    return pairs
+
+
 def derive_current(data_dir: Path) -> tuple[Path, str, int]:
     """Derive from the pinned current release inside a prepared data directory."""
     from recsys.release.lock import release_info
@@ -258,4 +463,6 @@ def derive_current(data_dir: Path) -> tuple[Path, str, int]:
         expected_base_identity=base_identity,
         expected_dataset_identity=dataset_identity,
         expected_identity=CURRENT_IDENTITY,
+        relations=data_dir / "raw" / RELATIONS_SNAPSHOT,
+        expected_relations_sha256=RELATIONS_SHA256,
     )
