@@ -148,7 +148,7 @@ assert_selection() {
     compose logs --no-color bot | grep -F "Loaded recommendation bundle $expected (" >/dev/null
 }
 assert_selection "$legacy_bundle"
-[[ "$(compose exec -T postgres psql -At -U anime_bot anime_bot -c 'SELECT string_agg(version::text, chr(44) ORDER BY version) FROM arb_schema_migrations')" == 1 ]]
+[[ "$(compose exec -T postgres psql -At -U anime_bot anime_bot -c 'SELECT string_agg(version::text, chr(44) ORDER BY version) FROM arb_schema_migrations')" == 1,2 ]]
 compose exec -T postgres psql -v ON_ERROR_STOP=1 -U anime_bot anime_bot < deploy/tests/history.sql >/dev/null
 compose exec -T postgres psql -At -U anime_bot anime_bot < deploy/tests/snapshot.sql > "$output/before.json"
 echo LEVEL1_COMPOSE_LEGACY_A_PASS
@@ -167,7 +167,7 @@ wait_exit_zero bot
 assert_selection "$legacy_bundle"
 compose exec -T postgres psql -At -U anime_bot anime_bot < deploy/tests/snapshot.sql > "$output/after-restart.json"
 diff -u "$output/before.json" "$output/after-restart.json"
-[[ "$(compose exec -T postgres psql -At -U anime_bot anime_bot -c 'SELECT count(*) FROM arb_schema_migrations')" == 1 ]]
+[[ "$(compose exec -T postgres psql -At -U anime_bot anime_bot -c 'SELECT count(*) FROM arb_schema_migrations')" == 2 ]]
 postgres_id=$(compose ps -a -q postgres)
 postgres_volume=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Name}}{{end}}{{end}}' "$postgres_id")
 [[ -n "$postgres_id" && -n "$postgres_volume" ]]

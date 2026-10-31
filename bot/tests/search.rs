@@ -181,6 +181,7 @@ struct FakeRepo {
     queries: Mutex<HashMap<(i64, String), (String, i64)>>,
     resolutions: Mutex<Vec<(i64, i64, i32, String)>>,
     deliveries: Mutex<Vec<DeliveredPosition>>,
+    plans: Mutex<Vec<(RequestId, Vec<i32>)>>,
     fail_upsert: AtomicBool,
     fail_query_after_commit: AtomicBool,
     fail_resolve: AtomicBool,
@@ -248,6 +249,24 @@ impl Repository for FakeRepo {
             }
             rows.push((user, request, mal, bundle.to_owned()));
             Ok(WriteOutcome::Created(()))
+        })
+    }
+    fn save_plan<'a>(
+        &'a self,
+        _: i64,
+        request: RequestId,
+        mal_ids: &'a [i32],
+    ) -> DbFuture<'a, WriteOutcome<()>> {
+        Box::pin(async move {
+            let mut plans = self.plans.lock().unwrap();
+            match plans.iter().find(|(id, _)| *id == request) {
+                Some((_, plan)) if plan == mal_ids => Ok(WriteOutcome::AlreadyRecorded(())),
+                Some(_) => Err(DbError::Conflict),
+                None => {
+                    plans.push((request, mal_ids.to_vec()));
+                    Ok(WriteOutcome::Created(()))
+                }
+            }
         })
     }
     fn record_delivery<'a>(

@@ -110,6 +110,11 @@ async fn deliver(
             .await?;
         return Ok(());
     }
+    // Every card must belong to the plan fixed before the first one is sent.
+    let plan: Vec<MalId> = neighbors.iter().map(|neighbor| neighbor.mal_id).collect();
+    ctx.repository
+        .save_plan(actor.user_id, selection.query.request_id, &plan)
+        .await?;
     for (index, neighbor) in neighbors.iter().enumerate() {
         let rank = i16::try_from(index + 1).map_err(|_| DbError::Conflict)?;
         if let Some(row) = recorded.iter().find(|row| row.rank == rank) {

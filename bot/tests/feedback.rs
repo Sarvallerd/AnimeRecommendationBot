@@ -72,6 +72,14 @@ impl Repository for FakeRepo {
     ) -> DbFuture<'a, WriteOutcome<()>> {
         Box::pin(async { panic!("unexpected selection") })
     }
+    fn save_plan<'a>(
+        &'a self,
+        _: i64,
+        _: RequestId,
+        _: &'a [i32],
+    ) -> DbFuture<'a, WriteOutcome<()>> {
+        Box::pin(async { panic!("unexpected plan") })
+    }
     fn record_delivery<'a>(
         &'a self,
         _: i64,

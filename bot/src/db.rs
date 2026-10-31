@@ -8,6 +8,14 @@ pub type RequestId = i64;
 pub type PositionId = i64;
 pub type AnimeRatingEventId = i64;
 
+const MIGRATIONS: [(i64, &str); 2] = [
+    (1, include_str!("../migrations/0001_feedback_v1.sql")),
+    (2, include_str!("../migrations/0002_title_lists_v2.sql")),
+];
+// A list holds up to five titles; a plan holds as many cards as a bundle has neighbours.
+const MAX_TITLES: usize = 5;
+const MAX_PLANNED: usize = 5;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WriteOutcome<T> {
     Created(T),
@@ -36,6 +44,13 @@ impl fmt::Display for DbError {
 impl Error for DbError {}
 fn database_error(_: tokio_postgres::Error) -> DbError {
     DbError::DatabaseFailure
+}
+fn write_error(error: tokio_postgres::Error) -> DbError {
+    if error.code() == Some(&tokio_postgres::error::SqlState::UNIQUE_VIOLATION) {
+        DbError::Conflict
+    } else {
+        DbError::DatabaseFailure
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,20 +116,35 @@ impl Db {
         transaction.batch_execute(
             "CREATE TABLE IF NOT EXISTS arb_schema_migrations (version BIGINT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())"
         ).await.map_err(database_error)?;
-        let versions = transaction
-            .query("SELECT version FROM arb_schema_migrations", &[])
+        let applied: Vec<i64> = transaction
+            .query(
+                "SELECT version FROM arb_schema_migrations ORDER BY version",
+                &[],
+            )
             .await
-            .map_err(database_error)?;
-        if versions.iter().any(|row| row.get::<_, i64>(0) != 1) {
+            .map_err(database_error)?
+            .iter()
+            .map(|row| row.get(0))
+            .collect();
+        // Applied versions must be a prefix of the known ones; anything else is a newer schema.
+        if applied.len() > MIGRATIONS.len()
+            || applied
+                .iter()
+                .zip(MIGRATIONS)
+                .any(|(version, (known, _))| *version != known)
+        {
             return Err(DbError::Conflict);
         }
-        if versions.is_empty() {
+        for (version, sql) in &MIGRATIONS[applied.len()..] {
             transaction
-                .batch_execute(include_str!("../migrations/0001_feedback_v1.sql"))
+                .batch_execute(sql)
                 .await
                 .map_err(database_error)?;
             transaction
-                .execute("INSERT INTO arb_schema_migrations(version) VALUES (1)", &[])
+                .execute(
+                    "INSERT INTO arb_schema_migrations(version) VALUES ($1)",
+                    &[version],
+                )
                 .await
                 .map_err(database_error)?;
         }
@@ -239,16 +269,19 @@ impl Db {
             return Err(DbError::InvalidInput("invalid message ID"));
         }
         let client = self.client().await?;
-        let row = client
+        // Only the planned title of a rank can be delivered. A plan exists only for a resolved
+        // request and never contains one of its seeds.
+        let planned: Option<i32> = client
             .query_opt(
-                "SELECT seed_mal_id FROM arb_requests WHERE id=$1 AND tg_id=$2",
-                &[&request_id, &tg_id],
+                "SELECT p.mal_id FROM arb_requests r LEFT JOIN arb_request_plans p
+                 ON p.request_id=r.id AND p.rank=$3 WHERE r.id=$1 AND r.tg_id=$2",
+                &[&request_id, &tg_id, &input.rank],
             )
             .await
             .map_err(database_error)?
-            .ok_or(DbError::NotFound)?;
-        let seed: i32 = row.get::<_, Option<i32>>(0).ok_or(DbError::Conflict)?;
-        if seed == input.mal_id {
+            .ok_or(DbError::NotFound)?
+            .get(0);
+        if planned != Some(input.mal_id) {
             return Err(DbError::Conflict);
         }
         let row = client
@@ -325,6 +358,249 @@ impl Db {
                 chat_id: row.get(4),
                 message_id: row.get(5),
             })
+            .collect())
+    }
+    /// Lists the titles a request recommends from. `seeds[0]` is the request itself; the others
+    /// are confirmed searches of the same user with the same bundle.
+    pub async fn save_request_seeds(
+        &self,
+        tg_id: i64,
+        request_id: RequestId,
+        seeds: &[RequestId],
+    ) -> Result<WriteOutcome<()>, DbError> {
+        positive(tg_id)?;
+        positive(request_id)?;
+        if seeds.is_empty() || seeds.len() > MAX_TITLES || seeds[0] != request_id || repeats(seeds)
+        {
+            return Err(DbError::InvalidInput("invalid title list"));
+        }
+        let mut client = self.client().await?;
+        let transaction = client.transaction().await.map_err(database_error)?;
+        let bundle_id: String = transaction
+            .query_opt(
+                "SELECT bundle_id FROM arb_requests WHERE id=$1 AND tg_id=$2 FOR UPDATE",
+                &[&request_id, &tg_id],
+            )
+            .await
+            .map_err(database_error)?
+            .ok_or(DbError::NotFound)?
+            .get::<_, Option<String>>(0)
+            .ok_or(DbError::Conflict)?;
+        let recorded: Vec<RequestId> = transaction
+            .query(
+                "SELECT seed_request_id FROM arb_request_seeds WHERE request_id=$1 ORDER BY position",
+                &[&request_id],
+            )
+            .await
+            .map_err(database_error)?
+            .iter()
+            .map(|row| row.get(0))
+            .collect();
+        if !recorded.is_empty() {
+            return if recorded == seeds {
+                Ok(WriteOutcome::AlreadyRecorded(()))
+            } else {
+                Err(DbError::Conflict)
+            };
+        }
+        // The titles cannot change once recommendations are planned from them, and a search
+        // belongs to one list only.
+        if transaction
+            .query_opt(
+                "SELECT 1 FROM arb_request_plans WHERE request_id=$1
+                 UNION ALL SELECT 1 FROM arb_request_seeds WHERE seed_request_id = ANY($2)",
+                &[&request_id, &seeds],
+            )
+            .await
+            .map_err(database_error)?
+            .is_some()
+        {
+            return Err(DbError::Conflict);
+        }
+        let rows = transaction
+            .query(
+                "SELECT id, seed_mal_id, bundle_id FROM arb_requests WHERE id = ANY($1) AND tg_id=$2",
+                &[&seeds, &tg_id],
+            )
+            .await
+            .map_err(database_error)?;
+        let mut mal_ids = Vec::with_capacity(seeds.len());
+        for seed in seeds {
+            let row = rows
+                .iter()
+                .find(|row| row.get::<_, RequestId>(0) == *seed)
+                .ok_or(DbError::NotFound)?;
+            let mal_id: i32 = row.get::<_, Option<i32>>(1).ok_or(DbError::Conflict)?;
+            if row.get::<_, Option<String>>(2).as_deref() != Some(bundle_id.as_str())
+                || mal_ids.contains(&mal_id)
+            {
+                return Err(DbError::Conflict);
+            }
+            mal_ids.push(mal_id);
+        }
+        for (position, (seed, mal_id)) in (1_i16..).zip(seeds.iter().zip(&mal_ids)) {
+            transaction
+                .execute(
+                    "INSERT INTO arb_request_seeds (request_id,tg_id,position,seed_request_id,mal_id)
+                 VALUES ($1,$2,$3,$4,$5)",
+                    &[&request_id, &tg_id, &position, seed, mal_id],
+                )
+                .await
+                // A concurrent list may have claimed the same search after the check above.
+                .map_err(write_error)?;
+        }
+        transaction.commit().await.map_err(database_error)?;
+        Ok(WriteOutcome::Created(()))
+    }
+    /// Fixes the recommendations of a resolved request in rank order before any is delivered.
+    pub async fn save_plan(
+        &self,
+        tg_id: i64,
+        request_id: RequestId,
+        mal_ids: &[i32],
+    ) -> Result<WriteOutcome<()>, DbError> {
+        positive(tg_id)?;
+        positive(request_id)?;
+        if mal_ids.is_empty() || mal_ids.len() > MAX_PLANNED {
+            return Err(DbError::InvalidInput("invalid plan"));
+        }
+        if mal_ids.iter().any(|mal_id| *mal_id <= 0) {
+            return Err(DbError::InvalidInput("invalid MAL ID"));
+        }
+        if repeats(mal_ids) {
+            return Err(DbError::InvalidInput("duplicate planned title"));
+        }
+        let mut client = self.client().await?;
+        let transaction = client.transaction().await.map_err(database_error)?;
+        let seed: i32 = transaction
+            .query_opt(
+                "SELECT seed_mal_id FROM arb_requests WHERE id=$1 AND tg_id=$2 FOR UPDATE",
+                &[&request_id, &tg_id],
+            )
+            .await
+            .map_err(database_error)?
+            .ok_or(DbError::NotFound)?
+            .get::<_, Option<i32>>(0)
+            .ok_or(DbError::Conflict)?;
+        let recorded: Vec<i32> = transaction
+            .query(
+                "SELECT mal_id FROM arb_request_plans WHERE request_id=$1 ORDER BY rank",
+                &[&request_id],
+            )
+            .await
+            .map_err(database_error)?
+            .iter()
+            .map(|row| row.get(0))
+            .collect();
+        if !recorded.is_empty() {
+            return if recorded == mal_ids {
+                Ok(WriteOutcome::AlreadyRecorded(()))
+            } else {
+                Err(DbError::Conflict)
+            };
+        }
+        let mut seeds: Vec<i32> = transaction
+            .query(
+                "SELECT mal_id FROM arb_request_seeds WHERE request_id=$1",
+                &[&request_id],
+            )
+            .await
+            .map_err(database_error)?
+            .iter()
+            .map(|row| row.get(0))
+            .collect();
+        seeds.push(seed);
+        if mal_ids.iter().any(|mal_id| seeds.contains(mal_id)) {
+            return Err(DbError::Conflict);
+        }
+        for (rank, mal_id) in (1_i16..).zip(mal_ids) {
+            transaction
+                .execute(
+                    "INSERT INTO arb_request_plans (request_id,tg_id,rank,mal_id) VALUES ($1,$2,$3,$4)",
+                    &[&request_id, &tg_id, &rank, mal_id],
+                )
+                .await
+                .map_err(database_error)?;
+        }
+        transaction.commit().await.map_err(database_error)?;
+        Ok(WriteOutcome::Created(()))
+    }
+    pub async fn request_plan(
+        &self,
+        tg_id: i64,
+        request_id: RequestId,
+    ) -> Result<Vec<i32>, DbError> {
+        positive(tg_id)?;
+        positive(request_id)?;
+        let client = self.client().await?;
+        if client
+            .query_opt(
+                "SELECT 1 FROM arb_requests WHERE id=$1 AND tg_id=$2",
+                &[&request_id, &tg_id],
+            )
+            .await
+            .map_err(database_error)?
+            .is_none()
+        {
+            return Err(DbError::NotFound);
+        }
+        Ok(client
+            .query(
+                "SELECT mal_id FROM arb_request_plans WHERE request_id=$1 ORDER BY rank",
+                &[&request_id],
+            )
+            .await
+            .map_err(database_error)?
+            .iter()
+            .map(|row| row.get(0))
+            .collect())
+    }
+    /// Marks the title of a delivered card as watched and returns its MAL ID.
+    pub async fn mark_watched(
+        &self,
+        tg_id: i64,
+        position_id: PositionId,
+    ) -> Result<WriteOutcome<i32>, DbError> {
+        positive(tg_id)?;
+        positive(position_id)?;
+        let client = self.client().await?;
+        let row = client
+            .query_opt(
+                "INSERT INTO arb_watched_marks (tg_id,mal_id,position_id)
+             SELECT tg_id,mal_id,id FROM arb_delivered_positions WHERE id=$1 AND tg_id=$2
+             ON CONFLICT (tg_id,mal_id) DO NOTHING RETURNING mal_id",
+                &[&position_id, &tg_id],
+            )
+            .await
+            .map_err(database_error)?;
+        if let Some(row) = row {
+            return Ok(WriteOutcome::Created(row.get(0)));
+        }
+        // The title is already marked, possibly from another card.
+        client
+            .query_opt(
+                "SELECT mal_id FROM arb_delivered_positions WHERE id=$1 AND tg_id=$2",
+                &[&position_id, &tg_id],
+            )
+            .await
+            .map_err(database_error)?
+            .map(|row| WriteOutcome::AlreadyRecorded(row.get(0)))
+            .ok_or(DbError::NotFound)
+    }
+    /// Returns the titles the user rated in the bot or marked as watched, in MAL ID order.
+    pub async fn known_titles(&self, tg_id: i64) -> Result<Vec<i32>, DbError> {
+        positive(tg_id)?;
+        let client = self.client().await?;
+        Ok(client
+            .query(
+                "SELECT mal_id FROM arb_anime_ratings WHERE tg_id=$1
+             UNION SELECT mal_id FROM arb_watched_marks WHERE tg_id=$1 ORDER BY 1",
+                &[&tg_id],
+            )
+            .await
+            .map_err(database_error)?
+            .iter()
+            .map(|row| row.get(0))
             .collect())
     }
     pub async fn rate_anime(
@@ -494,6 +770,12 @@ impl Db {
             .map_err(database_error)?;
         Ok(())
     }
+}
+fn repeats<T: PartialEq>(values: &[T]) -> bool {
+    values
+        .iter()
+        .enumerate()
+        .any(|(i, value)| values[..i].contains(value))
 }
 fn positive(id: i64) -> Result<(), DbError> {
     if id > 0 {
