@@ -19,6 +19,7 @@ from recsys.release.itemknn import (
     derive_current,
     derive_itemknn_bundle,
     franchise_groups,
+    positive_matrix,
     top_neighbors,
 )
 from recsys.research.models.collaborative import _fit_knn
@@ -64,6 +65,17 @@ def write_relations(directory: Path, records: list[dict[str, object]]) -> str:
     return sha(raw)
 
 
+def compress(records: list[dict[str, object]]) -> bytes:
+    return gzip.compress("".join(json.dumps(r) + "\n" for r in records).encode(), mtime=0)
+
+
+def representative(records: list[dict[str, object]], watchers: list[int]) -> int:
+    """Return the MAL ID standing for the franchise of the first record."""
+    ids = sorted(int(str(record["mal_id"])) for record in records)
+    groups, representatives, _ = franchise_groups(compress(records), ids, watchers)
+    return ids[representatives[groups[ids.index(int(str(records[0]["mal_id"])))]]]
+
+
 def write_dataset(directory: Path, rows: list[tuple[str, int, str, str]]) -> str:
     directory.mkdir()
     body = HEADER + "".join(f"{u}\t{m}\t{r}\t{s}\n" for u, m, r, s in rows)
@@ -104,7 +116,7 @@ class FranchiseTests(unittest.TestCase):
             },
         )
 
-    def test_crossovers_stay_alone_and_the_most_rated_first_season_represents(self) -> None:
+    def test_crossovers_stay_alone_and_the_most_watched_first_season_represents(self) -> None:
         ids = [1, 2, 3, 4, 5, 6]
         records = [
             # 1 and 2 are TV series of one story (2 remakes 1); 3 is a TV sequel of 2.
@@ -135,10 +147,10 @@ class FranchiseTests(unittest.TestCase):
         group = {mal_id: groups[column] for column, mal_id in enumerate(ids)}
         self.assertEqual(len({group[1], group[2], group[3]}), 1)
         self.assertEqual(len({group[1], group[4], group[5]}), 3)
-        # 3 is the most rated but continues 2, so the more rated first season 2 represents.
+        # 3 is the most watched but continues 2, so the more watched first season 2 represents.
         self.assertEqual(ids[representatives[group[1]]], 2)
         self.assertEqual(stats["crossovers"], 1)
-        # A TV series nobody rated yet does not displace the earliest rated entry.
+        # A TV series nobody watched yet does not displace the earliest watched entry.
         movie = [
             {"mal_id": 1, "format": "MOVIE", "start_date": [1988, 7, 16], "relations": []},
             {
@@ -152,10 +164,64 @@ class FranchiseTests(unittest.TestCase):
         groups, representatives, _ = franchise_groups(raw, [1, 2], [40, 0])
         self.assertEqual(representatives[groups[0]], 0)
 
+    def test_prequels_count_in_release_order(self) -> None:
+        # AniList calls the later 2 a prequel of 1, as with Nekomonogatari and Bakemonogatari.
+        story = [
+            {
+                "mal_id": 1,
+                "format": "TV",
+                "start_date": [2009, 7, 3],
+                "relations": [["PREQUEL", 2]],
+            },
+            {"mal_id": 2, "format": "TV", "start_date": [2012, 12, 31], "relations": []},
+        ]
+        self.assertEqual(representative(story, [60, 30]), 1)
+        # A TV_SHORT first season is a series too, so its TV sequel does not stand for it.
+        shorts = [
+            {"mal_id": 1, "format": "TV_SHORT", "start_date": [2015, 1, 1], "relations": []},
+            {
+                "mal_id": 2,
+                "format": "TV",
+                "start_date": [2016, 1, 1],
+                "relations": [["PREQUEL", 1]],
+            },
+        ]
+        self.assertEqual(representative(shorts, [10, 40]), 1)
+
+    def test_without_a_tv_series_the_main_entry_beats_an_earlier_special(self) -> None:
+        # Like Promare: the prologue special 2 came out before the film 1; 3 is a later film.
+        film = [
+            {"mal_id": 1, "format": "MOVIE", "start_date": [2019, 5, 24], "relations": []},
+            {"mal_id": 2, "format": "SPECIAL", "start_date": [2019, 5, 3], "relations": []},
+            {"mal_id": 3, "format": "MOVIE", "start_date": [2021, 1, 1], "relations": []},
+        ]
+        film[0]["relations"] = [["PREQUEL", 2], ["SEQUEL", 3]]
+        self.assertEqual(representative(film, [90, 20, 95]), 1)
+        # A special stands for the franchise only when nothing else was watched.
+        self.assertEqual(representative(film, [0, 20, 0]), 2)
+
     def test_rejects_relations_for_titles_outside_the_catalog(self) -> None:
         raw = gzip.compress(b'{"mal_id": 7, "relations": []}\n', mtime=0)
         with self.assertRaisesRegex(ContractError, "missing from catalog"):
             franchise_groups(raw, [1, 2])
+
+
+class PositiveMatrixTests(unittest.TestCase):
+    def test_watchers_count_list_entries_except_plan_to_watch(self) -> None:
+        # One Piece is airing: MAL allows only «watching», so it has no positive at all.
+        rows = [
+            ("u1", 1, "10", "watching"),
+            ("u1", 2, "9", "completed"),
+            ("u2", 1, "", "on_hold"),
+            ("u2", 2, "", "plan_to_watch"),
+            ("u2", 7, "", "plan_to_watch"),
+            ("u3", 2, "4", "dropped"),
+        ]
+        body = HEADER + "".join(f"{u}\t{m}\t{r}\t{s}\n" for u, m, r, s in rows)
+        raw = gzip.compress(body.encode(), mtime=0)
+        indptr, indices, watchers = positive_matrix(raw, {1: 0, 2: 1}, len(rows))
+        self.assertEqual((indptr.tolist(), indices.tolist()), ([0, 1], [1]))
+        self.assertEqual(watchers, [2, 2])
 
 
 class TopNeighborParityTests(unittest.TestCase):
@@ -320,6 +386,8 @@ class DeriveBundleTests(unittest.TestCase):
             shutil.copytree(
                 self.dataset, data / "datasets" / self.dataset_identity.replace(":", "-")
             )
+            with self.assertRaisesRegex(ContractError, "restore the AniList relations snapshot"):
+                derive_current(data)
             relations = data / "raw" / "anilist-relations-2026-v1"
             relations.parent.mkdir()
             relations_sha = write_relations(relations, RELATIONS)

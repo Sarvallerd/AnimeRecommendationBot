@@ -37,6 +37,8 @@ LINKING = frozenset(
         "SUMMARY",
     }
 )
+SERIES = frozenset({"TV", "TV_SHORT"})
+MAIN_ENTRIES = frozenset({"MOVIE", "ONA", "OVA"})
 ALGORITHM = {
     "name": NAME,
     "version": "arb069-v2",
@@ -47,7 +49,13 @@ ALGORITHM = {
         "franchise": "one-card-per-franchise-shown-as-first-entry-seed-franchise-excluded",
         "franchise_relations": sorted(LINKING),
         "franchise_crossovers": "parents-in-several-franchises-stay-alone",
-        "franchise_representative": "most-rated-rated-TV-without-TV-prequel-else-earliest-start",
+        "franchise_main_formats": sorted(MAIN_ENTRIES),
+        "franchise_popularity": "list-entries-except-plan_to_watch",
+        "franchise_representative": (
+            "most-watched-series-without-earlier-series-prequel"
+            "-else-earliest-watched-main-format-else-earliest-watched"
+        ),
+        "franchise_series_formats": sorted(SERIES),
         "positive_min_rating": POSITIVE_MIN_RATING,
         "positive_status": "completed",
         "shrinkage": SHRINKAGE,
@@ -57,9 +65,9 @@ ALGORITHM = {
     },
 }
 RELATIONS_SNAPSHOT = "anilist-relations-2026-v1"
-RELATIONS_SHA256 = "983cd6817046b15218f5521444629a17f379be08b220d707c31b907504749814"
+RELATIONS_SHA256 = "e4a42d0618446cc02ef95076ea1bb1309e39f778070d9eb93205260184389348"
 # Identity of the bundle derived from the pinned current release; a rebuild must reproduce it.
-CURRENT_IDENTITY = "sha256:71922992ff102b418edc1ba10bd054495b016f2491d2e0fa01b910f032714331"
+CURRENT_IDENTITY = "sha256:6eec1413efcfdb129cbb51618917972efd01392ba815534e81bbe5fb5336cbf2"
 
 
 def _sha(raw: bytes) -> str:
@@ -80,12 +88,17 @@ def _field(value: dict[str, object], key: str, location: str) -> object:
 
 def positive_matrix(
     raw_gz: bytes, columns: dict[int, int], expected_rows: int
-) -> tuple[NDArray[np.int64], NDArray[np.int32]]:
-    """Return per-user CSR pointers and item columns of completed ratings >= 8."""
+) -> tuple[NDArray[np.int64], NDArray[np.int32], list[int]]:
+    """Return per-user CSR pointers and item columns of completed ratings >= 8, and watchers.
+
+    Watchers count every list entry except plan_to_watch. MAL does not allow «completed» for
+    an airing series, so positives alone miss titles such as One Piece.
+    """
     import numpy as np
 
     indptr = array("q", [0])
     indices = array("i")
+    watchers = [0] * len(columns)
     rows = 0
     previous = b""
     with gzip.GzipFile(fileobj=io.BytesIO(raw_gz)) as stream:
@@ -98,16 +111,23 @@ def positive_matrix(
                 if len(indices) > indptr[-1]:
                     indptr.append(len(indices))
                 previous = user
-            if status != b"completed" or not rating or int(rating) < POSITIVE_MIN_RATING:
+            if status == b"plan_to_watch":
                 continue
             column = columns.get(int(mal_id))
             if column is None:
                 raise ContractError("interactions.tsv.gz: MAL ID missing from catalog")
+            watchers[column] += 1
+            if status != b"completed" or not rating or int(rating) < POSITIVE_MIN_RATING:
+                continue
             indices.append(column)
     require(rows == expected_rows, "interactions.tsv.gz", "row count mismatch")
     if len(indices) > indptr[-1]:
         indptr.append(len(indices))
-    return np.frombuffer(indptr, dtype=np.int64), np.frombuffer(indices, dtype=np.int32)
+    return (
+        np.frombuffer(indptr, dtype=np.int64),
+        np.frombuffer(indices, dtype=np.int32),
+        watchers,
+    )
 
 
 def _start_key(record: dict[str, object]) -> tuple[int, int, int]:
@@ -121,15 +141,16 @@ def _start_key(record: dict[str, object]) -> tuple[int, int, int]:
 
 
 def franchise_groups(
-    raw_gz: bytes, ids: list[int], popularity: Sequence[int] | None = None
+    raw_gz: bytes, ids: list[int], watchers: Sequence[int] | None = None
 ) -> tuple[list[int], list[int], dict[str, int]]:
     """Group catalog columns into franchises and pick the card that stands for each one.
 
     Returns the group of every column, the representative column of every group and counts.
     Titles without a usable relation stay in a group of their own. The representative is the
-    most rated first season: a TV series with no TV prequel in the franchise, so a remake such
-    as Fullmetal Alchemist: Brotherhood wins over the older series. Franchises without a TV
-    series show their earliest entry.
+    most watched first season: a TV series with no earlier TV prequel in the franchise, so a
+    remake such as Fullmetal Alchemist: Brotherhood wins over the older series. Franchises
+    without a watched TV series show their earliest watched movie, ONA or OVA, then their
+    earliest watched entry, so a prologue special does not stand for the film.
     """
     columns = {mal_id: column for column, mal_id in enumerate(ids)}
     parent = list(range(len(ids)))
@@ -181,24 +202,35 @@ def franchise_groups(
         else:
             crossovers += 1
 
-    tv = [records.get(column, {}).get("format") == "TV" for column in range(len(ids))]
-    continued = set()
+    formats = [records.get(column, {}).get("format") for column in range(len(ids))]
+    starts = [_start_key(records.get(column, {})) for column in range(len(ids))]
+    # AniList orders PREQUEL by story, not release: Nekomonogatari: Kuro (2012) is a prequel of
+    # Bakemonogatari (2009). Only a TV prequel released earlier makes a season a continuation.
+    continued: set[int] = set()
     for source, target, kind in edges:
-        if root(source) == root(target) and tv[source] and tv[target]:
-            if kind == "PREQUEL":
-                continued.add(source)
-            elif kind == "SEQUEL":
-                continued.add(target)
-    # Without popularity every title counts as rated, so TV series keep their preference.
-    rated = popularity if popularity is not None else [1] * len(ids)
+        later, earlier = (source, target) if kind == "PREQUEL" else (target, source)
+        if (
+            kind in ("PREQUEL", "SEQUEL")
+            and formats[later] in SERIES
+            and formats[earlier] in SERIES
+            and starts[earlier] < starts[later]
+            and root(later) == root(earlier)
+        ):
+            continued.add(later)
+    # Without watcher counts every title counts as watched.
+    watched = watchers if watchers is not None else [1] * len(ids)
 
     def preference(column: int) -> tuple[int, int, tuple[int, int, int], int]:
-        # An announced or unwatched TV series gets no TV preference over a rated movie.
-        watched_tv = tv[column] and rated[column] > 0
-        rank = 0 if watched_tv and column not in continued else 1 if watched_tv else 2
-        # Popularity decides among TV entries only; other franchises keep their earliest entry.
-        weight = -rated[column] if rank < 2 else 0
-        return (rank, weight, _start_key(records.get(column, {})), ids[column])
+        if not watched[column]:
+            # An announced or never listed title stands for its franchise only as a last resort.
+            rank = 4
+        elif formats[column] in SERIES:
+            rank = 1 if column in continued else 0
+        else:
+            rank = 2 if formats[column] in MAIN_ENTRIES else 3
+        # Watchers decide among TV seasons only; other entries keep release order.
+        weight = -watched[column] if rank < 2 else 0
+        return (rank, weight, starts[column], ids[column])
 
     members: dict[int, list[int]] = {}
     for column in range(len(ids)):
@@ -268,11 +300,12 @@ def top_neighbors(
         else:
             seen = {groups[column]}
             chosen = []
-            for i in order.tolist():
+            # Iterate lazily: the loop usually stops after a few groups.
+            for i in order:
                 group = groups[int(candidate[i])]
                 if group not in seen:
                     seen.add(group)
-                    chosen.append(i)
+                    chosen.append(int(i))
                     if len(chosen) == limit:
                         break
         result.append([(int(candidate[i]), float(similarity[i])) for i in chosen])
@@ -344,15 +377,12 @@ def derive_itemknn_bundle(
             str(relations),
             "unexpected relations snapshot",
         )
-    indptr, indices = positive_matrix(raw_gz, columns, rows)
+    indptr, indices, watchers = positive_matrix(raw_gz, columns, rows)
     if relations is None:
         groups, representatives = list(range(len(ids))), list(range(len(ids)))
         franchise_stats: dict[str, int] = {}
     else:
-        import numpy as np
-
-        popularity = np.bincount(indices, minlength=len(ids)).tolist()
-        groups, representatives, franchise_stats = franchise_groups(relations_raw, ids, popularity)
+        groups, representatives, franchise_stats = franchise_groups(relations_raw, ids, watchers)
     fitted = top_neighbors(indptr, indices, len(ids), groups=groups)
 
     neighbors: dict[str, object] = {}
@@ -456,6 +486,9 @@ def derive_current(data_dir: Path) -> tuple[Path, str, int]:
     base_bundle = data_dir / "bundles" / base_identity.replace(":", "-")
     if not base_bundle.is_dir():
         raise ContractError(f"{base_bundle}: run `recsys release prepare` first")
+    relations = data_dir / "raw" / RELATIONS_SNAPSHOT
+    if not (relations / "relations.jsonl.gz").is_file():
+        raise ContractError(f"{relations}: restore the AniList relations snapshot from DVC")
     return derive_itemknn_bundle(
         base_bundle,
         data_dir / "datasets" / dataset_identity.replace(":", "-"),
@@ -463,6 +496,6 @@ def derive_current(data_dir: Path) -> tuple[Path, str, int]:
         expected_base_identity=base_identity,
         expected_dataset_identity=dataset_identity,
         expected_identity=CURRENT_IDENTITY,
-        relations=data_dir / "raw" / RELATIONS_SNAPSHOT,
+        relations=relations,
         expected_relations_sha256=RELATIONS_SHA256,
     )
