@@ -12,7 +12,9 @@ const MIGRATIONS: [(i64, &str); 2] = [
     (1, include_str!("../migrations/0001_feedback_v1.sql")),
     (2, include_str!("../migrations/0002_title_lists_v2.sql")),
 ];
+// A list holds up to five titles; a plan holds as many cards as a bundle has neighbours.
 const MAX_TITLES: usize = 5;
+const MAX_PLANNED: usize = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WriteOutcome<T> {
@@ -42,6 +44,13 @@ impl fmt::Display for DbError {
 impl Error for DbError {}
 fn database_error(_: tokio_postgres::Error) -> DbError {
     DbError::DatabaseFailure
+}
+fn write_error(error: tokio_postgres::Error) -> DbError {
+    if error.code() == Some(&tokio_postgres::error::SqlState::UNIQUE_VIOLATION) {
+        DbError::Conflict
+    } else {
+        DbError::DatabaseFailure
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -260,28 +269,19 @@ impl Db {
             return Err(DbError::InvalidInput("invalid message ID"));
         }
         let client = self.client().await?;
-        let row = client
+        // Only the planned title of a rank can be delivered. A plan exists only for a resolved
+        // request and never contains one of its seeds.
+        let planned: Option<i32> = client
             .query_opt(
-                "SELECT seed_mal_id FROM arb_requests WHERE id=$1 AND tg_id=$2",
-                &[&request_id, &tg_id],
+                "SELECT p.mal_id FROM arb_requests r LEFT JOIN arb_request_plans p
+                 ON p.request_id=r.id AND p.rank=$3 WHERE r.id=$1 AND r.tg_id=$2",
+                &[&request_id, &tg_id, &input.rank],
             )
             .await
             .map_err(database_error)?
-            .ok_or(DbError::NotFound)?;
-        let seed: i32 = row.get::<_, Option<i32>>(0).ok_or(DbError::Conflict)?;
-        if seed == input.mal_id {
-            return Err(DbError::Conflict);
-        }
-        // Only a planned position can be delivered; the plan already excludes every seed.
-        if client
-            .query_opt(
-                "SELECT 1 FROM arb_request_plans WHERE request_id=$1 AND rank=$2 AND mal_id=$3",
-                &[&request_id, &input.rank, &input.mal_id],
-            )
-            .await
-            .map_err(database_error)?
-            .is_none()
-        {
+            .ok_or(DbError::NotFound)?
+            .get(0);
+        if planned != Some(input.mal_id) {
             return Err(DbError::Conflict);
         }
         let row = client
@@ -370,13 +370,7 @@ impl Db {
     ) -> Result<WriteOutcome<()>, DbError> {
         positive(tg_id)?;
         positive(request_id)?;
-        if seeds.is_empty()
-            || seeds.len() > MAX_TITLES
-            || seeds[0] != request_id
-            || seeds
-                .iter()
-                .enumerate()
-                .any(|(i, seed)| seeds[..i].contains(seed))
+        if seeds.is_empty() || seeds.len() > MAX_TITLES || seeds[0] != request_id || repeats(seeds)
         {
             return Err(DbError::InvalidInput("invalid title list"));
         }
@@ -452,7 +446,8 @@ impl Db {
                     &[&request_id, &tg_id, &position, seed, mal_id],
                 )
                 .await
-                .map_err(database_error)?;
+                // A concurrent list may have claimed the same search after the check above.
+                .map_err(write_error)?;
         }
         transaction.commit().await.map_err(database_error)?;
         Ok(WriteOutcome::Created(()))
@@ -466,17 +461,13 @@ impl Db {
     ) -> Result<WriteOutcome<()>, DbError> {
         positive(tg_id)?;
         positive(request_id)?;
-        if mal_ids.is_empty() || mal_ids.len() > MAX_TITLES {
+        if mal_ids.is_empty() || mal_ids.len() > MAX_PLANNED {
             return Err(DbError::InvalidInput("invalid plan"));
         }
         if mal_ids.iter().any(|mal_id| *mal_id <= 0) {
             return Err(DbError::InvalidInput("invalid MAL ID"));
         }
-        if mal_ids
-            .iter()
-            .enumerate()
-            .any(|(i, mal_id)| mal_ids[..i].contains(mal_id))
-        {
+        if repeats(mal_ids) {
             return Err(DbError::InvalidInput("duplicate planned title"));
         }
         let mut client = self.client().await?;
@@ -779,6 +770,12 @@ impl Db {
             .map_err(database_error)?;
         Ok(())
     }
+}
+fn repeats<T: PartialEq>(values: &[T]) -> bool {
+    values
+        .iter()
+        .enumerate()
+        .any(|(i, value)| values[..i].contains(value))
 }
 fn positive(id: i64) -> Result<(), DbError> {
     if id > 0 {
