@@ -16,6 +16,7 @@ from scipy.sparse import csr_matrix
 from recsys.contracts.bundle import ContractError, check_bundle
 from recsys.release.itemknn import (
     ALGORITHM,
+    _as_first_entries,
     derive_current,
     derive_itemknn_bundle,
     franchise_groups,
@@ -224,8 +225,30 @@ class PositiveMatrixTests(unittest.TestCase):
         self.assertEqual(watchers, [2, 2])
 
 
+class FirstEntryTests(unittest.TestCase):
+    def test_rounding_ties_are_ordered_by_the_shown_mal_id(self) -> None:
+        ids = [5, 7, 9]
+        # 9 is slightly stronger than 5, but both round to 0.123456.
+        pairs = [(2, 0.1234564), (0, 0.1234561), (1, 0.05)]
+        self.assertEqual(
+            _as_first_entries(pairs, ids, [0, 1, 2], [0, 1, 2]),
+            [[5, 0.123456], [9, 0.123456], [7, 0.05]],
+        )
+
+    def test_ties_at_the_cut_off_follow_the_shown_entry(self) -> None:
+        # Item 0 is liked once with 1 and once with 2, so both tie. Column 1 belongs to the
+        # franchise shown as 3, column 2 is shown as itself: the smaller shown entry wins.
+        indptr = np.array([0, 2, 4], dtype=np.int64)
+        indices = np.array([0, 1, 0, 2], dtype=np.int32)
+        groups, shown = [0, 1, 2, 1], [0, 3, 2, 3]
+        tied = top_neighbors(indptr, indices, 4, limit=1, groups=groups)
+        self.assertEqual([column for column, _ in tied[0]], [1])
+        chosen = top_neighbors(indptr, indices, 4, limit=1, groups=groups, shown=shown)
+        self.assertEqual([column for column, _ in chosen[0]], [2])
+
+
 class TopNeighborParityTests(unittest.TestCase):
-    def test_matches_research_itemknn_top_five_exactly(self) -> None:
+    def test_matches_research_itemknn_top_fifty_exactly(self) -> None:
         rng = np.random.default_rng(11)
         for _ in range(4):
             with tempfile.TemporaryDirectory() as stage:
@@ -250,7 +273,7 @@ class TopNeighborParityTests(unittest.TestCase):
                 )
                 for column in range(items):
                     lo, hi = pointers[column : column + 2]
-                    order = np.lexsort((targets[lo:hi], -weights[lo:hi]))[:5]
+                    order = np.lexsort((targets[lo:hi], -weights[lo:hi]))[:50]
                     expected = [(int(targets[lo:hi][i]), float(weights[lo:hi][i])) for i in order]
                     self.assertEqual(ours[column], expected)
 
@@ -286,18 +309,24 @@ class DeriveBundleTests(unittest.TestCase):
             self.assertEqual(stat.S_IMODE((path / name).stat().st_mode), 0o644)
         base_catalog = (self.base / "catalog.json").read_bytes()
         self.assertEqual((path / "catalog.json").read_bytes(), base_catalog)
-        neighbors = json.loads((path / "neighbors.json").read_bytes())["neighbors"]
+        written = json.loads((path / "neighbors.json").read_bytes())
+        self.assertEqual((written["schema_version"], written["franchises"]), (2, {}))
+        neighbors = written["neighbors"]
         glove = json.loads((self.base / "neighbors.json").read_bytes())["neighbors"]
-        self.assertEqual([n["mal_id"] for n in neighbors["1"]], [10, 11])
-        self.assertEqual([n["mal_id"] for n in neighbors["10"]], [1, 11])
-        self.assertEqual([n["mal_id"] for n in neighbors["2"]], [3, 12])
-        self.assertEqual([n["mal_id"] for n in neighbors["3"]], [2])
-        # Neither item has a completed rating >= 8, so the GloVe lists are kept verbatim.
-        self.assertEqual(neighbors["20"], glove["20"])
-        self.assertEqual(neighbors["99"], glove["99"])
-        # Two shared fans: c=2, p=2/2 -> 2/2 * 2/12.
-        self.assertEqual(neighbors["1"][0]["similarity"], 2 / 2 * 2 / 12)
+        self.assertEqual([n[0] for n in neighbors["1"]], [10, 11])
+        self.assertEqual([n[0] for n in neighbors["10"]], [1, 11])
+        self.assertEqual([n[0] for n in neighbors["2"]], [3, 12])
+        self.assertEqual([n[0] for n in neighbors["3"]], [2])
+        # Neither item has a completed rating >= 8, so the GloVe lists are kept, rounded.
+        self.assertEqual(
+            neighbors["20"],
+            [[n["mal_id"], float(f"{n['similarity']:.6g}")] for n in glove["20"]],
+        )
+        self.assertEqual(neighbors["99"], [])
+        # Two shared fans: c=2, p=2/2 -> 2/2 * 2/12, kept to 6 significant digits.
+        self.assertEqual(neighbors["1"][0][1], 0.166667)
         manifest = json.loads((path / "manifest.json").read_bytes())
+        self.assertEqual((manifest["schema_version"], ALGORITHM["max_neighbors"]), (2, 50))
         self.assertEqual(manifest["algorithm"], ALGORITHM)
         self.assertEqual(
             [s["name"] for s in manifest["sources"]], ["glove_bundle", "rating_interactions"]
@@ -359,8 +388,10 @@ class DeriveBundleTests(unittest.TestCase):
             relations=relations,
             expected_relations_sha256=relations_sha,
         )
-        neighbors = json.loads((path / "neighbors.json").read_bytes())["neighbors"]
-        ids = {key: [n["mal_id"] for n in value] for key, value in neighbors.items()}
+        written = json.loads((path / "neighbors.json").read_bytes())
+        # Every title that is not its franchise's first TV entry points at it.
+        self.assertEqual(written["franchises"], {"1": 10, "11": 10})
+        ids = {key: [n[0] for n in value] for key, value in written["neighbors"].items()}
         # 11 is shown as its franchise's first TV entry 10.
         self.assertEqual(ids["2"], [3, 12, 10])
         # 1 has ItemKNN neighbors only inside its own franchise, so GloVe fills in without 10/11.

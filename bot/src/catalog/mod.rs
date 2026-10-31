@@ -1,4 +1,8 @@
 //! Strict, immutable reader for the three-file recommendation bundle.
+//!
+//! Version 1 keeps up to 5 neighbors per title. Version 2 keeps up to 50 `[mal_id, similarity]`
+//! pairs and a map from every title to the first entry of its franchise; its neighbors are
+//! first entries only and never the title's own franchise.
 use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use serde_json::value::RawValue;
@@ -12,6 +16,17 @@ pub type MalId = i32;
 
 /// Neighbor algorithms a bundle manifest may declare; the bot only relies on list order.
 const ALGORITHMS: &[&str] = &["glove-mean-cosine", "itemknn-shrunk-cosine"];
+/// Cards in one recommendation.
+pub const CARDS: usize = 5;
+
+/// Neighbors allowed per title by a bundle schema version.
+fn max_neighbors(version: u8) -> usize {
+    if version == 1 {
+        5
+    } else {
+        50
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BundleError {
@@ -92,6 +107,7 @@ pub struct Bundle {
     identity: String,
     catalog: Catalog,
     neighbors: BTreeMap<MalId, Vec<Neighbor>>,
+    franchises: BTreeMap<MalId, MalId>,
 }
 impl Bundle {
     pub fn identity(&self) -> &str {
@@ -100,14 +116,24 @@ impl Bundle {
     pub fn catalog(&self) -> &Catalog {
         &self.catalog
     }
+    /// Every stored neighbor of a title: up to 5 in a v1 bundle and 50 in a v2 bundle.
     pub fn neighbors(&self, id: MalId) -> Option<&[Neighbor]> {
         self.neighbors.get(&id).map(Vec::as_slice)
+    }
+    /// The neighbors shown as cards for a single title.
+    pub fn cards(&self, id: MalId) -> Option<&[Neighbor]> {
+        self.neighbors(id)
+            .map(|neighbors| &neighbors[..neighbors.len().min(CARDS)])
+    }
+    /// The first entry of the title's franchise; a v1 bundle treats every title as its own.
+    pub fn franchise(&self, id: MalId) -> MalId {
+        self.franchises.get(&id).copied().unwrap_or(id)
     }
     pub fn load(directory: impl AsRef<Path>) -> Result<Self> {
         let directory = directory.as_ref();
         let manifest_bytes = read_file(directory, "manifest.json")?;
         let manifest = parse_file(&manifest_bytes, "manifest.json")?;
-        let hashes = validate_manifest(&manifest)?;
+        let (hashes, version) = validate_manifest(&manifest)?;
         let catalog_bytes = read_file(directory, "catalog.json")?;
         let neighbors_bytes = read_file(directory, "neighbors.json")?;
         for (name, bytes) in [
@@ -122,12 +148,16 @@ impl Bundle {
             }
         }
         let catalog = validate_catalog(&parse_file(&catalog_bytes, "catalog.json")?)?;
-        let neighbors =
-            validate_neighbors(&parse_file(&neighbors_bytes, "neighbors.json")?, &catalog)?;
+        let (neighbors, franchises) = validate_neighbors(
+            &parse_file(&neighbors_bytes, "neighbors.json")?,
+            &catalog,
+            version,
+        )?;
         Ok(Self {
             identity: format!("sha256:{}", digest(&manifest_bytes)),
             catalog,
             neighbors,
+            franchises,
         })
     }
 }
@@ -309,14 +339,19 @@ fn nullable<T>(value: &Tree, parse: impl FnOnce(&Tree) -> Result<T>) -> Result<O
         parse(value).map(Some)
     }
 }
-fn version(map: &BTreeMap<String, Tree>, path: &str) -> Result<()> {
-    if integer(at(map, "schema_version"), &format!("{path}.schema_version"))? != "1" {
-        return Err(BundleError::new(
-            format!("{path}.schema_version"),
-            "expected version 1",
-        ));
-    }
-    Ok(())
+fn version(map: &BTreeMap<String, Tree>, path: &str, allowed: &[u8]) -> Result<u8> {
+    let token = integer(at(map, "schema_version"), &format!("{path}.schema_version"))?;
+    allowed
+        .iter()
+        .copied()
+        .find(|version| token == version.to_string())
+        .ok_or_else(|| {
+            let list: Vec<String> = allowed.iter().map(u8::to_string).collect();
+            BundleError::new(
+                format!("{path}.schema_version"),
+                format!("expected version {}", list.join(" or ")),
+            )
+        })
 }
 fn sha(value: &Tree, path: &str) -> Result<String> {
     let Tree::String(s) = value else {
@@ -351,13 +386,14 @@ fn exact(value: &Tree, path: &str, expected: &str) -> Result<()> {
         Err(BundleError::new(path, format!("expected {expected}")))
     }
 }
-fn validate_manifest(value: &Tree) -> Result<BTreeMap<String, String>> {
+fn validate_manifest(value: &Tree) -> Result<(BTreeMap<String, String>, u8)> {
     let root = fields(
         value,
         "manifest.json",
         &["schema_version", "algorithm", "sources", "files"],
     )?;
-    version(root, "manifest.json")?;
+    let version = version(root, "manifest.json", &[1, 2])?;
+    let limit = i32::try_from(max_neighbors(version)).expect("small limit");
     let algorithm = fields(
         at(root, "algorithm"),
         "manifest.json.algorithm",
@@ -378,8 +414,8 @@ fn validate_manifest(value: &Tree) -> Result<BTreeMap<String, String>> {
     bounded_integer(
         at(algorithm, "max_neighbors"),
         "manifest.json.algorithm.max_neighbors",
-        5,
-        5,
+        limit,
+        limit,
     )?;
     exact(
         at(algorithm, "similarity"),
@@ -429,7 +465,7 @@ fn validate_manifest(value: &Tree) -> Result<BTreeMap<String, String>> {
             sha(at(entry, "sha256"), &format!("{path}.sha256"))?,
         );
     }
-    Ok(hashes)
+    Ok((hashes, version))
 }
 fn mal_key(key: &str, path: &str) -> Result<MalId> {
     let id = key
@@ -460,7 +496,7 @@ fn nullable_string(value: &Tree, path: &str) -> Result<Option<String>> {
 }
 fn validate_catalog(value: &Tree) -> Result<Catalog> {
     let root = fields(value, "catalog.json", &["schema_version", "anime"])?;
-    version(root, "catalog.json")?;
+    version(root, "catalog.json", &[1])?;
     let map = object(at(root, "anime"), "catalog.json.anime")?;
     if map.is_empty() {
         return Err(BundleError::new("catalog.json.anime", "must be nonempty"));
@@ -518,9 +554,63 @@ fn validate_catalog(value: &Tree) -> Result<Catalog> {
     }
     Ok(Catalog { anime })
 }
-fn validate_neighbors(value: &Tree, catalog: &Catalog) -> Result<BTreeMap<MalId, Vec<Neighbor>>> {
-    let root = fields(value, "neighbors.json", &["schema_version", "neighbors"])?;
-    version(root, "neighbors.json")?;
+type Franchises = BTreeMap<MalId, MalId>;
+
+fn validate_franchises(value: &Tree, catalog: &Catalog) -> Result<Franchises> {
+    let map = object(value, "neighbors.json.franchises")?;
+    let mut franchises = BTreeMap::new();
+    for (key, value) in map {
+        let path = format!("neighbors.json.franchises.{key}");
+        let title = mal_key(key, &path)?;
+        let first = bounded_integer(value, &path, 1, i32::MAX)?;
+        if catalog.get(title).is_none() || catalog.get(first).is_none() {
+            return Err(BundleError::new(path, "title missing from catalog"));
+        }
+        if first == title {
+            return Err(BundleError::new(path, "a first entry is not listed"));
+        }
+        franchises.insert(title, first);
+    }
+    if let Some((title, _)) = franchises
+        .iter()
+        .find(|(_, first)| franchises.contains_key(first))
+    {
+        return Err(BundleError::new(
+            format!("neighbors.json.franchises.{title}"),
+            "first entry is not a first entry",
+        ));
+    }
+    Ok(franchises)
+}
+fn neighbor_fields<'a>(value: &'a Tree, path: &str, version: u8) -> Result<(&'a Tree, &'a Tree)> {
+    if version == 1 {
+        let entry = fields(value, path, &["mal_id", "similarity"])?;
+        return Ok((at(entry, "mal_id"), at(entry, "similarity")));
+    }
+    match value {
+        Tree::Array(pair) if pair.len() == 2 => Ok((&pair[0], &pair[1])),
+        _ => Err(BundleError::new(path, "expected [mal_id, similarity]")),
+    }
+}
+fn validate_neighbors(
+    value: &Tree,
+    catalog: &Catalog,
+    version: u8,
+) -> Result<(BTreeMap<MalId, Vec<Neighbor>>, Franchises)> {
+    let expected: &[&str] = if version == 1 {
+        &["schema_version", "neighbors"]
+    } else {
+        &["schema_version", "neighbors", "franchises"]
+    };
+    let root = fields(value, "neighbors.json", expected)?;
+    // The neighbors file must carry the manifest's schema version.
+    self::version(root, "neighbors.json", &[version])?;
+    let franchises = if version == 1 {
+        BTreeMap::new()
+    } else {
+        validate_franchises(at(root, "franchises"), catalog)?
+    };
+    let limit = max_neighbors(version);
     let map = object(at(root, "neighbors"), "neighbors.json.neighbors")?;
     let mut neighbors = BTreeMap::new();
     for (key, value) in map {
@@ -530,16 +620,20 @@ fn validate_neighbors(value: &Tree, catalog: &Catalog) -> Result<BTreeMap<MalId,
             return Err(BundleError::new(path, "source missing from catalog"));
         }
         let items = array(value, &path)?;
-        if items.len() > 5 {
-            return Err(BundleError::new(path, "more than five neighbors"));
+        if items.len() > limit {
+            return Err(BundleError::new(
+                path,
+                format!("more than {limit} neighbors"),
+            ));
         }
+        let own = franchises.get(&source).copied().unwrap_or(source);
         let mut list = Vec::new();
         let mut targets = HashSet::new();
         for (index, value) in items.iter().enumerate() {
             let item_path = format!("{path}[{index}]");
-            let entry = fields(value, &item_path, &["mal_id", "similarity"])?;
+            let (mal_id, score) = neighbor_fields(value, &item_path, version)?;
             let id_path = format!("{item_path}.mal_id");
-            let target = bounded_integer(at(entry, "mal_id"), &id_path, 1, i32::MAX)?;
+            let target = bounded_integer(mal_id, &id_path, 1, i32::MAX)?;
             if target == source {
                 return Err(BundleError::new(id_path, "self neighbor"));
             }
@@ -549,13 +643,16 @@ fn validate_neighbors(value: &Tree, catalog: &Catalog) -> Result<BTreeMap<MalId,
             if !targets.insert(target) {
                 return Err(BundleError::new(id_path, "duplicate neighbor"));
             }
-            let similarity = number(
-                at(entry, "similarity"),
-                &format!("{item_path}.similarity"),
-                0.0,
-                1.0,
-                false,
-            )?;
+            if franchises.contains_key(&target) {
+                return Err(BundleError::new(
+                    id_path,
+                    "neighbor is not the first entry of its franchise",
+                ));
+            }
+            if target == own {
+                return Err(BundleError::new(id_path, "neighbor from the own franchise"));
+            }
+            let similarity = number(score, &format!("{item_path}.similarity"), 0.0, 1.0, false)?;
             if list.last().is_some_and(|prior: &Neighbor| {
                 prior.similarity < similarity
                     || (prior.similarity == similarity && prior.mal_id >= target)
@@ -580,5 +677,5 @@ fn validate_neighbors(value: &Tree, catalog: &Catalog) -> Result<BTreeMap<MalId,
             "source IDs must exactly match catalog IDs",
         ));
     }
-    Ok(neighbors)
+    Ok((neighbors, franchises))
 }

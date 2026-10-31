@@ -54,7 +54,7 @@ async fn deliver(
         .ok_or(DbError::Conflict)?;
     let neighbors = ctx
         .bundle
-        .neighbors(selection.seed_mal_id)
+        .cards(selection.seed_mal_id)
         .ok_or(DbError::Conflict)?;
     let titles = ResponseTitles::resolve(
         &ctx.search,
@@ -405,7 +405,7 @@ pub async fn on_description(
         .ok_or(DbError::Conflict)?;
     let neighbors = ctx
         .bundle
-        .neighbors(selection.seed_mal_id)
+        .cards(selection.seed_mal_id)
         .ok_or(DbError::Conflict)?;
     let index = usize::try_from(position.rank.checked_sub(1).ok_or(DbError::Conflict)?)
         .map_err(|_| DbError::Conflict)?;

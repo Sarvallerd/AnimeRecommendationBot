@@ -7,19 +7,26 @@ use tempfile::TempDir;
 type Mutation = (&'static str, fn(&mut Value));
 
 fn fixture() -> TempDir {
+    copied(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/bundle"
+    ))
+}
+fn fixture_v2() -> TempDir {
+    copied(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/bundle-v2"
+    ))
+}
+fn copied(source: &str) -> TempDir {
     let dir = tempfile::tempdir().unwrap();
     for name in ["manifest.json", "catalog.json", "neighbors.json"] {
-        fs::copy(
-            Path::new(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/tests/fixtures/bundle"
-            ))
-            .join(name),
-            dir.path().join(name),
-        )
-        .unwrap();
+        fs::copy(Path::new(source).join(name), dir.path().join(name)).unwrap();
     }
     dir
+}
+fn ids(neighbors: Option<&[bot::catalog::Neighbor]>) -> Vec<i32> {
+    neighbors.unwrap().iter().map(|n| n.mal_id).collect()
 }
 fn write(dir: &Path, name: &str, text: &str) {
     fs::write(dir.join(name), text).unwrap();
@@ -424,4 +431,100 @@ fn cli_and_bot_startup() {
         "{stderr}"
     );
     assert!(stderr.contains("hash mismatch"), "{stderr}");
+}
+
+#[test]
+fn v2_fixture_exposes_franchises_and_long_neighbor_lists() {
+    let dir = fixture_v2();
+    let bundle = Bundle::load(dir.path()).unwrap();
+    assert_eq!(
+        bundle.identity(),
+        "sha256:95e6bd839abc21308c4e2758ce8579086b00919a10889578f701c782fc707412"
+    );
+    assert_eq!(
+        [1, 10, 11, 2, 99].map(|id| bundle.franchise(id)),
+        [1, 1, 1, 2, 99]
+    );
+    assert_eq!(ids(bundle.neighbors(10)), [12, 2, 3]);
+    assert_eq!(bundle.neighbors(10).unwrap()[0].similarity, 0.9);
+    // A v1 bundle has no franchise map.
+    let v1 = fixture();
+    assert_eq!(Bundle::load(v1.path()).unwrap().franchise(10), 10);
+    // Cards show the first five of up to fifty neighbors.
+    modify(dir.path(), "catalog.json", |v| {
+        for id in ["100", "101", "102"] {
+            v["anime"][id] = v["anime"]["20"].clone();
+        }
+    });
+    modify(dir.path(), "neighbors.json", |v| {
+        for id in ["100", "101", "102"] {
+            v["neighbors"][id] = json!([]);
+        }
+        v["neighbors"]["99"] = json!([
+            [1, 0.9],
+            [2, 0.8],
+            [3, 0.7],
+            [12, 0.6],
+            [20, 0.5],
+            [100, 0.4],
+            [101, 0.3],
+            [102, 0.2]
+        ]);
+    });
+    let bundle = Bundle::load(dir.path()).unwrap();
+    assert_eq!(ids(bundle.neighbors(99)).len(), 8);
+    assert_eq!(ids(bundle.cards(99)), [1, 2, 3, 12, 20]);
+}
+#[test]
+fn v2_neighbor_franchise_and_version_rules() {
+    let neighbors: &[Mutation] = &[
+        ("own franchise", |v| {
+            v["neighbors"]["10"][0] = json!([1, 0.95])
+        }),
+        ("not the first entry", |v| {
+            v["neighbors"]["12"][0] = json!([10, 0.9])
+        }),
+        ("expected [mal_id, similarity]", |v| {
+            v["neighbors"]["1"][0] = json!({"mal_id": 12, "similarity": 0.9})
+        }),
+        ("more than 50 neighbors", |v| {
+            v["neighbors"]["99"] = json!((100..151).map(|id| json!([id, 0.5])).collect::<Vec<_>>())
+        }),
+        ("a first entry is not listed", |v| {
+            v["franchises"]["12"] = json!(12)
+        }),
+        ("first entry is not a first entry", |v| {
+            v["franchises"]["12"] = json!(10)
+        }),
+        ("title missing from catalog", |v| {
+            v["franchises"]["555"] = json!(1)
+        }),
+        ("missing field", |v| {
+            v.as_object_mut().unwrap().remove("franchises");
+        }),
+        ("expected version 2", |v| v["schema_version"] = json!(1)),
+    ];
+    for (expected, change) in neighbors {
+        let dir = fixture_v2();
+        modify(dir.path(), "neighbors.json", change);
+        fails(dir.path(), expected);
+    }
+    let manifests: &[Mutation] = &[
+        ("max_neighbors", |m| {
+            m["algorithm"]["max_neighbors"] = json!(5)
+        }),
+        ("expected version 1 or 2", |m| {
+            m["schema_version"] = json!(3)
+        }),
+        // A v1 manifest does not cover a v2 neighbors file.
+        ("unknown field", |m| {
+            m["schema_version"] = json!(1);
+            m["algorithm"]["max_neighbors"] = json!(5);
+        }),
+    ];
+    for (expected, change) in manifests {
+        let dir = fixture_v2();
+        modify(dir.path(), "manifest.json", change);
+        fails(dir.path(), expected);
+    }
 }

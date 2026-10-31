@@ -26,6 +26,7 @@ BOUNDED_EVALUATION_RECORD = ROOT / "docs/migrations/arb064-bounded-evaluation-v1
 BINARY_PREDICTION_RECORD = ROOT / "docs/migrations/arb065-binary-predictions-v1.json"
 ITEMKNN_RECORD = ROOT / "docs/migrations/arb069-itemknn-bundle-v1.json"
 FRANCHISE_RECORD = ROOT / "docs/migrations/arb069-franchises-v1.json"
+BUNDLE_V2_RECORD = ROOT / "docs/migrations/arb069-bundle-v2-v1.json"
 LEGACY_RECORD_SHA256 = "27dd3f274a4cee02b0d6e7cf43fa9f4fcfbfe755e04d0c43d68d6c319ced5016"
 TRAINING_RECORD_SHA256 = "9a891c85f97340713be41319aeed559285c8cab54363fb8ede1f94ad76dff221"
 LOCK = ROOT / "src/recsys/resources/releases/release_neelagiri_2025_nafiul_2026_v1.json"
@@ -105,13 +106,13 @@ class MigrationRecordTests(unittest.TestCase):
             },
         )
 
-    def test_franchise_migration_changes_the_itemknn_producer_and_pins_current(self) -> None:
-        previous = json.loads(ITEMKNN_RECORD.read_bytes())
-        current = json.loads(FRANCHISE_RECORD.read_bytes())
+    def test_bundle_v2_migration_changes_the_contract_and_pins_current(self) -> None:
+        previous = json.loads(FRANCHISE_RECORD.read_bytes())
+        current = json.loads(BUNDLE_V2_RECORD.read_bytes())
         self.assertEqual(
-            (current["schema_version"], current["kind"]), (1, "arb-itemknn-franchise-migration")
+            (current["schema_version"], current["kind"]), (1, "arb-bundle-v2-migration")
         )
-        self.assertEqual(current["migration_id"], "arb069-franchises-v1")
+        self.assertEqual(current["migration_id"], "arb069-bundle-v2-v1")
         self.assertEqual(
             (current["package_version_from"], current["package_version_to"]),
             (previous["package_version_to"], __version__),
@@ -124,25 +125,87 @@ class MigrationRecordTests(unittest.TestCase):
         self.assertEqual(
             current["previous_migration_sha256"],
             {
-                str(ITEMKNN_RECORD.relative_to(ROOT)): hashlib.sha256(
-                    ITEMKNN_RECORD.read_bytes()
+                str(FRANCHISE_RECORD.relative_to(ROOT)): hashlib.sha256(
+                    FRANCHISE_RECORD.read_bytes()
                 ).hexdigest()
             },
         )
-        for path, hashes in current["changed_producer_source_sha256"].items():
+        changed = current["changed_producer_source_sha256"]
+        self.assertEqual(
+            set(changed),
+            {
+                "src/recsys/__init__.py",
+                "src/recsys/contracts/bundle.py",
+                "src/recsys/release/itemknn.py",
+            },
+        )
+        for path, hashes in changed.items():
             self.assertEqual(set(hashes), {"from", "to"})
             self.assertNotEqual(hashes["from"], hashes["to"])
             self.assertEqual(hashlib.sha256((ROOT / path).read_bytes()).hexdigest(), hashes["to"])
-        self.assertIn("src/recsys/release/itemknn.py", current["changed_producer_source_sha256"])
         self.assertEqual(
             current["preserved_resource_sha256"], previous["preserved_resource_sha256"]
         )
         for path, digest in current["preserved_resource_sha256"].items():
             self.assertEqual(hashlib.sha256((ROOT / path).read_bytes()).hexdigest(), digest)
+        self.assertEqual(
+            current["relations_snapshot"], {"id": RELATIONS_SNAPSHOT, "sha256": RELATIONS_SHA256}
+        )
+        self.assertEqual(current["bundle_contract"]["max_neighbors"], {"1": 5, "2": 50})
+        derived = current["derived_bundle"]
+        self.assertEqual(
+            (derived["algorithm_version"], derived["identity"], derived["max_neighbors"]),
+            (ITEMKNN_ALGORITHM["version"], ITEMKNN_IDENTITY, ITEMKNN_ALGORITHM["max_neighbors"]),
+        )
+        self.assertIs(current["bundle_contract_changed"], True)
+        for flag in ("release_lock_changed", "research_artifacts_changed"):
+            self.assertIs(current[flag], False)
+
+    def test_franchise_migration_changed_the_itemknn_producer(self) -> None:
+        previous = json.loads(ITEMKNN_RECORD.read_bytes())
+        current = json.loads(FRANCHISE_RECORD.read_bytes())
+        later = json.loads(BUNDLE_V2_RECORD.read_bytes())
+        self.assertEqual(
+            (current["schema_version"], current["kind"]), (1, "arb-itemknn-franchise-migration")
+        )
+        self.assertEqual(current["migration_id"], "arb069-franchises-v1")
+        self.assertEqual(
+            (current["package_version_from"], current["package_version_to"]),
+            (previous["package_version_to"], "0.8.0"),
+        )
+        self.assertEqual(current["source_layout"], SOURCE_LAYOUT)
+        self.assertEqual(current["previous_source_inventory"], previous["source_inventory"])
+        self.assertEqual(current["source_inventory"], later["previous_source_inventory"])
+        self.assertEqual(current["added_sources"], [])
+        self.assertEqual(
+            current["previous_migration_sha256"],
+            {
+                str(ITEMKNN_RECORD.relative_to(ROOT)): hashlib.sha256(
+                    ITEMKNN_RECORD.read_bytes()
+                ).hexdigest()
+            },
+        )
+        later_changed = later["changed_producer_source_sha256"]
+        for path, hashes in current["changed_producer_source_sha256"].items():
+            self.assertEqual(set(hashes), {"from", "to"})
+            self.assertNotEqual(hashes["from"], hashes["to"])
+            expected = (
+                later_changed[path]["from"]
+                if path in later_changed
+                else hashlib.sha256((ROOT / path).read_bytes()).hexdigest()
+            )
+            self.assertEqual(hashes["to"], expected)
+        self.assertIn("src/recsys/release/itemknn.py", current["changed_producer_source_sha256"])
+        self.assertEqual(
+            current["preserved_resource_sha256"], previous["preserved_resource_sha256"]
+        )
         derived = current["derived_bundle"]
         self.assertEqual(
             (derived["algorithm_version"], derived["identity"]),
-            (ITEMKNN_ALGORITHM["version"], ITEMKNN_IDENTITY),
+            (
+                "arb069-v2",
+                "sha256:6eec1413efcfdb129cbb51618917972efd01392ba815534e81bbe5fb5336cbf2",
+            ),
         )
         self.assertEqual(
             current["relations_snapshot"], {"id": RELATIONS_SNAPSHOT, "sha256": RELATIONS_SHA256}
@@ -182,7 +245,11 @@ class MigrationRecordTests(unittest.TestCase):
                 ).hexdigest()
             },
         )
-        later_changed = later["changed_producer_source_sha256"]
+        # A later migration that changed the file again starts from this one's result.
+        later_changes = [
+            json.loads(record.read_bytes())["changed_producer_source_sha256"]
+            for record in (FRANCHISE_RECORD, BUNDLE_V2_RECORD)
+        ]
         produced = current["changed_producer_source_sha256"] | {
             path: {"from": "", "to": digest}
             for path, digest in current["new_source_sha256"].items()
@@ -190,10 +257,9 @@ class MigrationRecordTests(unittest.TestCase):
         for path, hashes in produced.items():
             self.assertEqual(set(hashes), {"from", "to"})
             self.assertNotEqual(hashes["from"], hashes["to"])
-            expected = (
-                later_changed[path]["from"]
-                if path in later_changed
-                else hashlib.sha256((ROOT / path).read_bytes()).hexdigest()
+            expected = next(
+                (changes[path]["from"] for changes in later_changes if path in changes),
+                hashlib.sha256((ROOT / path).read_bytes()).hexdigest(),
             )
             self.assertEqual(hashes["to"], expected)
         self.assertEqual(len(current["preserved_resource_sha256"]), 14)

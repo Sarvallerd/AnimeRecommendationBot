@@ -1,4 +1,4 @@
-"""Acceptance checks for the v1 recommendation bundle contract."""
+"""Acceptance checks for the v1 and v2 recommendation bundle contracts."""
 
 import copy
 import hashlib
@@ -14,6 +14,7 @@ from typing import Callable, cast
 from contracts.check_bundle import ContractError, check_bundle
 
 FIXTURE = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "bundle"
+FIXTURE_V2 = FIXTURE.with_name("bundle-v2")
 
 
 def _object(value: object) -> dict[str, object]:
@@ -267,6 +268,88 @@ class BundleContractTests(unittest.TestCase):
         self.change("manifest.json", lambda x: _object(x["algorithm"]).update(version="2"))
         changed_version, _ = check_bundle(self.bundle)
         self.assertNotEqual(changed_provenance, changed_version)
+
+
+class BundleV2ContractTests(unittest.TestCase):
+    """Version 2: up to 50 [mal_id, similarity] pairs per title and a franchise map."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.bundle = Path(self.temp.name)
+        for name in ("catalog.json", "neighbors.json", "manifest.json"):
+            shutil.copyfile(FIXTURE_V2 / name, self.bundle / name)
+
+    def write(self, name: str, value: object) -> None:
+        (self.bundle / name).write_bytes(encode(value))
+        manifest = _object(json.loads((self.bundle / "manifest.json").read_text(encoding="utf-8")))
+        for file in ("catalog.json", "neighbors.json"):
+            _file(manifest, file)["sha256"] = hashlib.sha256(
+                (self.bundle / file).read_bytes()
+            ).hexdigest()
+        (self.bundle / "manifest.json").write_bytes(encode(manifest))
+
+    def fixture(self, name: str, root: Path = FIXTURE_V2) -> dict[str, object]:
+        return _object(json.loads((root / name).read_text(encoding="utf-8")))
+
+    def rejected(self, fragment: str) -> None:
+        with self.assertRaises(ContractError) as context:
+            check_bundle(self.bundle)
+        self.assertIn(fragment, str(context.exception))
+
+    def test_fixture_is_valid_and_differs_from_v1(self) -> None:
+        identity, count = check_bundle(self.bundle)
+        self.assertEqual(count, 8)
+        self.assertNotEqual(identity, check_bundle(FIXTURE)[0])
+
+    def test_neighbor_and_franchise_rules(self) -> None:
+        def items(value: dict[str, object], mal_id: str) -> list[object]:
+            return _neighbor_items(value, mal_id)
+
+        def franchises(value: dict[str, object]) -> dict[str, object]:
+            return _object(value["franchises"])
+
+        many = [[mal_id, 0.5] for mal_id in range(100, 151)]
+        mutations: list[tuple[Callable[[dict[str, object]], object], str]] = [
+            (lambda x: x.pop("franchises"), "fields differ"),
+            (lambda x: items(x, "1").append({"mal_id": 20, "similarity": 0.1}), "[mal_id, score]"),
+            (lambda x: items(x, "1").append([20]), "[mal_id, score]"),
+            (lambda x: items(x, "99").extend(copy.deepcopy(many)), "at most 50"),
+            (lambda x: items(x, "12").__setitem__(0, [10, 0.9]), "not the first entry"),
+            (lambda x: items(x, "10").insert(0, [1, 0.95]), "own franchise"),
+            (lambda x: items(x, "1").__setitem__(0, [1, 0.9]), "self-neighbor"),
+            (lambda x: items(x, "1").reverse(), "sorted"),
+            (lambda x: items(x, "1").__setitem__(0, [12, 0]), "similarity"),
+            (lambda x: franchises(x).update({"12": 12}), "first entry is not listed"),
+            (lambda x: franchises(x).update({"12": 10}), "not a first entry"),
+            (lambda x: franchises(x).update({"555": 1}), "missing from catalog"),
+            (lambda x: franchises(x).update({"12": 555}), "missing from catalog"),
+            (lambda x: franchises(x).update({"12": "1"}), "expected integer"),
+        ]
+        for mutate, message in mutations:
+            with self.subTest(message=message):
+                value = copy.deepcopy(self.fixture("neighbors.json"))
+                mutate(value)
+                self.write("neighbors.json", value)
+                self.rejected(message)
+
+    def test_versions_and_limits_must_match(self) -> None:
+        manifest = self.fixture("manifest.json")
+        _object(manifest["algorithm"])["max_neighbors"] = 5
+        self.write("manifest.json", manifest)
+        self.rejected("max_neighbors")
+        # A v1 neighbors file under a v2 manifest, and the reverse, are both rejected.
+        self.write("manifest.json", self.fixture("manifest.json"))
+        self.write("neighbors.json", self.fixture("neighbors.json", FIXTURE))
+        self.rejected("fields differ")
+        v1_manifest = self.fixture("manifest.json", FIXTURE)
+        (self.bundle / "manifest.json").write_bytes(encode(v1_manifest))
+        self.write("neighbors.json", self.fixture("neighbors.json"))
+        self.rejected("fields differ")
+        manifest = self.fixture("manifest.json")
+        manifest["schema_version"] = 3
+        self.write("manifest.json", manifest)
+        self.rejected("schema_version")
 
 
 if __name__ == "__main__":

@@ -1,12 +1,22 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://anime-recommendation-bot.local/contracts/manifest.schema.json",
-  "title": "Anime recommendation bundle manifest v1",
+  "title": "Anime recommendation bundle manifest v1 and v2",
   "type": "object",
   "required": ["schema_version", "algorithm", "sources", "files"],
   "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {"properties": {"schema_version": {"const": 1}}},
+      "then": {"properties": {"algorithm": {"properties": {"max_neighbors": {"const": 5}}}}}
+    },
+    {
+      "if": {"properties": {"schema_version": {"const": 2}}},
+      "then": {"properties": {"algorithm": {"properties": {"max_neighbors": {"const": 50}}}}}
+    }
+  ],
   "properties": {
-    "schema_version": {"const": 1, "type": "integer"},
+    "schema_version": {"enum": [1, 2], "type": "integer"},
     "algorithm": {
       "type": "object",
       "required": ["name", "version", "max_neighbors", "similarity", "parameters"],
@@ -14,7 +24,7 @@
       "properties": {
         "name": {"enum": ["glove-mean-cosine", "itemknn-shrunk-cosine"]},
         "version": {"$ref": "#/$defs/nonblank"},
-        "max_neighbors": {"const": 5, "type": "integer"},
+        "max_neighbors": {"enum": [5, 50], "type": "integer"},
         "similarity": {"const": "cosine"},
         "parameters": {"type": "object"}
       }

@@ -72,10 +72,12 @@ jobs:
         run: python3 deploy/tests/level1-acceptance.py --scope dialogue
       - name: Compare bundle contract checkers
         run: |
-          python contracts/check_bundle.py tests/fixtures/bundle > "$RUNNER_TEMP/python-bundle.txt"
-          cargo +1.95.0 run --quiet --locked --bin check_bundle -- tests/fixtures/bundle > "$RUNNER_TEMP/rust-bundle.txt"
-          diff -u "$RUNNER_TEMP/python-bundle.txt" "$RUNNER_TEMP/rust-bundle.txt"
-          cat "$RUNNER_TEMP/python-bundle.txt"
+          for fixture in tests/fixtures/bundle tests/fixtures/bundle-v2; do
+            python contracts/check_bundle.py "$fixture" > "$RUNNER_TEMP/python-bundle.txt"
+            cargo +1.95.0 run --quiet --locked --bin check_bundle -- "$fixture" > "$RUNNER_TEMP/rust-bundle.txt"
+            diff -u "$RUNNER_TEMP/python-bundle.txt" "$RUNNER_TEMP/rust-bundle.txt"
+            cat "$RUNNER_TEMP/python-bundle.txt"
+          done
 
   python:
     runs-on: ubuntu-24.04
@@ -119,6 +121,7 @@ jobs:
       - name: Test bundle contract
         run: |
           python contracts/check_bundle.py tests/fixtures/bundle
+          python contracts/check_bundle.py tests/fixtures/bundle-v2
           python -m unittest discover -s contracts -p 'test_*.py' -v
       - name: Test private acceptance evidence
         run: |
